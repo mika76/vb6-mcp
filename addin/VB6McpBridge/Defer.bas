@@ -23,12 +23,14 @@ Public Sub Enqueue(ByVal action As String)
     PostMessage ListenerHwnd(), WM_DEFER, 0, 0
 End Sub
 
-' Called from the listener's window procedure on WM_DEFER: runs every queued action.
+' Called from the listener's window procedure on WM_DEFER: runs ONE queued action. Each Enqueue
+' posts one WM_DEFER, so actions keep their place among other posted messages: KEYS relies on a
+' KEYSTATE action running between the key messages it posted (Phase 3).
 Public Sub RunQueued()
     Dim action As String, f() As String
     On Error GoTo Fail
-    Do While Not m_queue Is Nothing
-        If m_queue.Count = 0 Then Exit Do
+    If Not m_queue Is Nothing Then
+        If m_queue.Count = 0 Then Exit Sub
         action = m_queue(1)
         m_queue.Remove 1
         f = Split(action, US())
@@ -42,8 +44,13 @@ Public Sub RunQueued()
         Case "IMM": TypeImmediate CLng("&H" & f(1)), f(2)
         Case "APPTEXT": SetWindowText CLng("&H" & f(1)), f(2)
         Case "SNAP": CaptureWindow CLng("&H" & f(1)), f(2)
+        Case "KEYSTATE": SetModifierState CLng(f(1))
+        Case "KEYSCONT": PostKeys CLng("&H" & f(1)), f(3), CLng(f(2))
+        Case "SELECT": SelectItem CLng("&H" & f(1)), CLng(f(2))
+        Case "MOUSEREAL": DeferredRealMouse CLng("&H" & f(1)), f(2), CLng(f(3)), CLng(f(4)), CLng(f(5)), CLng(f(6))
+        Case "KEYSREAL": DeferredRealKeys CLng("&H" & f(1)), f(2)
         End Select
-    Loop
+    End If
     Exit Sub
 Fail:
     LogLine "deferred error " & Err.Number & ": " & Err.Description

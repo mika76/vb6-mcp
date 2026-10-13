@@ -60,7 +60,7 @@ public static class DebugToolsTests
         public IReadOnlyList<Tool> Tools() => new IdeTools(new Env(this)) { CommandWait = TimeSpan.FromSeconds(2) }.All();
         public void Dispose() => Addin.Dispose();
 
-        sealed class Env(FakeDebugIde ide) : IIdeEnvironment
+        public sealed class Env(FakeDebugIde ide) : IIdeEnvironment
         {
             public DiscoveryResult Scan() => new([ide.Addin.Instance], [], []);
             public int DeleteStale(DiscoveryResult result) => 0;
@@ -155,5 +155,34 @@ public static class DebugToolsTests
         var neg = new DialogInfo(1, "x", ["Run-time error '-2147217900':", "Automation error"], []);
         Assert.True(IdeTools.RuntimeError(neg) == (-2147217900, "Automation error"), IdeTools.RuntimeError(neg)?.ToString() ?? "null");
         Assert.True(IdeTools.RuntimeError(new DialogInfo(1, "x", ["Compile error:", "Variable not defined"], [])) is null);
+    }
+
+    [Test]
+    public static async Task WaitSeesModeOrTimesOut()
+    {
+        using var ide = new FakeDebugIde(IdeMode.Break);
+        var tools = ide.Tools();
+        var met = await Call(tools, "app_wait", new JsonObject { ["mode"] = "break", ["timeout"] = 2 });
+        Assert.True(!met.IsError && met.Text.Contains("\"met\":true"), met.Text);
+        var not = await Call(tools, "app_wait", new JsonObject { ["mode"] = "design", ["timeout"] = 1 });
+        Assert.True(!not.IsError && not.Text.Contains("\"met\":false"), not.Text);
+        var bad = await Call(tools, "app_wait", new JsonObject { ["timeout"] = 1 });
+        Assert.True(bad.IsError, bad.Text);
+        var keys = await Call(tools, "app_keys", new JsonObject { ["keys"] = "{BOGUS}" });
+        Assert.True(keys.IsError && keys.Text.Contains("run mode") || keys.Text.Contains("break mode"), keys.Text);
+    }
+
+    [Test]
+    public static async Task ExeRunChecksRootsAndExeTargetsMustBeOurs()
+    {
+        using var ide = new FakeDebugIde(IdeMode.Run);
+        var none = new IdeTools(new FakeDebugIde.Env(ide)).All();
+        var r = await Call(none, "exe_run", new JsonObject { ["path"] = @"C:\Windows\notepad.exe" });
+        Assert.True(r.IsError && r.Text.Contains("no workspace roots"), r.Text);
+        var rooted = new IdeTools(new FakeDebugIde.Env(ide)) { Roots = [@"D:\nowhere"] }.All();
+        r = await Call(rooted, "exe_run", new JsonObject { ["path"] = @"C:\Windows\notepad.exe" });
+        Assert.True(r.IsError && r.Text.Contains("isn't under the workspace roots"), r.Text);
+        r = await Call(rooted, "app_click", new JsonObject { ["exe"] = Environment.ProcessId, ["text"] = "OK" });
+        Assert.True(r.IsError && r.Text.Contains("wasn't started with exe_run"), r.Text);
     }
 }

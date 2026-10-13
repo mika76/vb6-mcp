@@ -238,7 +238,7 @@ The messages are posted, so event code runs later from the message loop (hard ru
 
 Verified live: a drag in a PictureBox (exact `MouseDown`/`MouseUp` coordinates), a double-click in a ListBox, and scrolling. **A Label or Image never raises `Click` from posted (or sent) messages** (spike 17); use `MOUSEREAL`. Not yet verified: VB's drag-and-drop (`DragMode`, OLE drag).
 
-### `MOUSEREAL <hwnd> <action> <x> <y> [<x2> <y2>]`, `MOUSERESTORE`
+### `MOUSEREAL <hwnd> <action> <x> <y> [<x2> <y2>]` (deferred), `MOUSERESTORE`
 
 Real mouse input with `SendInput`, for windowless controls (spike 17). Actions: `click`, `dblclick`, `rclick`, `drag` (with `x2 y2`). Coordinates are client coordinates of `<hwnd>`, which must belong to the IDE's own process.
 
@@ -248,10 +248,32 @@ Real mouse input with `SendInput`, for windowless controls (spike 17). Actions: 
 3. Refuses (409) if the form couldn't be brought to the front, or if `WindowFromPoint` at the point isn't a window of this process (hard rule 8).
 4. Sends one `SendInput` batch with absolute moves on the virtual desktop and the button events.
 
-Payload: `sent`. 409 also when `SendInput` sent fewer events than asked.
+`MOUSEREAL` is **deferred**: bringing the form to the front activates it, which raises its `Activate` event, and that is user code (hard rule 14). The request validates its arguments and answers `QUEUED`, `queued`. The steps above run from `WM_DEFER`.
 
-`MOUSERESTORE` puts the cursor and the saved foreground window back. Payload: `restored`. The server always calls it about 400 ms after `MOUSEREAL`, even when `MOUSEREAL` failed: VB processes the input only after the request returns, and the add-in never waits (hard rule 5).
+`MOUSERESTORE` puts the cursor and the saved foreground window back. Payload: `restored US outcome`. The outcome is that of the last deferred `MOUSEREAL`/`KEYSREAL`: `sent`, the reason it refused (front window, covered point, short `SendInput` count), or `not run`. The server always calls it about 500 ms after `MOUSEREAL`/`KEYSREAL`: VB processes the input only after the request returns, and the add-in never waits (hard rule 5).
 
+### `LISTSTATE <hwnd>`, `SELECT <hwnd> <index>` (deferred)
+
+`LISTSTATE` reads a list box or combo box of the IDE process in-process (UIPI blocks `LB_*`/`CB_*` from the server). Payload: `kind US count US selected US items`, where `kind` is `list` or `combo`, `selected` is -1 for none, and the items are separated by RS.
+
+`SELECT` sets the selection (`LB_SETCURSEL` / `CB_SETCURSEL`). It then sends the parent `WM_COMMAND` with `LBN_SELCHANGE` / `CBN_SELCHANGE`, which is what a user's click produces and where VB raises `Click`. It is deferred because that is user code. Payload: `QUEUED`, `select <index>`; 400 for an index out of range. The server reads `LISTSTATE` again to verify. Multi-select list boxes aren't handled.
+
+### `KEYS <hwnd> <events>`, `KEYSREAL <hwnd> <events>` (deferred)
+
+Key events for a window of the IDE process; `hwnd` 0 means the program's focused control (`GetFocus`, which works because the program runs on the IDE thread). `events` is a list of tokens separated by `;` (at most 500), built by the server from the `app_keys` syntax (`KeySyntax`):
+
+| Token | Meaning |
+|-------|---------|
+| `S<0-7>` | modifier state: 1 Shift, 2 Ctrl, 4 Alt |
+| `D<vk>` / `U<vk>` | key down / up (virtual key 1-254) |
+| `C<1-255>` | a Windows-1252 character |
+
+- **`KEYS` posts:** `C` becomes `WM_CHAR`; `D`/`U` become `WM_KEYDOWN`/`WM_KEYUP` (`WM_SYSKEY*` while Alt is held), with scan code and extended-key flag in `lParam`. VB's own `TranslateMessage` produces the `WM_CHAR` of keys like Enter. Posted messages don't change the key state, so each `S` is **queued as a deferred `KEYSTATE` action** between the posted messages. It sets Shift/Ctrl/Alt in the IDE thread's key state with `SetKeyboardState`, so the program sees the modifiers (`GetKeyState`, the `Shift` argument of `KeyDown`). This needs the queue to run **one action per `WM_DEFER`**, so actions keep their place among posted messages.
+  - **After each key down, the rest of the sequence is queued as a deferred `KEYSCONT`.** VB's loop runs `TranslateMessage` on the key down, and the `WM_CHAR` it makes (Backspace, Enter, Ctrl+letter) goes to the end of the queue, behind characters posted earlier. In the live test, "ab{BACKSPACE}c" gave "ab": the late Backspace removed the "c". The continuation runs after the key down was processed, so it posts behind the generated character.
+  - Payload: `keys <n> US hwnd`.
+- **`KEYSREAL`** is deferred, because focusing the control raises `GotFocus`/`LostFocus`. It brings the form to the front, focuses the control, and sends one `SendInput` batch: modifiers as key presses, characters as Unicode. It never leaves a modifier held down. Payload: `QUEUED`, `queued US hwnd`; the outcome comes back through `MOUSERESTORE`.
+
+Errors (400): a bad token, not a window of this process. 409: no focused control.
 ### `SCROLLPOS <hwnd>`
 
 Range and position of a scroll bar control of the IDE process: `min US max US pos` (`GetScrollRange(SB_CTL)`, `SBM_GETPOS`). It is read in-process because UIPI blocks `SBM_*` messages from the non-elevated server (spike 17).
@@ -293,4 +315,4 @@ Breaking changes bump the magic (`VB6MCP2`) and the discovery `protocol` field. 
 ## Change log
 
 - **v1** (2026-10-13): initial version (Phase 1).
-- v1, 2026-10-13: added `APPCLICK`, `APPTEXT`, `SNAP`, `MOUSE`, `SCROLL`, `SCROLLPOS`, `MOUSEREAL`, `MOUSERESTORE` (Phase 3), `CALLSTACK`, `LISTITEMS` (Phase 2). New verbs only: older servers never send them, and a new server talking to an older add-in gets 400 "unknown verb".
+- v1, 2026-10-13: added `APPCLICK`, `APPTEXT`, `SNAP`, `MOUSE`, `SCROLL`, `SCROLLPOS`, `MOUSEREAL`, `MOUSERESTORE` (Phase 3), `CALLSTACK`, `LISTITEMS` (Phase 2), `LISTSTATE`, `SELECT`, `KEYS`, `KEYSREAL` (Phase 3). `MOUSEREAL` became deferred (`QUEUED`) and `MOUSERESTORE` returns the outcome. Deferred actions run one per `WM_DEFER`. New verbs only: older servers never send them, and a new server talking to an older add-in gets 400 "unknown verb".

@@ -40,8 +40,12 @@ Public Function Dispatch(ByVal verb As String, args() As String) As String
     Case "SCROLLPOS":  NeedArgs args, 1, 1: payload = AppScrollPos(args(0))
     Case "CALLSTACK":  NeedArgs args, 0, 0: Dispatch = QueueCallStack(): Exit Function
     Case "LISTITEMS":  NeedArgs args, 1, 1: payload = ListItems(args(0))
-    Case "MOUSEREAL":  NeedArgs args, 4, 6: payload = AppMouseReal(args)
-    Case "MOUSERESTORE": NeedArgs args, 0, 0: RestoreRealMouse: payload = "restored"
+    Case "LISTSTATE":  NeedArgs args, 1, 1: payload = AppListState(args(0))
+    Case "SELECT":     NeedArgs args, 2, 2: Dispatch = QueueSelect(args(0), args(1)): Exit Function
+    Case "KEYS":       NeedArgs args, 2, 2: payload = AppKeys(args(0), args(1), False)
+    Case "KEYSREAL":   NeedArgs args, 2, 2: Dispatch = "QUEUED" & US() & AppKeys(args(0), args(1), True): Exit Function
+    Case "MOUSEREAL":  NeedArgs args, 4, 6: Dispatch = "QUEUED" & US() & AppMouseReal(args): Exit Function
+    Case "MOUSERESTORE": NeedArgs args, 0, 0: payload = "restored" & US() & RestoreRealMouse()
     Case Else:         Err.Raise E_BADREQUEST, , "unknown verb " & verb
     End Select
     Dispatch = "OK" & US() & payload
@@ -445,7 +449,7 @@ End Function
 ' args as MOUSE (click|dblclick|rclick|drag) -> "sent". Real input with SendInput (spike 17):
 ' brings the form to the front and moves the cursor; the server always follows with MOUSERESTORE.
 Private Function AppMouseReal(args() As String) As String
-    Dim h As Long, action As String, i As Long, n(3) As Long, why As String
+    Dim h As Long, action As String, i As Long, n(3) As Long
     h = HexToLong(args(0))
     If OwnWindowClass(h) = "" Then Err.Raise E_BADREQUEST, , "window " & args(0) & " doesn't belong to this IDE process"
     action = LCase$(args(1))
@@ -459,9 +463,10 @@ Private Function AppMouseReal(args() As String) As String
         If n(i - 2) < -32768 Or n(i - 2) > 32767 Then Err.Raise E_BADREQUEST, , "coordinate out of range"
     Next
     If action = "drag" And UBound(args) < 5 Then Err.Raise E_BADREQUEST, , "drag needs x2 and y2"
-    why = RealMouse(h, action, n(0), n(1), n(2), n(3))
-    If why <> "" Then Err.Raise E_CONFLICT, , why
-    AppMouseReal = "sent"
+    ' Deferred (hard rule 14): bringing the form to the front activates it, which raises its
+    ' Activate event (user code). The outcome is returned by MOUSERESTORE.
+    Enqueue "MOUSEREAL" & US() & Hex$(h) & US() & action & US() & n(0) & US() & n(1) & US() & n(2) & US() & n(3)
+    AppMouseReal = "queued"
 End Function
 
 ' -> QUEUED. Opens View > Call Stack (a modal dialog, so deferred; the server reads it with LISTITEMS
@@ -482,6 +487,61 @@ Private Function ListItems(ByVal hexHwnd As String) As String
     If InStr(1, cls, "ListBox", vbTextCompare) = 0 Then Err.Raise E_BADREQUEST, , "window " & hexHwnd & " is a " & cls & ", not a list box"
     ListItems = ListBoxItems(h)
 
+End Function
+
+' args: hwnd of a list box or combo box of this process -> kind US count US selected US items (RS).
+Private Function AppListState(ByVal hexHwnd As String) As String
+    Dim h As Long, cls As String
+    h = HexToLong(hexHwnd)
+    cls = OwnWindowClass(h)
+    If cls = "" Then Err.Raise E_BADREQUEST, , "window " & hexHwnd & " doesn't belong to this IDE process"
+    If InStr(1, cls, "ListBox", vbTextCompare) = 0 And InStr(1, cls, "ComboBox", vbTextCompare) = 0 Then Err.Raise E_BADREQUEST, , "window " & hexHwnd & " is a " & cls & ", not a list box or combo box"
+    AppListState = ListState(h, InStr(1, cls, "ComboBox", vbTextCompare) > 0)
+End Function
+
+' args: hwnd, index -> QUEUED. Deferred: the selection raises the control's Click (user code).
+Private Function QueueSelect(ByVal hexHwnd As String, ByVal indexText As String) As String
+    Dim h As Long, cls As String, n As Long, isCombo As Boolean
+    h = HexToLong(hexHwnd)
+    cls = OwnWindowClass(h)
+    If cls = "" Then Err.Raise E_BADREQUEST, , "window " & hexHwnd & " doesn't belong to this IDE process"
+    isCombo = (InStr(1, cls, "ComboBox", vbTextCompare) > 0)
+    If Not isCombo And InStr(1, cls, "ListBox", vbTextCompare) = 0 Then Err.Raise E_BADREQUEST, , "window " & hexHwnd & " is a " & cls & ", not a list box or combo box"
+    If Not IsNumeric(indexText) Then Err.Raise E_BADREQUEST, , "index must be a number"
+    n = CLng(Split(ListState(h, isCombo), US())(1))
+    If CLng(indexText) < 0 Or CLng(indexText) >= n Then Err.Raise E_BADREQUEST, , "index " & indexText & " is out of range (" & n & " items)"
+    Enqueue "SELECT" & US() & hexHwnd & US() & CLng(indexText)
+    QueueSelect = "QUEUED" & US() & "select " & indexText
+End Function
+
+' args: hwnd (or 0 = the program's focused control), events -> "keys N" / "sent". Windows of this
+' process only (hard rule 8). Events: S<0-7>, D<vk>, U<vk>, C<1-255> separated by ";" (PostKeys).
+Private Function AppKeys(ByVal hexHwnd As String, ByVal events As String, ByVal realInput As Boolean) As String
+    Dim h As Long, tok() As String, i As Long, kind As String, v As String
+    h = HexToLong(hexHwnd)
+    If h = 0 Then h = FocusedWindow()
+    If h = 0 Then Err.Raise E_CONFLICT, , "no control of the program has the focus; pass the control (from app_tree)"
+    If OwnWindowClass(h) = "" Then Err.Raise E_BADREQUEST, , "window " & Hex$(h) & " doesn't belong to this IDE process"
+    tok = Split(events, ";")
+    If UBound(tok) > 500 Then Err.Raise E_BADREQUEST, , "too many key events (at most 500)"
+    For i = 0 To UBound(tok)
+        kind = Left$(tok(i), 1): v = Mid$(tok(i), 2)
+        If Len(v) = 0 Or Len(v) > 3 Or Not IsNumeric(v) Or InStr(v, ".") > 0 Or InStr(v, "-") > 0 Then Err.Raise E_BADREQUEST, , "bad key event '" & tok(i) & "'"
+        Select Case kind
+        Case "S": If CLng(v) > 7 Then Err.Raise E_BADREQUEST, , "bad modifier set '" & tok(i) & "'"
+        Case "D", "U": If CLng(v) < 1 Or CLng(v) > 254 Then Err.Raise E_BADREQUEST, , "bad virtual key '" & tok(i) & "'"
+        Case "C": If CLng(v) < 1 Or CLng(v) > 255 Then Err.Raise E_BADREQUEST, , "bad character '" & tok(i) & "'"
+        Case Else: Err.Raise E_BADREQUEST, , "bad key event '" & tok(i) & "'"
+        End Select
+    Next
+    If realInput Then
+        ' Deferred (hard rule 14): focusing the control raises GotFocus/LostFocus (user code)
+        Enqueue "KEYSREAL" & US() & Hex$(h) & US() & events
+        AppKeys = "queued" & US() & Hex$(h)
+    Else
+        PostKeys h, events
+        AppKeys = "keys " & (UBound(tok) + 1) & US() & Hex$(h)
+    End If
 End Function
 
 Private Function HexToLong(ByVal hexText As String) As Long

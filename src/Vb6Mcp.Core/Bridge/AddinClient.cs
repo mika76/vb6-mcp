@@ -245,8 +245,40 @@ public sealed class AddinClient(InstanceInfo instance, TimeSpan? timeout = null)
         return SendAsync("MOUSEREAL", [.. args]);
     }
 
-    /// <summary>Puts the cursor and the previously active window back after <see cref="MouseRealAsync"/>.</summary>
-    public Task MouseRestoreAsync() => SendAsync("MOUSERESTORE");
+    /// <summary>
+    /// Puts the cursor and the previously active window back after real input, and returns the outcome
+    /// of the deferred MOUSEREAL/KEYSREAL: "sent", the reason it refused, or "not run".
+    /// </summary>
+    public async Task<string> MouseRestoreAsync()
+    {
+        var f = (await SendAsync("MOUSERESTORE").ConfigureAwait(false)).Split(Wire.US);
+        return f.Length > 1 ? f[1] : "sent";       // an older add-in answers just "restored"
+    }
+
+    /// <summary>
+    /// Key events to a control of the IDE process (0 = the program's focused control); see
+    /// <see cref="KeySyntax"/>. Posted, or with <paramref name="realInput"/> queued as real input
+    /// (outcome from <see cref="MouseRestoreAsync"/>). Returns the window that got them.
+    /// </summary>
+    public async Task<long> KeysAsync(long hwnd, string events, bool realInput)
+    {
+        var f = (await SendAsync(realInput ? "KEYSREAL" : "KEYS", hwnd.ToString("X", CultureInfo.InvariantCulture), events).ConfigureAwait(false)).Split(Wire.US);
+        return f.Length > 1 ? long.Parse(f[1], NumberStyles.HexNumber, CultureInfo.InvariantCulture) : hwnd;
+    }
+
+    /// <summary>A list box or combo box: kind ("list"/"combo"), items, selected index (-1 none).</summary>
+    public async Task<(string Kind, IReadOnlyList<string> Items, int Selected)> ListStateAsync(long hwnd)
+    {
+        var f = Wire.Fields(await SendAsync("LISTSTATE", hwnd.ToString("X", CultureInfo.InvariantCulture)).ConfigureAwait(false), 4);
+        return (f[0], f[3].Length == 0 && Int(f[1]) == 0 ? [] : f[3].Split(Wire.RS), Int(f[2]));
+    }
+
+    /// <summary>Queues selecting an item (deferred: raises the control's Click).</summary>
+    public async Task SelectAsync(long hwnd, int index)
+    {
+        var r = await SendRawAsync("SELECT", [hwnd.ToString("X", CultureInfo.InvariantCulture), index.ToString(CultureInfo.InvariantCulture)]).ConfigureAwait(false);
+        if (r.Status == ResponseStatus.Error) throw new AddinErrorException(r.ErrorCode, r.ErrorMessage);
+    }
 
     /// <summary>Range and position of a scroll bar control (read by the add-in: UIPI blocks SBM_* messages from the server).</summary>
     public async Task<(int Min, int Max, int Pos)> ScrollPosAsync(long hwnd)

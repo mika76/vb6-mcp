@@ -9,6 +9,14 @@ Begin VB.Form frmUi
    ScaleHeight     =   4800
    ScaleWidth      =   7200
    StartUpPosition =   3  'Windows Default
+   Begin VB.ComboBox cboColor 
+      Height          =   315
+      Left            =   4560
+      Style           =   2  'Dropdown List
+      TabIndex        =   8
+      Top             =   240
+      Width           =   2295
+   End
    Begin VB.TextBox txtName 
       Height          =   375
       Left            =   240
@@ -94,6 +102,7 @@ Private Sub Form_Load()
     For i = 1 To 50
         lstItems.AddItem "Item " & i
     Next
+    cboColor.AddItem "Red": cboColor.AddItem "Green": cboColor.AddItem "Blue"
 End Sub
 
 Private Sub txtName_Change()
@@ -137,4 +146,13 @@ End Sub
 Private Sub picDraw_MouseUp(Button As Integer, Shift As Integer, X As Single, Y As Single)
     m_dragging = False
     lblStatus.Caption = "Drag from (" & m_dragX & "," & m_dragY & ") to (" & X & "," & Y & ")"
+End Sub
+
+Private Sub cboColor_Click()
+    lblStatus.Caption = "Color: " & cboColor.Text
+End Sub
+
+' Key code and Shift state in the form caption (readable with app_windows): shows whether modifiers arrive
+Private Sub txtName_KeyDown(KeyCode As Integer, Shift As Integer)
+    Me.Caption = "UI fixture - KeyDown " & KeyCode & " shift " & Shift
 End Sub

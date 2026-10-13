@@ -29,7 +29,7 @@ public static class Program
         var roots = (Environment.GetEnvironmentVariable("VB6MCP_ROOTS") ?? "")
             .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         var env = new IdeEnvironment();
-        var tools = new IdeTools(env).All().Concat(new WorkspaceTools(env, roots).All()).ToList();
+        var tools = new IdeTools(env) { Roots = roots }.All().Concat(new WorkspaceTools(env, roots).All()).ToList();
         log.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} vb6mcp {McpServer.ServerVersion} started, pid {Environment.ProcessId}, {tools.Count} tools, roots: {(roots.Length == 0 ? "(none)" : string.Join("; ", roots))}");
         await new McpServer(stdin, stdout, log, tools).RunAsync();
         return 0;

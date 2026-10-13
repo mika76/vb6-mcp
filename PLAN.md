@@ -274,7 +274,7 @@ Built and verified live: `run_start/break/continue/end`, `step_into/over/out`, `
 Watchdog mode, heartbeat, health states, `ide_break`, dialog response while blocked, `ide_kill(force)`, recovery store + `recovery_*`. Comes right after debugging, because debugging is what produces hangs.
 
 ### Phase 3: App UI automation — **first round built** (2026-10-13)
-Built: `app_windows`, `app_tree`, `app_click`, `app_set_text`, `app_mouse` (posted by default, `real_input` for windowless controls), `app_scroll`, `app_screenshot` (MCP image; add-in capture for an elevated IDE), audit log. Verified live on `tests/fixtures/Ui`: text + `Change`, check box, ListBox double-click and scroll, scroll bar, PictureBox drag with exact coordinates, screenshots. **Still open:** `app_keys`, `app_select`, `app_wait`, `exe_run`, OLE drag-and-drop.
+Built: `app_windows`, `app_tree`, `app_click`, `app_set_text`, `app_mouse` (posted by default, `real_input` for windowless controls), `app_scroll`, `app_screenshot` (MCP image; add-in capture for an elevated IDE), audit log. Verified live on `tests/fixtures/Ui`: text + `Change`, check box, ListBox double-click and scroll, scroll bar, PictureBox drag with exact coordinates, screenshots. Second round (2026-10-14): `app_select`, `app_keys` (posted, with deferred modifier state and continuation after each key down; or real input), `app_wait`, `exe_run`/`exe_end` with `exe` on every `app_*` tool (compiled programs, input from the server). **Still open:** OLE drag-and-drop, DBWIN capture for compiled programs.
 
 ### Phase 4: Builds, sync, shared source
 Elevated `/make` + log parsing, `build_in_ide`, shadow builds; sync engine + reload policy + conflicts/merge; `ws_affected` rebuild order; Claude Code hook.

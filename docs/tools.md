@@ -346,9 +346,40 @@ Drive the program being debugged, the way a user would. The program runs **insid
 | `app_set_text` | `text`, `control?` or `index?`, `window?`, `pid?` | run, no dialog | sets a text box's text (fires `Change`); returns `textNow` and `applied` |
 | `app_mouse` | `action` (click, double_click, right_click, drag), `x`, `y`, `to_x?`, `to_y?`, `real_input?`, `window?`, `pid?` | run, no dialog | mouse input at a point relative to the form's client area. By default it posts messages to the deepest window under the point without touching the user's mouse, and a drag goes entirely to the window it starts in. **Labels and Images need `real_input: true`** (spike 17) |
 | `app_scroll` | `direction` (up, down, left, right), `amount?` (line, page, end), `count?` (1), `method?` (scrollbar, wheel), `control?`, `window?`, `pid?` | run, no dialog | scrolls a list box, text box, grid, scroll bar control or the form; returns `before`/`after` scroll positions and `moved` |
+| `app_select` | `control`, `text?` or `index?`, `pid?` | run, no dialog | selects an item in a list or combo box and raises its `Click`; returns `selectedNow`/`applied` |
+| `app_keys` | `keys`, `control?`, `real_input?`, `pid?` | run, no dialog | types text and keys (syntax below) into the control or the focused control |
+| `app_wait` | `window`+`gone?` / `control`+`text`/`contains` / `mode` / `dialog`, `timeout?` (10, max 120), `pid?` | any | polls (every 200 ms) until the condition holds; returns `met`, `seen`, `waitedMs` |
 | `app_screenshot` | `window?` (or `ide`), `max_width?` (1024), `pid?` | any | an image of the window, plus `{ window, hwnd, width, height, method }` |
 
 `window` is a hex handle from `app_windows` or a caption. Without it, the tools use the program's first form.
+
+**Compiled programs:** every `app_*` tool also takes `exe`, the pid returned by `exe_run`, to act on a compiled EXE instead of the program in the IDE.
+- Such a program runs at the server's integrity, so the server reads it and sends input itself: posted messages, or `SendInput` for `real_input`. Screenshots are taken by the server.
+- Input only goes to programs the agent started with `exe_run` (hard rule 8).
+- Posted keys can't be deferred inside the program's thread from outside. The server attaches to the program's input thread to set modifiers, and pauses 60 ms after each key down so the generated character arrives first.
+- `mode` in `app_wait` is IDE-only.
+
+| Tool | Arguments | What it does |
+|------|-----------|--------------|
+| `exe_run` | `path` (an `.exe` under `VB6MCP_ROOTS`), `args?` | starts it non-elevated; waits up to 15 s for its first window; returns `exe` (pid), windows, dialogs. A program that requires elevation is refused with an explanation |
+| `exe_end` | `exe`, `force?` | posts `WM_CLOSE` to its forms (so `QueryUnload`/`Unload` run) and waits 5 s; if it's still running, reports its dialogs, or ends it with `force: true` |
+
+**Verified live** (2026-10-14):
+- **In the IDE:**
+  - `app_select` on the list and the combo box raised `Click`.
+  - `app_keys` "Hello{BACKSPACE}{BACKSPACE}p!" gave "Help!", once the continuation after each key down was in place.
+  - `{CTRL+LEFT}{SHIFT+END}X` gave "X".
+  - `KeyDown` saw Shift.
+  - `app_wait` caught each text immediately.
+- **On the compiled `Ui.exe` started with `exe_run`:**
+  - Every `app_*` tool worked: text with `Change`, check box, combo and list selection, posted keys including Backspace and Shift, scroll bar position (read directly), wheel scrolling, drag with exact coordinates.
+  - The Label click and keys worked with `real_input`.
+  - Screenshots were taken by the server.
+  - `exe_end` closed it with `WM_CLOSE`.
+- **Restoring the foreground:**
+  - During one real-input call the user was typing in another window, and Windows kept the program in front.
+  - The restore now checks the result and falls back to `SwitchToThisWindow`.
+  - If the previous window still can't come back, the result carries `warning`.
 
 **Lightweight controls** (Label, Image, Shape, Line) have no window. They are missing from `app_tree` and visible only in `app_screenshot`. To check a Label's text, take a screenshot. To click one, use `app_mouse` with `real_input: true`: VB raises their `Click` only for real mouse input (spike 17).
 
@@ -372,6 +403,14 @@ If the click hits a breakpoint or a runtime error, `mode` becomes `break` and th
   - double-click in a ListBox;
   - Label click: no effect without `real_input`; with `real_input: true` the label's `Click` fired ("Label clicked 1"). Run with Claude in front: afterwards the same window was in front again and the cursor was back at the same pixel.
 - Not yet verified: VB drag-and-drop (`DragMode` automatic, OLE drag).
+
+**`app_keys` syntax:**
+- Plain text is typed as characters (Windows-1252; a line break means Enter).
+- Braces name keys: `{ENTER}` `{TAB}` `{ESC}` `{BACKSPACE}` `{DELETE}` `{INSERT}` `{SPACE}` `{UP}` `{DOWN}` `{LEFT}` `{RIGHT}` `{HOME}` `{END}` `{PGUP}` `{PGDN}` `{F1}`..`{F12}`, letters and digits.
+- Modifiers: `{CTRL+S}` `{SHIFT+TAB}` `{ALT+F}` `{CTRL+SHIFT+END}`.
+- `{LBRACE}`/`{RBRACE}` type literal braces.
+
+By default the keys are posted, and modifiers are set in the program's key state between the messages (protocol `KEYS`). `real_input: true` sends real keystrokes instead: it brings the form to the front for a moment and restores the window that was in front. The result has `textNow` for text and combo boxes.
 
 **`app_scroll`:**
 - `moved` compares the positions before and after.
@@ -482,6 +521,8 @@ Reads a `.bas/.cls/.frm/.ctl/.pag/.dsr` from disk **the way the IDE shows it**: 
 
 - 2026-10-13: watchdog: `ide_kill`, `recovery_list/read/restore/discard`; watchdog fallbacks in `run_break`, `ide_dialog_respond`, `app_screenshot`, `ide_launch`; `watchdog` in `ide_list`/`ide_status`.
 - 2026-10-13: `debug_locals`, `debug_callstack`, `debug_error`; `runtimeError` on reported dialogs.
+- 2026-10-14: `exe_run`, `exe_end`; `exe` argument on all `app_*` tools (compiled programs, input from the server).
+- 2026-10-14: `app_select`, `app_keys`, `app_wait`; `app_mouse` real input deferred in the add-in (hard rule 14).
 - 2026-10-13: running-program tools (`app_windows`, `app_tree`, `app_click`, `app_set_text`, `app_mouse`, `app_scroll`, `app_screenshot`); audit log for input, `debug_eval` and `ide_launch`.
 - 2026-10-13: run and debug tools (`run_*`, `step_*`, `run_to_cursor`, `bp_*`, `debug_where`, `debug_eval`, `debug_immediate`, `syntax_check`).
 - 2026-10-13: `ide_launch` (auto/elevated/normal); `elevated` in `ide_list` and `ide_status`.

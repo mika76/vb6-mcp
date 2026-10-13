@@ -1,3 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- Channel C reads: window enumeration, IDE title/mode, dialogs; later screenshots. -->
+  <!-- Channel C reads: window enumeration, IDE title/mode, dialogs, screenshots.
+       System.Drawing comes from the Windows Desktop SDK (Microsoft; allowed by principle 1). -->
+  <PropertyGroup>
+    <UseWindowsForms>true</UseWindowsForms>
+  </PropertyGroup>
 </Project>

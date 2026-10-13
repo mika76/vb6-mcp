@@ -18,7 +18,7 @@ public sealed partial class IdeTools(IIdeEnvironment env)
     // Primary-constructor parameters are only in scope in this part of the partial class
     private readonly IIdeEnvironment _env = env;
 
-    public IReadOnlyList<Tool> All() => [.. ReadTools(), .. EditTools()];
+    public IReadOnlyList<Tool> All() => [.. ReadTools(), .. EditTools(), .. LaunchTools(), .. DebugTools(), .. InspectTools(), .. WatchdogTools(), .. RecoveryTools(), .. AppTools()];
 
     private IReadOnlyList<Tool> ReadTools() =>
     [
@@ -44,6 +44,12 @@ public sealed partial class IdeTools(IIdeEnvironment env)
             "with scope and line spans. Cheap way to navigate large modules without reading them.",
             Schema.Object(("component", "string", ComponentDesc, true), ("project", "string", ProjectDesc, false), ("pid", "integer", PidDesc, false)),
             (a, _) => OutlineAsync(a)),
+        new("symbol_find",
+            "Find where a name is declared in the projects open in running IDEs (procedures, properties, variables, constants, events), " +
+            "from the IDE's own parser. Exact name match (case-insensitive) unless contains=true. Use pid/project to narrow the search.",
+            Schema.Object(("name", "string", "Name to look for.", true), ("contains", "boolean", "Match names containing the text.", false),
+                          ("project", "string", "Only this project.", false), ("pid", "integer", "Only this IDE.", false)),
+            (a, _) => FindAsync(a)),
         new("project_open",
             "Open a .vbp or .vbg in a running IDE. If the IDE already has projects, pass mode 'add' (adds to a group) or " +
             "'replace' (closes them; refused while any has unsaved changes). Waits up to 20 s for the project to appear; " +
@@ -77,11 +83,11 @@ public sealed partial class IdeTools(IIdeEnvironment env)
                 catch (Exception ex) { addinError = ex.Message; }
             }
             else addinError = "IDE not responding; add-in not queried";
-            ides.Add(new { pid = inst.Pid, mode = Mode(w.Mode), responds = w.Responds, title = w.Title, dialogs = Dialogs(w), addin = inst.AddinVersion, projects, addinError });
+            ides.Add(new { pid = inst.Pid, elevated = Core.Vb6Install.IsElevated(inst.Pid), mode = Mode(w.Mode), responds = w.Responds, title = w.Title, dialogs = Dialogs(w), addin = inst.AddinVersion, projects, addinError });
         }
         var crashed = scan.Stale.Select(s => new { pid = s.Pid, lastStarted = s.Started }).ToList();
         int cleaned = _env.DeleteStale(scan);
-        return ToolResult.Ok(new { ides, crashed, cleanedUpDiscoveryFiles = cleaned });
+        return ToolResult.Ok(new { ides, crashed, cleanedUpDiscoveryFiles = cleaned, watchdog = await WatchdogInfoAsync() });
     }
 
     private async Task<ToolResult> StatusAsync(System.Text.Json.Nodes.JsonObject a)
@@ -92,7 +98,9 @@ public sealed partial class IdeTools(IIdeEnvironment env)
         try { var p = await _env.Client(inst).PingAsync(); addin = $"answers (v{p.AddinVersion}, protocol {p.Protocol})"; }
         catch (AddinBusyException) { addin = "busy: no answer within timeout (program running a loop, or IDE blocked)"; }
         catch (Exception ex) { addin = "unreachable: " + ex.Message; }
-        return ToolResult.Ok(new { pid = inst.Pid, title = w.Title, mode = Mode(w.Mode), responds = w.Responds, hung = w.IsHung, dialogs = Dialogs(w), addin });
+        return ToolResult.Ok(new { pid = inst.Pid, elevated = Core.Vb6Install.IsElevated(inst.Pid), title = w.Title, mode = Mode(w.Mode), responds = w.Responds, hung = w.IsHung, dialogs = Dialogs(w), addin,
+                                   watchdog = await WatchdogInfoAsync(),
+                                   note = !w.Responds && w.Mode == IdeMode.Run ? "the program is busy (loop?): run_break can interrupt it through the watchdog" : null });
     }
 
     private async Task<ToolResult> ComponentsAsync(System.Text.Json.Nodes.JsonObject a)
@@ -205,6 +213,51 @@ public sealed partial class IdeTools(IIdeEnvironment env)
     private static bool SamePath(string a, string b)
         => a.Length > 0 && string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>symbol_find stops after this many matches.</summary>
+    private const int MaxMatches = 200;
+
+    private async Task<ToolResult> FindAsync(System.Text.Json.Nodes.JsonObject a)
+    {
+        var name = a.Req("name");
+        bool contains = a["contains"]?.GetValue<bool>() == true;
+        var onlyProject = a.Str("project");
+        var live = _env.Scan().Live;
+        if (a.Int("pid") is int pid) live = live.Where(i => i.Pid == pid).ToList();
+        if (live.Count == 0) throw new ToolException("no VB6 IDE with the vb6-mcp add-in is running");
+
+        var matches = new List<object>();
+        var skipped = new List<string>();
+        foreach (var inst in live)
+        {
+            var client = _env.Client(inst);
+            try
+            {
+                foreach (var prj in await client.ProjectsAsync())
+                {
+                    if (onlyProject != null && !prj.Name.Equals(onlyProject, StringComparison.OrdinalIgnoreCase)) continue;
+                    foreach (var comp in await client.ComponentsAsync(prj.Name))
+                    {
+                        if (comp.CountOfLines < 0) continue;                      // no code module (e.g. resource file)
+                        foreach (var m in await client.MembersAsync(prj.Name, comp.Name))
+                        {
+                            bool hit = contains ? m.Name.Contains(name, StringComparison.OrdinalIgnoreCase) : m.Name.Equals(name, StringComparison.OrdinalIgnoreCase);
+                            if (!hit) continue;
+                            matches.Add(new
+                            {
+                                pid = inst.Pid, project = prj.Name, component = comp.Name, componentType = ComponentType(comp.Type),
+                                m.Name, kind = MemberType(m.MemberType), procKind = m.ProcKind is int k ? ProcKind(k) : null,
+                                scope = Scope(m.Scope), line = m.ProcBody ?? m.CodeLocation,
+                            });
+                            if (matches.Count >= MaxMatches) return ToolResult.Ok(new { name, contains, truncated = true, matches, skipped });
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is AddinBusyException or AddinUnreachableException) { skipped.Add($"pid {inst.Pid}: {ex.Message}"); }
+        }
+        return ToolResult.Ok(new { name, contains, truncated = false, matches, skipped });
+    }
+
     // ---------- resolution ----------
 
     private InstanceInfo ResolveInstance(System.Text.Json.Nodes.JsonObject a)
@@ -237,7 +290,11 @@ public sealed partial class IdeTools(IIdeEnvironment env)
 
     // ---------- names for VBIDE enum values (docs/protocol.md) ----------
 
-    private static object Dialogs(IdeWindowState w) => w.Dialogs.Select(d => new { caption = d.Caption, text = string.Join("\n", d.Texts), buttons = d.Buttons.Select(b => b.Caption) });
+    private static object Dialogs(IdeWindowState w) => w.Dialogs.Select(d => new
+    {
+        caption = d.Caption, text = string.Join("\n", d.Texts), buttons = d.Buttons.Select(b => b.Caption),
+        runtimeError = RuntimeError(d) is { } e ? new { number = e.Number, message = e.Message, next = "debug_error" } : null,
+    });
     private static string Mode(IdeMode m) => m.ToString().ToLowerInvariant();
     public static string ProjectType(int t) => t switch { 0 => "StandardExe", 1 => "ActiveXExe", 2 => "ActiveXDll", 3 => "ActiveXControl", _ => t.ToString() };
     public static string ComponentType(int t) => t switch

@@ -9,7 +9,10 @@
 # Registration notes (spike 1): a project .mcp.json didn't load in the desktop app, local scope does;
 # `-e` is variadic, so the server name must come before it; local-scope servers don't appear in the
 # app's Connectors UI (check with `claude mcp get vb6`).
-param([string]$Name = 'vb6')
+#
+# -Roots: workspace folders for the disk tools (ws_projects, ws_file_projects, file_read), stored as
+# VB6MCP_ROOTS. Paths outside them are refused (AGENTS.md hard rule 8).
+param([string]$Name = 'vb6', [string[]]$Roots = @())
 $ErrorActionPreference = 'Stop'
 $root    = Split-Path -Parent $PSScriptRoot
 $servers = Join-Path $root 'build\server'
@@ -21,16 +24,24 @@ dotnet publish (Join-Path $root 'src\Vb6Mcp\Vb6Mcp.csproj') -c Release -o $out -
 if ($LASTEXITCODE) { throw 'dotnet publish failed' }
 
 Push-Location $root
+# 'claude mcp remove' writes to stderr when there is nothing to remove; with ErrorActionPreference
+# 'Stop' Windows PowerShell 5.1 turns that into a terminating error, which once stopped the script
+# after removing the old registration and before adding the new one.
+$ErrorActionPreference = 'Continue'
 try {
-    claude mcp remove $Name -s local 2>$null | Out-Null
-    claude mcp remove vb6spike -s local 2>$null | Out-Null      # spike 1 test server
-    claude mcp add --scope local $Name -e "VB6MCP_LOG=$log" -- $exe
+    claude mcp remove $Name -s local *> $null
+    claude mcp remove vb6spike -s local *> $null      # spike 1 test server
+    $envArgs = @('-e', "VB6MCP_LOG=$log")
+    if ($Roots.Count -gt 0) { $envArgs += @('-e', "VB6MCP_ROOTS=$($Roots -join ';')") }
+    claude mcp add --scope local $Name @envArgs -- $exe
+    if ($LASTEXITCODE) { throw "claude mcp add failed ($LASTEXITCODE)" }
     claude mcp get $Name
-} finally { Pop-Location }
+} finally { Pop-Location; $ErrorActionPreference = 'Stop' }
 
 # Remove older installs that aren't running (a running exe can't be deleted; those stay until next time)
 Get-ChildItem $servers -Directory | Where-Object { $_.FullName -ne $out } | ForEach-Object {
-    try { Remove-Item -LiteralPath $_.FullName -Recurse -ErrorAction Stop; Write-Host "removed old install $($_.Name)" }
-    catch { Write-Host "kept old install $($_.Name) (in use)" }
+    $old = $_   # inside catch, $_ is the error record
+    try { Remove-Item -LiteralPath $old.FullName -Recurse -ErrorAction Stop; Write-Host "removed old install $($old.Name)" }
+    catch { Write-Host "kept old install $($old.Name) (in use)" }
 }
 Write-Host "Installed $exe as MCP server '$Name'. Restart the Claude session to use it."

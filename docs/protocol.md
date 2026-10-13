@@ -162,6 +162,130 @@ Posts `BM_CLICK` to a dialog button, given as a hex window handle (the server fi
 - Posted, not sent: the dialog reacts in its own message loop after the handler has returned.
 - Payload: `clicked <hwnd>`. Whether the dialog really closed is for the caller to verify (spike 10: dropped input looks like success).
 
+### `CMD <id|fullcompile>` (deferred)
+
+Runs a debug command from the command bars. **Allow-list only** (hard rule 8): `186` Start/Continue, `189` Break, `228` End, `515` Restart, `188` Step Into, `194` Step Over, `2559` Step Out, `1811` Run To Cursor, `51` Toggle Breakpoint, `579` Clear All Breakpoints (ids from the spike 5 dump). `fullcompile` runs **Run > Start With Full Compile**, found by menu path because its id is the generic 746.
+- 400 for any other id.
+- Answers **`QUEUED`**: these commands run user code, and a break under the request handler leaves the IDE in break mode with every command disabled (spike 3; hard rule 14). `Execute` returns immediately; the run or break follows.
+- A disabled command (e.g. Break while in design mode) is skipped and logged; the caller sees that the mode didn't change.
+
+### `SETSEL <project> <component> <line>`
+
+Shows the component's code pane and puts the cursor at the start of `line` (`CodePane.Show` + `SetSelection`). Needed before Toggle Breakpoint and Run To Cursor, which act on the cursor line. Payload: `selected <component>:<line>`.
+
+### `WHERE`
+
+The active code pane: `project US component US startLine US startColumn US endLine US endColumn US procedure`. In break mode this is the **current statement** (verified live: a breakpoint in `AddNumbers` gave line 8, then line 9 after a step); after a compile error it's the highlighted error (spike 6).
+
+### `IMM <hwnd> <text>` (deferred)
+
+Types one line into the Immediate window and presses Enter (focus via `VBE.Windows` type 5, then `WM_CHAR` per character and `VK_RETURN`; spike 5). `hwnd` is the Immediate window (a `VbaWindow` of this process, found by the server by enumeration since `VBE.Windows(i).HWnd` is always 0). Deferred: Immediate input runs code (`? f()`, `Call Foo`). 400 for multi-line text or a window that isn't a `VbaWindow` of this IDE.
+
+### `IMMSELECT <hwnd>`, `IMMCOPY`, `IMMPEEK`, `IMMRESTORE`
+
+Reading the Immediate window is a **sequence of requests driven by the server**, with the IDE idle in between:
+
+| Verb | Does | Payload |
+|------|------|---------|
+| `IMMSELECT <hwnd>` | saves and clears the user's clipboard text, focuses the window (Win32 `SetFocus` on the handle; the add-in runs on the IDE thread), runs Select All (756) | `selected`; 409 if Select All is disabled at that moment (the server retries) |
+| `IMMCOPY` | runs Copy (19) | `copied`, or `empty` if Copy is disabled (nothing to select: the window is empty) |
+| `IMMPEEK` | reads the clipboard text, without restoring | the text (may be empty while the copy is still in progress) |
+| `IMMRESTORE` | **collapses the selection** (Ctrl+End in the window), then puts the user's clipboard text back (non-text formats can't be preserved) | `restored` |
+
+The server: `IMMSELECT`, ~150 ms pause, `IMMCOPY`, then `IMMPEEK` every 100 ms (up to ~2 s) until text arrives, and **always** `IMMRESTORE`.
+
+Why so many steps (Phase 2 live tests):
+- The window is custom-drawn: `WM_GETTEXT` returns only its caption (spike 5), so the text has to go through the clipboard.
+- VB6 updates a command's `Enabled` state only when idle: Copy run in the same handler right after Select All was still disabled (empty result in design mode; `Method '~' of object '~' failed` in break mode when executing it anyway).
+- **Copy completes asynchronously:** reading the clipboard right after `Execute` found it empty, and the late copy then overwrote the restored user text.
+- **Select All must be undone:** with everything still selected, the next typed line **replaced the whole Immediate content**, erasing the user's `Debug.Print` output (seen in a screenshot). `IMMRESTORE` and `IMM` therefore send Ctrl+End first. Key messages carry no modifier state, so the add-in sets Ctrl in its own thread's keyboard state (`SetKeyboardState`; it runs on the IDE thread) and restores it afterwards.
+
+No user code runs, so none of these is deferred.
+
+### `CALLSTACK` (deferred), `LISTITEMS <hwnd>`
+
+`CALLSTACK` runs View > Call Stack, found by menu path because its command id isn't known. It is deferred because the dialog is modal, and a modal dialog under the request handler would block the add-in. Payload: `QUEUED`, `call stack`. The server waits for the `#32770` dialog captioned "Call Stack" (spike 18).
+
+`LISTITEMS <hwnd>` reads a list box of the IDE process (`LB_GETCOUNT`, `LB_GETTEXTLEN`, `LB_GETTEXT`). It's read-only, and it is done in-process because UIPI blocks `LB_*` messages from the non-elevated server. Payload: the items separated by RS (empty payload = no items). Errors (400): not a window of this process, not a list box. The server then closes the dialog by clicking its Close button with `CLICK`.
+
+### `APPCLICK <hwnd>`
+
+Clicks a button of the program running in the IDE: `<hwnd>` in hex. Only windows of the IDE's own process (the program being debugged runs inside `VB6.EXE`), and only the classes `ThunderCommandButton`, `ThunderCheckBox`, `ThunderOptionButton` (and their `ThunderRT6` forms) and `Button`. Anything else is 400. The add-in **posts** `BM_CLICK` to the control, so the click and its `_Click` event code run later from the message loop, not under the request handler (hard rule 14). Payload: `clicked <hwnd> (<class>)`. The server verifies the effect afterwards.
+
+### `APPTEXT <hwnd> <text>` (deferred)
+
+Sets the text of a text box (`ThunderTextBox`, `ThunderRT6TextBox`, `Edit`) of the IDE's own process with `WM_SETTEXT`. Deferred because `WM_SETTEXT` is sent synchronously and fires the control's `Change` event (user code). Payload: `QUEUED`, `set text`. The server reads the text back with `WM_GETTEXT`.
+
+### `SNAP <hwnd> <id>` (deferred)
+
+Captures a window of the IDE's own process (a form, a dialog or the IDE main window) with `PrintWindow` into `%LOCALAPPDATA%\vb6mcp\shots\<id>.bmp` (32 bpp BMP, written as `.tmp` and then renamed, so a file that exists is complete). `<id>` is 1-40 characters of `[A-Za-z0-9_-]`. Payload: `QUEUED`, then the full path of the file. The server polls for the file, converts it to PNG and deletes it.
+
+Why the add-in captures: a non-elevated `PrintWindow` on an elevated VB6 fails, and a screen copy only sees what's on top; an elevated `PrintWindow` captures covered windows and windowless Labels (spike 15). It's deferred because painting a form of the running program can run user code (`Paint` events). A non-elevated VB6 is captured by the server directly, without this verb.
+
+### `MOUSE <hwnd> <action> <x> <y> [<x2> [<y2>]]`
+
+Posts mouse messages to a window of the IDE's own process. `x`/`y` are **client coordinates of `<hwnd>`**, signed 16-bit. The server picks the deepest child window under the point and converts the coordinates.
+
+| action | Messages posted | Extra arguments |
+|--------|-----------------|-----------------|
+| `click` | `WM_MOUSEMOVE`, `WM_LBUTTONDOWN`, `WM_LBUTTONUP` | |
+| `dblclick` | move, down, up, `WM_LBUTTONDBLCLK`, up (Windows' own sequence) | |
+| `rclick` | move, `WM_RBUTTONDOWN`, `WM_RBUTTONUP` | |
+| `drag` | move, down, 10 × `WM_MOUSEMOVE` with `MK_LBUTTON` along the line, up at the end point | `x2 y2`: end point, in the same window's coordinates (may lie outside it) |
+| `wheel` | `WM_MOUSEWHEEL` × \|n\|, delta ±120, screen coordinates in `lParam` | `x2`: notches, positive = up |
+
+The messages are posted, so event code runs later from the message loop (hard rule 14). A point over a Label or Image is posted to the window underneath, and VB's runtime routes it to the windowless control. Payload: `mouse <action> <hwnd>`. Errors (400): not a window of this process, an unknown action, a coordinate that isn't a number or is out of range, `drag`/`wheel` without the extra argument.
+
+Verified live: a drag in a PictureBox (exact `MouseDown`/`MouseUp` coordinates), a double-click in a ListBox, and scrolling. **A Label or Image never raises `Click` from posted (or sent) messages** (spike 17); use `MOUSEREAL`. Not yet verified: VB's drag-and-drop (`DragMode`, OLE drag).
+
+### `MOUSEREAL <hwnd> <action> <x> <y> [<x2> <y2>]`, `MOUSERESTORE`
+
+Real mouse input with `SendInput`, for windowless controls (spike 17). Actions: `click`, `dblclick`, `rclick`, `drag` (with `x2 y2`). Coordinates are client coordinates of `<hwnd>`, which must belong to the IDE's own process.
+
+`MOUSEREAL`:
+1. Saves the cursor position and the foreground window, unless a restore is still pending.
+2. Brings `<hwnd>`'s top-level window to the front: it attaches to the foreground thread's input, then calls `SetForegroundWindow` and `BringWindowToTop`.
+3. Refuses (409) if the form couldn't be brought to the front, or if `WindowFromPoint` at the point isn't a window of this process (hard rule 8).
+4. Sends one `SendInput` batch with absolute moves on the virtual desktop and the button events.
+
+Payload: `sent`. 409 also when `SendInput` sent fewer events than asked.
+
+`MOUSERESTORE` puts the cursor and the saved foreground window back. Payload: `restored`. The server always calls it about 400 ms after `MOUSEREAL`, even when `MOUSEREAL` failed: VB processes the input only after the request returns, and the add-in never waits (hard rule 5).
+
+### `SCROLLPOS <hwnd>`
+
+Range and position of a scroll bar control of the IDE process: `min US max US pos` (`GetScrollRange(SB_CTL)`, `SBM_GETPOS`). It is read in-process because UIPI blocks `SBM_*` messages from the non-elevated server (spike 17).
+
+### `SCROLL <hwnd> <v|h> <code> <count>`
+
+Posts `WM_VSCROLL`/`WM_HSCROLL` with `code` (`SB_LINEUP` 0, `SB_LINEDOWN` 1, `SB_PAGEUP` 2, `SB_PAGEDOWN` 3, `SB_TOP` 6, `SB_BOTTOM` 7) `count` times (1-100), followed by `SB_ENDSCROLL`.
+- For a scroll bar control (class contains `ScrollBar`), the messages go to its **parent** with the control's handle in `lParam`; that is how Windows notifies scroll bars.
+- Any other window gets them itself, for its own scroll bars.
+
+Payload: `scrolled <hwnd> (<class>)`. The server verifies the effect with `GetScrollInfo` before and after.
+
+## Watchdog (`vb6mcp watchdog`)
+
+The elevated sidecar (PLAN.md §3.1, spike 12) speaks the **same protocol**: framing, `VB6MCP1` magic, a 128-bit token, `OK`/`ERR`. Its discovery file is `%LOCALAPPDATA%\vb6mcp\watchdog.json`, with the same fields as an add-in's (`addin` is `"watchdog <version>"`). It is written atomically and deleted on a clean exit.
+- It listens on 127.0.0.1 only, on a random port.
+- There is one watchdog per user session (mutex `Local\VB6McpWatchdog`). It exits 2 minutes after the last VB6 is gone.
+- Unlike the add-in it serves from its own threads, so it answers while an IDE thread is busy or hung.
+- Every action is limited to VB6 processes: a pid must be a running `VB6.EXE`, and a window handle must belong to one. Actions are logged to `%LOCALAPPDATA%\vb6mcp\watchdog.log`.
+
+| Verb | Arguments | Does | Payload |
+|------|-----------|------|---------|
+| `PING` | | | `pid US version US elevated(0/1) US parentPid US uptimeSeconds` |
+| `BREAK` | `pid` | drops a busy loop into break mode with injected Ctrl+Break (spike 12) | `break US front` (`vb6` or `ghost`); 409 if the IDE isn't in run mode, VB6 can't be brought to the front, or no break followed within 3 s |
+| `PRESS` | `hwnd` | posts `BM_CLICK` to a dialog button | `pressed`; 409 if not a `Button` |
+| `KILL` | `pid force` | ends VB6; the literal `force` is required (hard rules 9, 12) | `killed` or `kill-sent` |
+| `SNAP` | `hwnd id` | PNG to `%LOCALAPPDATA%\vb6mcp\shots\<id>.png`. `PrintWindow` with a 3 s timeout, then a copy of the screen area | `path US method` |
+| `LAUNCH` | `[project]` | starts `VB6.EXE` (path from the registry), optionally with a full `.vbp`/`.vbg` path. Elevated like the watchdog, so no UAC prompt (spike 12b) | the new pid |
+
+`BREAK` sends keyboard input, which goes to the window in front. Ctrl+Break in a console window would kill the program running there. So the watchdog injects only while a VB6 window is in front. Windows' `Ghost` stand-in for an unresponsive window also counts.
+- If VB6 is already in front, typically the debugged program's form, nothing is changed.
+- Otherwise the watchdog brings the IDE forward, attaching to the foreground thread's input as in spike 17. It **never attaches to a VB6 thread**. In the first live test the program's form was in front; attaching to its busy thread and calling `SetForegroundWindow` blocked the watchdog. The foreground change also runs on its own thread with a 1 s timeout.
+- Afterwards the previous foreground window is restored, unless it was VB6.
+
 ## Versioning
 
 Breaking changes bump the magic (`VB6MCP2`) and the discovery `protocol` field. A server talking to an add-in with a different protocol version reports it and doesn't send requests.
@@ -169,3 +293,4 @@ Breaking changes bump the magic (`VB6MCP2`) and the discovery `protocol` field. 
 ## Change log
 
 - **v1** (2026-10-13): initial version (Phase 1).
+- v1, 2026-10-13: added `APPCLICK`, `APPTEXT`, `SNAP`, `MOUSE`, `SCROLL`, `SCROLLPOS`, `MOUSEREAL`, `MOUSERESTORE` (Phase 3), `CALLSTACK`, `LISTITEMS` (Phase 2). New verbs only: older servers never send them, and a new server talking to an older add-in gets 400 "unknown verb".

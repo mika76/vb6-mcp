@@ -27,6 +27,7 @@ Private Sub IDTExtensibility_OnConnection(ByVal VBInst As Object, ByVal ConnectM
     Set g_VBE = VBInst
     LogLine "OnConnection mode=" & ConnectMode & " version=" & AddinVersion()
     StartListener
+    StartWatchdog
     StatusCreate
     If Not g_StatusBtn Is Nothing Then Set m_statusClick = g_VBE.Events.CommandBarEvents(g_StatusBtn)
     Exit Sub

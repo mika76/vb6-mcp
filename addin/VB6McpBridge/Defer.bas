@@ -36,6 +36,12 @@ Public Sub RunQueued()
         Select Case f(0)
         Case "OPEN": OpenProject f(1), (f(2) = "replace")
         Case "SAVE": SaveProject f(1)
+        Case "CMD": ExecuteCommand CLng(f(1))
+        Case "FULLCOMPILE": ExecuteMenu "Run", "Start With Full Compile"
+        Case "CALLSTACK": ExecuteMenu "View", "Call Stack"
+        Case "IMM": TypeImmediate CLng("&H" & f(1)), f(2)
+        Case "APPTEXT": SetWindowText CLng("&H" & f(1)), f(2)
+        Case "SNAP": CaptureWindow CLng("&H" & f(1)), f(2)
         End Select
     Loop
     Exit Sub
@@ -61,11 +67,76 @@ Fail:
     LogLine "save failed " & prjName & ": " & Err.Number & ": " & Err.Description
 End Sub
 
-' VBProjects.AddFromFile(path, exclusive). Exclusive closes the open projects first.
+' Debug commands from the allow-list in Verbs.QueueCommand. Execute returns right away; the run
+' or break follows (spike 6/8 log: "Execute returned" before EnterRunMode).
+Private Sub ExecuteCommand(ByVal id As Long)
+    Dim c As Object
+    On Error GoTo Fail
+    Set c = g_VBE.CommandBars.FindControl(, id)
+    If c Is Nothing Then LogLine "command " & id & " not found": Exit Sub
+    If Not c.Enabled Then LogLine "command " & id & " (" & c.Caption & ") is disabled now": Exit Sub
+    c.Execute
+    LogLine "executed " & id & " (" & c.Caption & ")"
+    Exit Sub
+Fail:
+    LogLine "command " & id & " failed: " & Err.Number & ": " & Err.Description
+End Sub
+
+' Runs a menu item found by menu path, for commands whose id is the generic 746 ("Run > Start With
+' Full Compile", spike 6/8) or unknown ("View > Call Stack...", Phase 2). Captions are compared
+' without "&" and a trailing "...". Deferred only: these can run user code or show a modal dialog.
+Private Sub ExecuteMenu(ByVal menu As String, ByVal item As String)
+    Dim bar As Object, i As Long, j As Long, pop As Object, cap As String
+    On Error GoTo Fail
+    Set bar = g_VBE.CommandBars("Menu Bar")
+    For i = 1 To bar.Controls.Count
+        Set pop = bar.Controls(i)
+        If Replace(pop.Caption, "&", "") = menu Then
+            For j = 1 To pop.Controls.Count
+                cap = Replace(pop.Controls(j).Caption, "&", "")
+                If Right$(cap, 3) = "..." Then cap = Left$(cap, Len(cap) - 3)
+                If cap = item Then
+                    If Not pop.Controls(j).Enabled Then LogLine menu & " > " & item & " is disabled now": Exit Sub
+                    pop.Controls(j).Execute
+                    LogLine "executed " & menu & " > " & item
+                    Exit Sub
+                End If
+            Next
+        End If
+    Next
+    LogLine menu & " > " & item & " not found"
+    Exit Sub
+Fail:
+    LogLine menu & " > " & item & " failed: " & Err.Number & ": " & Err.Description
+End Sub
+
+' Focuses the Immediate window, types the line and presses Enter (spike 5: WM_CHAR + VK_RETURN).
+' Win32 SetFocus, not VBIDE Window.SetFocus (that failed in break mode, Phase 2 live test).
+Private Sub TypeImmediate(ByVal hWnd As Long, ByVal text As String)
+    On Error GoTo Fail
+    FocusWindow hWnd
+    CaretToEnd hWnd            ' never type into the middle of existing text or over a selection
+    SendText hWnd, text
+    SendEnter hWnd
+    LogLine "immediate: " & text
+    Exit Sub
+Fail:
+    LogLine "immediate failed: " & Err.Number & ": " & Err.Description
+End Sub
+
+' Opens a project; "replace" closes the open ones first (the server refused if any has unsaved changes).
+' Not AddFromFile(path, True): that wrote a Group1.vbg of the closed projects into VB6's current folder
+' (Phase 3 live test), an unasked-for disk write. Removing the projects first doesn't.
 ' May show modal dialogs (missing references, source control, ...); the server watches for them.
 Private Sub OpenProject(ByVal path As String, ByVal exclusive As Boolean)
+    Dim i As Long
     On Error GoTo Fail
-    g_VBE.VBProjects.AddFromFile path, exclusive
+    If exclusive Then
+        For i = g_VBE.VBProjects.Count To 1 Step -1       ' indexed, never For Each (spike 3)
+            g_VBE.VBProjects.Remove g_VBE.VBProjects(i)
+        Next
+    End If
+    g_VBE.VBProjects.AddFromFile path, False
     LogLine "opened " & path & IIf(exclusive, " (replace)", " (add)")
     Exit Sub
 Fail:

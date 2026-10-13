@@ -9,6 +9,10 @@ Status: design; spikes 10 + 11 done. Last updated 2026-10-13 (rev 8: + COM/GUID 
 3. **Build the smallest thing that solves a real problem**, and add more only when real use shows it's missing.
 4. **The IDE is the primary workspace.** A developer works in the IDE: unsaved edits, a running program, break mode. The agent has to see and act on *that* state the way a developer sitting at the IDE would. Disk and the command line are the secondary channel, for closed projects, batch builds and CI-like work.
 
+## 0.2 Other users (owner, 2026-10-13)
+
+The server should work for **other people's VB6 setups**, not just this machine. Spike 16 showed the forced elevation here is this machine's configuration; a default VB6 install starts non-elevated. So: **support elevated and non-elevated VB6 equally** (the TCP + add-in design works at any integrity level), report each IDE's elevation, and offer `ide_launch` with `auto | elevated | normal`. Machine-specific values (VB6 path, workspace roots) come from configuration, never from code.
+
 ## 0.1 Context (from the owner)
 
 - **Many VB6 apps** of every kind: Standard EXE, ActiveX DLL, OCX, small to large.
@@ -93,7 +97,7 @@ Elevation leaves one gap: when the IDE thread is blocked, the add-in can't act, 
 
 - **Start and lifetime**: the add-in starts `vb6mcp watchdog` on connect if it isn't already running (a named mutex makes it a single instance per user session). As a child of the elevated VB6 it **inherits elevation, with no UAC prompt** **(H)**. It **keeps running if VB6 hangs, crashes or is killed** **(H)**. It exits a few minutes after the last VB6 is gone.
 - **Sidecar, not proxy**: the MCP server talks to add-ins directly. It turns to the watchdog only when an add-in stops answering, or for recovery. **If the watchdog isn't running, everything else still works**, just without hang handling.
-- **Heartbeat**: each add-in pushes `{pid, mode, dirty components}` to the watchdog on mode changes and every few seconds. Mode is needed to tell "user program busy in run mode" apart from "IDE hung".
+- **Polling, not heartbeats** (decided in Phase 2b): the watchdog polls each add-in (projects, components, dirty code) the way the MCP server does, instead of the add-in pushing heartbeats. A push would need a non-blocking Winsock client in VB6, and the add-in stays thin. Mode comes from the IDE title, which is readable even while the IDE is busy (spike 2).
 - **Health checks**: `SendMessageTimeout(WM_NULL)` / `IsHungAppWindow` on each VB6 main window, plus heartbeat age and dialog detection (`EnumWindows`). States: `responsive`, `busy-running` (run mode, not pumping), `blocked-dialog`, `hung`, `crashed`.
 - **Actions** (fixed verbs, audited):
   - `ide_break(pid)`: drop a busy loop into break mode from outside the IDE thread: the IDE's Break command (toolbar button), or Ctrl+Break input as a fallback **(H)**. Many keyboards (e.g. Mac) have no Break key, so don't depend on the keystroke.
@@ -158,7 +162,7 @@ When a VB6 app runs from the IDE, its forms are windows of `VB6.EXE`. A compiled
 
 - `app_windows`: top-level forms of the target process (caption, class, hwnd, rect)
 - `app_tree(window)`: control tree. Intrinsic controls are real windows with readable classes (`ThunderTextBox`, `ThunderCommandButton`, `ThunderRT6*` when compiled) and text. UIA fills in what Win32 can't. Lightweight controls (Label, Image, Shape, Line) **have no hwnd**, so they're visible only in screenshots. **(H)**
-- `app_click(control | x,y)`, `app_set_text(control, text)`, `app_keys(keys)`, `app_select(combo/list, item)`
+- `app_click(control)`, `app_mouse(action, x, y)`, `app_scroll`, `app_set_text(control, text)`, `app_keys(keys)`, `app_select(combo/list, item)`. Mouse input is posted (doesn't disturb the user); Labels/Images react only to real input, so `app_mouse` has an explicit `real_input` (spike 17)
 - `app_screenshot(window)`: `PrintWindow`/GDI → PNG, returned as **MCP image content**
 - `app_wait(condition)`: a window appears, text matches, or a timeout passes
 - `exe_run(path, args)`: launch a compiled build to test it the same way
@@ -249,25 +253,28 @@ Most VB6 pain across many DLL/OCX projects comes from GUIDs and registration. Sp
 6. ~~Compile errors from memory~~: **done**. Deferred "Start With Full Compile" → watchdog reads `Compile error: Variable not defined` → `PRESS OK` → `GetSelection` = line/col of the error (`docs/spikes/06-08-compile-reload.md`).
 7. **Running app UI**: `app_tree` of a running fixture form in the IDE and as an EXE; click, set text, screenshot via `PrintWindow`; which controls have no hwnd.
 8. ~~Reload~~: **done**. `Reload()` refreshes code + designer of a clean component; **on a dirty component it silently discards the unsaved IDE edits**; refused in break mode (error 5). Deferred execution retest: Start→Stop→normal break with Continue/End enabled, deferred End works (rule 14 confirmed). Still open: `RequestWriteFile` veto, `SaveAs` rebinding. Original scope: `Reload()` on `.bas`/`.cls`/`.frm` (code and designer), dirty, break mode; `RequestWriteFile` veto; `SaveAs` rebinding.
-9. **Disk builds**: `/make /out` log formats; elevated DLL/OCX registration; 1252 byte-exact round-trip.
+9. **Disk builds**: `/make /out` log formats; elevated DLL/OCX registration. **Done so far:** 1252 round-trip is byte-exact for all 256 bytes; project-map scan of the real workspace (43 projects, 1,498 files, 139 shared) takes 4.9 s cold / 0.34 s warm, so the map stays in memory (`docs/spikes/09-project-map-scan.md`).
 10. ~~Computer use vs elevation~~: **done**, input blocked (`docs/spikes/10-computer-use-elevation.md`).
 11. ~~TCP across elevation~~: **done**, works (`docs/spikes/11-tcp-elevation.md`).
 12. ~~Watchdog~~: **done**. Started by the add-in elevated with no UAC; survives VB6 being killed; busy-running vs hung classified from title + WM_NULL probe + `IsHungAppWindow`; **injected Ctrl+Break breaks a tight loop**; screenshot falls back to a screen copy while hung. Fixes: title regex (mode tag not always last), `CreateProcess` instead of `Shell` (blocked the IDE ~9 s), delete stale discovery files (`docs/spikes/12-watchdog.md`). Open: Ctrl+Break while VB6 is in the background; dialog response while blocked.
 13. **Symbols from the IDE**: what `CodeModule.Members` returns (form members, events, controls, declarations), whether `CodeLocation` matches `ProcBodyLine`, speed on the largest real modules, and behaviour in break mode.
 14. **COM edge cases**: what `/make` does on a binary-compatibility break (log vs dialog); the break dialog in the IDE (`MakeCompiledFile`/full compile); what registry state a running ActiveX DLL project leaves after VB6 is killed, and whether re-registering the compiled DLL fixes it.
-15. ~~Screenshots~~: **done**. Elevated `PrintWindow` captures the covered IDE, dialogs and running forms (incl. Labels); non-elevated can't. The watchdog hosts screenshots (`docs/spikes/15-screenshots.md`).
+15. ~~Screenshots~~: **done**. Elevated `PrintWindow` captures the covered IDE, dialogs and running forms (incl. Labels); non-elevated can't. The watchdog hosts screenshots (`docs/spikes/15-screenshots.md`). Phase 3 moved elevated screenshots into the add-in (`SNAP`), so they work without the watchdog.
+17. ~~Clicking windowless controls~~: **done**. Posted/sent mouse messages work for windowed controls but never raise `Click` on a Label/Image, not with the cursor moved, the form in front or a faked button state; only real input (`SendInput`) does. UIPI also blocks `SBM_*` reads of scroll bar controls from the server (`docs/spikes/17-lightweight-click.md`).
+18. ~~Locals, Call Stack, runtime errors~~: **done**. Locals can't be read as text (custom-drawn); `TypeName` never errors, `CStr` of Null raises a dialog; the Call Stack is a dialog with a ListBox (read in-process, UIPI); the runtime error dialog's Debug stops at the failing line (`docs/spikes/18-locals-callstack-errors.md`).
+19. ~~Watchdog live~~: **done**. Don't attach to the busy VB6 thread; `SwitchToThisWindow`/Alt bring an unresponsive VB6 forward; other add-ins' startup dialogs delay ours (`docs/spikes/19-watchdog-live.md`).
 
-### Phase 1: Skeleton + live code
-MCP server + config; production add-in (TCP listener, discovery, token, verb dispatch); `ide_list/status/context/changes`; IDE-first `code_*`/`proc_*`; `symbol_outline/find` from the IDE; `project_save`; disk fallback with the 1252 I/O module; project map.
+### Phase 1: Skeleton + live code — **done** (2026-10-13)
+MCP server, production add-in (TCP listener, discovery, token, verbs, deferred execution, status toolbar), read tools, editing with hash guards, `project_open`/`project_save`, `ide_dialog_respond`, `symbol_outline/find`, disk tools and the project map, `ide_launch` (auto/elevated/normal). See `docs/tools.md`. Not built: `ide_context`, `ide_changes` (fold into later phases when needed).
 
-### Phase 2: Run & debug
-Run control, mode tracking, breakpoints, step, `debug_eval`/Immediate/Locals/Call Stack, dialog watchdog, runtime-error handling, `syntax_check` from memory, DBWIN capture.
+### Phase 2: Run & debug — **first round done** (2026-10-13)
+Built and verified live: `run_start/break/continue/end`, `step_into/over/out`, `run_to_cursor`, `bp_toggle/clear_all`, `debug_where`, `debug_eval`, `debug_immediate`, `syntax_check`. Reading the Immediate window needed several fixes (commands only update when idle, Copy is asynchronous, Select All must be undone); see `docs/protocol.md`. Second round (2026-10-13): `debug_locals` (declarations + Immediate `TypeName`/`CStr`; the Locals window is custom-drawn), `debug_callstack` (Call Stack dialog read by the add-in), `debug_error` (runtime error dialog → Debug/End) (spike 18). **Still open:** DBWIN capture for compiled EXEs.
 
 ### Phase 2b: Watchdog
 Watchdog mode, heartbeat, health states, `ide_break`, dialog response while blocked, `ide_kill(force)`, recovery store + `recovery_*`. Comes right after debugging, because debugging is what produces hangs.
 
-### Phase 3: App UI automation
-`app_*` tools, screenshots as MCP images, `exe_run`; low-level `ui_*` fallback if spike 10 requires it.
+### Phase 3: App UI automation — **first round built** (2026-10-13)
+Built: `app_windows`, `app_tree`, `app_click`, `app_set_text`, `app_mouse` (posted by default, `real_input` for windowless controls), `app_scroll`, `app_screenshot` (MCP image; add-in capture for an elevated IDE), audit log. Verified live on `tests/fixtures/Ui`: text + `Change`, check box, ListBox double-click and scroll, scroll bar, PictureBox drag with exact coordinates, screenshots. **Still open:** `app_keys`, `app_select`, `app_wait`, `exe_run`, OLE drag-and-drop.
 
 ### Phase 4: Builds, sync, shared source
 Elevated `/make` + log parsing, `build_in_ide`, shadow builds; sync engine + reload policy + conflicts/merge; `ws_affected` rebuild order; Claude Code hook.

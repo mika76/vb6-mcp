@@ -43,6 +43,15 @@ public sealed class ToolResult
         return r;
     }
 
+    /// <summary>An image (MCP image content) followed by a JSON text item describing it.</summary>
+    public static ToolResult Image(byte[] png, object info)
+    {
+        var r = new ToolResult();
+        r._content.Add(new JsonObject { ["type"] = "image", ["data"] = Convert.ToBase64String(png), ["mimeType"] = "image/png" });
+        r._content.Add(new JsonObject { ["type"] = "text", ["text"] = JsonSerializer.Serialize(info, McpServer.Json) });
+        return r;
+    }
+
     public static ToolResult Fail(string message)
     {
         var r = new ToolResult { IsError = true };
@@ -73,6 +82,10 @@ public static class Schema
 
     public static string Req(this JsonObject args, string name)
         => args.Str(name) is { Length: > 0 } s ? s : throw new ToolException($"missing required argument '{name}'");
+
+    /// <summary>A boolean argument; also accepts "true"/"false" strings (some clients send those).</summary>
+    public static bool? Bool(this JsonObject args, string name)
+        => args[name] is JsonValue v ? (v.TryGetValue(out bool b) ? b : v.TryGetValue(out string? s) && bool.TryParse(s, out var p) ? p : null) : null;
 
     public static int? Int(this JsonObject args, string name)
         => args[name] is JsonValue v ? (v.TryGetValue(out int i) ? i : v.TryGetValue(out double d) ? (int)d : v.TryGetValue(out string? s) && int.TryParse(s, out var p) ? p : null) : null;

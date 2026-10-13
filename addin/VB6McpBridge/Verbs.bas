@@ -24,6 +24,24 @@ Public Function Dispatch(ByVal verb As String, args() As String) As String
     Case "REPLACE":    NeedArgs args, 6, 6: payload = ReplaceLines(args)
     Case "SAVE":       NeedArgs args, 1, 1: Dispatch = QueueSave(args(0)): Exit Function
     Case "CLICK":      NeedArgs args, 1, 1: payload = ClickButton(args(0))
+    Case "CMD":        NeedArgs args, 1, 1: Dispatch = QueueCommand(args(0)): Exit Function
+    Case "SETSEL":     NeedArgs args, 3, 3: payload = SetSelectionAt(args(0), args(1), args(2))
+    Case "WHERE":      NeedArgs args, 0, 0: payload = WhereNow()
+    Case "IMM":        NeedArgs args, 2, 2: Dispatch = QueueImmediate(args(0), args(1)): Exit Function
+    Case "IMMSELECT":  NeedArgs args, 1, 1: payload = SelectImmediate(args(0))
+    Case "IMMCOPY":    NeedArgs args, 0, 0: payload = CopyImmediate()
+    Case "IMMPEEK":    NeedArgs args, 0, 0: payload = Clipboard.GetText(vbCFText)
+    Case "IMMRESTORE": NeedArgs args, 0, 0: RestoreUserClipboard: payload = "restored"
+    Case "APPCLICK":   NeedArgs args, 1, 1: payload = AppClick(args(0))
+    Case "APPTEXT":    NeedArgs args, 2, 2: Dispatch = QueueAppText(args(0), args(1)): Exit Function
+    Case "SNAP":       NeedArgs args, 2, 2: Dispatch = QueueSnap(args(0), args(1)): Exit Function
+    Case "MOUSE":      NeedArgs args, 4, 6: payload = AppMouse(args)
+    Case "SCROLL":     NeedArgs args, 4, 4: payload = AppScroll(args(0), args(1), args(2), args(3))
+    Case "SCROLLPOS":  NeedArgs args, 1, 1: payload = AppScrollPos(args(0))
+    Case "CALLSTACK":  NeedArgs args, 0, 0: Dispatch = QueueCallStack(): Exit Function
+    Case "LISTITEMS":  NeedArgs args, 1, 1: payload = ListItems(args(0))
+    Case "MOUSEREAL":  NeedArgs args, 4, 6: payload = AppMouseReal(args)
+    Case "MOUSERESTORE": NeedArgs args, 0, 0: RestoreRealMouse: payload = "restored"
     Case Else:         Err.Raise E_BADREQUEST, , "unknown verb " & verb
     End Select
     Dispatch = "OK" & US() & payload
@@ -239,6 +257,239 @@ Private Function ClickButton(ByVal hexHwnd As String) As String
     Exit Function
 Bad:
     Err.Raise E_BADREQUEST, , "bad window handle " & hexHwnd
+End Function
+
+' ---------- debugging (Phase 2; spikes 3, 5, 6/8) ----------
+
+' args: command id, or "fullcompile" -> QUEUED. Only an allow-list of debug commands (hard rule 8:
+' no generic "execute any command"). Ids from the command-bar dump (spike 5); "Start With Full
+' Compile" shares the generic id 746, so it's found by menu path. Deferred (hard rule 14): these
+' commands run user code, and a break under the request handler deadlocks the IDE (spike 3).
+Private Function QueueCommand(ByVal cmd As String) As String
+    If LCase$(cmd) = "fullcompile" Then
+        Enqueue "FULLCOMPILE"
+        QueueCommand = "QUEUED" & US() & "Start With Full Compile"
+        Exit Function
+    End If
+    Select Case cmd
+    Case "186", "189", "228", "515", "188", "194", "2559", "1811", "51", "579"
+    Case Else: Err.Raise E_BADREQUEST, , "command " & cmd & " is not an allowed debug command"
+    End Select
+    Enqueue "CMD" & US() & cmd
+    QueueCommand = "QUEUED" & US() & "command " & cmd
+End Function
+
+' args: project, component, line -> "selected". Shows the code pane and puts the cursor at the
+' start of the line (needed before Toggle Breakpoint / Run To Cursor). No user code runs.
+Private Function SetSelectionAt(ByVal prjName As String, ByVal cmpName As String, ByVal lineText As String) As String
+    Dim cm As VBIDE.CodeModule, ln As Long
+    If Not IsNumeric(lineText) Then Err.Raise E_BADREQUEST, , "line must be a number"
+    ln = CLng(lineText)
+    Set cm = FindComponent(prjName, cmpName).CodeModule
+    If ln < 1 Or ln > cm.CountOfLines Then Err.Raise E_BADREQUEST, , "line " & ln & " is outside the module (" & cm.CountOfLines & " lines)"
+    cm.CodePane.Show
+    cm.CodePane.SetSelection ln, 1, ln, 1
+    SetSelectionAt = "selected " & cmpName & ":" & ln
+End Function
+
+' -> project US component US startLine US startCol US endLine US endCol US procName (active code pane)
+Private Function WhereNow() As String
+    Dim pane As VBIDE.CodePane, cm As VBIDE.CodeModule, sl As Long, sc As Long, el As Long, ec As Long, kind As VBIDE.vbext_ProcKind, proc As String
+    Set pane = g_VBE.ActiveCodePane
+    If pane Is Nothing Then Err.Raise E_NOTFOUND, , "no active code pane"
+    Set cm = pane.CodeModule
+    pane.GetSelection sl, sc, el, ec
+    On Error Resume Next
+    proc = cm.ProcOfLine(sl, kind)
+    On Error GoTo 0
+    WhereNow = cm.Parent.Collection.Parent.Name & US() & cm.Parent.Name & US() & sl & US() & sc & US() & el & US() & ec & US() & proc
+End Function
+
+' args: hwnd of the Immediate window (hex), text -> QUEUED. Typing into the Immediate window runs
+' code (e.g. "? x" evaluates, "Call Foo" runs Foo), so it's deferred (hard rule 14).
+Private Function QueueImmediate(ByVal hexHwnd As String, ByVal text As String) As String
+    If Not IsOwnWindowOfClass(HexToLong(hexHwnd), "VbaWindow") Then Err.Raise E_BADREQUEST, , "window " & hexHwnd & " is not a VbaWindow of this IDE"
+    If InStr(text, vbCr) > 0 Or InStr(text, vbLf) > 0 Then Err.Raise E_BADREQUEST, , "Immediate input must be a single line"
+    Enqueue "IMM" & US() & hexHwnd & US() & text
+    QueueImmediate = "QUEUED" & US() & "immediate"
+End Function
+
+' args: hwnd of the Immediate window (hex) -> the window's whole text. The Immediate window is
+' custom-drawn, so WM_GETTEXT returns only its caption (spike 5): focus it, Select All + Copy,
+' read the clipboard, and put the user's clipboard text back. No user code runs.
+' Reading the Immediate window is a sequence of requests driven by the server, with the IDE idle in
+' between (Phase 2 live tests):
+'   IMMSELECT  save + clear the user's clipboard, focus the window, Select All
+'   IMMCOPY    Copy ("copied"), or "empty" when Copy is disabled (nothing to select)
+'   IMMPEEK    the clipboard text, repeated until the copy has arrived
+'   IMMRESTORE put the user's clipboard text back
+' Why: VB6 updates a command's Enabled state only when idle (Copy right after Select All in one
+' handler was still disabled), and Copy itself completes asynchronously (reading the clipboard right
+' after Execute found it empty, and the late copy then overwrote the restored user text).
+' Focus uses the Win32 SetFocus on the handle (we're on the IDE thread).
+
+Private Function SelectImmediate(ByVal hexHwnd As String) As String
+    Dim h As Long, c As Object
+    h = HexToLong(hexHwnd)
+    If Not IsOwnWindowOfClass(h, "VbaWindow") Then Err.Raise E_BADREQUEST, , "window " & hexHwnd & " is not a VbaWindow of this IDE"
+    Set c = g_VBE.CommandBars.FindControl(, 756)           ' Edit > Select All
+    SaveUserClipboard
+    Clipboard.Clear
+    FocusWindow h
+    g_readHwnd = h
+    If Not c.Enabled Then Err.Raise E_CONFLICT, , "Select All is disabled right now; retry"
+    c.Execute
+    SelectImmediate = "selected"
+End Function
+
+Private Function CopyImmediate() As String
+    Dim c As Object
+    Set c = g_VBE.CommandBars.FindControl(, 19)            ' Edit > Copy
+    If Not c.Enabled Then CopyImmediate = "empty": Exit Function
+    c.Execute
+    CopyImmediate = "copied"
+End Function
+
+' ---------- the running program (Phase 3) ----------
+
+' args: hwnd -> "clicked". Command buttons, check boxes and option buttons of this process only
+' (hard rule 8). BM_CLICK is posted, so the control's Click event runs after this handler returns
+' (hard rule 14). The server verifies the effect.
+Private Function AppClick(ByVal hexHwnd As String) As String
+    Dim h As Long, cls As String
+    h = HexToLong(hexHwnd)
+    cls = OwnWindowClass(h)
+    Select Case cls
+    Case "ThunderCommandButton", "ThunderRT6CommandButton", "ThunderCheckBox", "ThunderRT6CheckBox", _
+         "ThunderOptionButton", "ThunderRT6OptionButton", "Button"
+    Case "": Err.Raise E_BADREQUEST, , "window " & hexHwnd & " doesn't belong to this IDE process"
+    Case Else: Err.Raise E_BADREQUEST, , "window " & hexHwnd & " is a " & cls & ", not a button, check box or option button"
+    End Select
+    PostClick h
+    AppClick = "clicked " & hexHwnd & " (" & cls & ")"
+End Function
+
+' args: hwnd, text -> QUEUED. Sets a text box's text with WM_SETTEXT. Deferred: it fires the
+' control's Change event (user code).
+Private Function QueueAppText(ByVal hexHwnd As String, ByVal text As String) As String
+    Dim cls As String
+    cls = OwnWindowClass(HexToLong(hexHwnd))
+    Select Case cls
+    Case "ThunderTextBox", "ThunderRT6TextBox", "Edit"
+    Case "": Err.Raise E_BADREQUEST, , "window " & hexHwnd & " doesn't belong to this IDE process"
+    Case Else: Err.Raise E_BADREQUEST, , "window " & hexHwnd & " is a " & cls & ", not a text box"
+    End Select
+    Enqueue "APPTEXT" & US() & hexHwnd & US() & text
+    QueueAppText = "QUEUED" & US() & "set text"
+End Function
+
+' args: hwnd, id -> QUEUED. Captures the window into %LOCALAPPDATA%\vb6mcp\shots\<id>.bmp.
+' The id is a plain name, never a path (hard rule 8). Deferred: painting can run user code.
+Private Function QueueSnap(ByVal hexHwnd As String, ByVal id As String) As String
+    Dim i As Long, ch As String
+    If OwnWindowClass(HexToLong(hexHwnd)) = "" Then Err.Raise E_BADREQUEST, , "window " & hexHwnd & " doesn't belong to this IDE process"
+    If Len(id) = 0 Or Len(id) > 40 Then Err.Raise E_BADREQUEST, , "id must be 1-40 characters"
+    For i = 1 To Len(id)
+        ch = Mid$(id, i, 1)
+        If Not (ch Like "[A-Za-z0-9_-]") Then Err.Raise E_BADREQUEST, , "id may only contain letters, digits, _ and -"
+    Next
+    Enqueue "SNAP" & US() & hexHwnd & US() & id
+    QueueSnap = "QUEUED" & US() & ShotsDir() & "\" & id & ".bmp"
+End Function
+
+' args: hwnd, action (click|dblclick|rclick|drag|wheel), x, y [, x2, y2] -> "mouse ...".
+' Coordinates are client coordinates of hwnd; for drag (x2, y2) is the end point, for wheel x2 is
+' the number of notches (negative = down). Windows of this process only (hard rule 8).
+Private Function AppMouse(args() As String) As String
+    Dim h As Long, action As String, i As Long, n(3) As Long
+    h = HexToLong(args(0))
+    If OwnWindowClass(h) = "" Then Err.Raise E_BADREQUEST, , "window " & args(0) & " doesn't belong to this IDE process"
+    action = LCase$(args(1))
+    Select Case action
+    Case "click", "dblclick", "rclick", "drag", "wheel"
+    Case Else: Err.Raise E_BADREQUEST, , "action must be click, dblclick, rclick, drag or wheel"
+    End Select
+    For i = 2 To UBound(args)
+        If Not IsNumeric(args(i)) Then Err.Raise E_BADREQUEST, , "coordinates must be numbers"
+        n(i - 2) = CLng(args(i))
+        If n(i - 2) < -32768 Or n(i - 2) > 32767 Then Err.Raise E_BADREQUEST, , "coordinate out of range"
+    Next
+    If (action = "drag" Or action = "wheel") And UBound(args) < 4 Then Err.Raise E_BADREQUEST, , action & " needs a fifth argument"
+    PostMouse h, action, n(0), n(1), n(2), n(3)
+    AppMouse = "mouse " & action & " " & args(0)
+End Function
+
+' args: hwnd, v|h, code 0-7 (SB_LINEUP .. SB_BOTTOM), count 1-100 -> "scrolled ...".
+Private Function AppScroll(ByVal hexHwnd As String, ByVal bar As String, ByVal codeText As String, ByVal countText As String) As String
+    Dim h As Long, cls As String, code As Long, count As Long
+    h = HexToLong(hexHwnd)
+    cls = OwnWindowClass(h)
+    If cls = "" Then Err.Raise E_BADREQUEST, , "window " & hexHwnd & " doesn't belong to this IDE process"
+    If bar <> "v" And bar <> "h" Then Err.Raise E_BADREQUEST, , "bar must be v or h"
+    If Not IsNumeric(codeText) Or Not IsNumeric(countText) Then Err.Raise E_BADREQUEST, , "code and count must be numbers"
+    code = CLng(codeText): count = CLng(countText)
+    If code < 0 Or code > 7 Then Err.Raise E_BADREQUEST, , "code must be 0-7"
+    If count < 1 Or count > 100 Then Err.Raise E_BADREQUEST, , "count must be 1-100"
+    PostScroll h, (bar = "v"), code, count, (InStr(1, cls, "ScrollBar", vbTextCompare) > 0)
+    AppScroll = "scrolled " & hexHwnd & " (" & cls & ")"
+End Function
+
+' args: hwnd -> min US max US pos of a scroll bar control of this process.
+Private Function AppScrollPos(ByVal hexHwnd As String) As String
+    Dim h As Long
+    h = HexToLong(hexHwnd)
+    If InStr(1, OwnWindowClass(h), "ScrollBar", vbTextCompare) = 0 Then Err.Raise E_BADREQUEST, , "window " & hexHwnd & " isn't a scroll bar control of this IDE process"
+    AppScrollPos = ScrollBarPos(h)
+End Function
+
+' args as MOUSE (click|dblclick|rclick|drag) -> "sent". Real input with SendInput (spike 17):
+' brings the form to the front and moves the cursor; the server always follows with MOUSERESTORE.
+Private Function AppMouseReal(args() As String) As String
+    Dim h As Long, action As String, i As Long, n(3) As Long, why As String
+    h = HexToLong(args(0))
+    If OwnWindowClass(h) = "" Then Err.Raise E_BADREQUEST, , "window " & args(0) & " doesn't belong to this IDE process"
+    action = LCase$(args(1))
+    Select Case action
+    Case "click", "dblclick", "rclick", "drag"
+    Case Else: Err.Raise E_BADREQUEST, , "action must be click, dblclick, rclick or drag"
+    End Select
+    For i = 2 To UBound(args)
+        If Not IsNumeric(args(i)) Then Err.Raise E_BADREQUEST, , "coordinates must be numbers"
+        n(i - 2) = CLng(args(i))
+        If n(i - 2) < -32768 Or n(i - 2) > 32767 Then Err.Raise E_BADREQUEST, , "coordinate out of range"
+    Next
+    If action = "drag" And UBound(args) < 5 Then Err.Raise E_BADREQUEST, , "drag needs x2 and y2"
+    why = RealMouse(h, action, n(0), n(1), n(2), n(3))
+    If why <> "" Then Err.Raise E_CONFLICT, , why
+    AppMouseReal = "sent"
+End Function
+
+' -> QUEUED. Opens View > Call Stack (a modal dialog, so deferred; the server reads it with LISTITEMS
+' and closes it with CLICK).
+Private Function QueueCallStack() As String
+    If g_VBE.CommandBars.FindControl(, 189) Is Nothing Then Err.Raise E_NOTFOUND, , "debug commands not found"
+    Enqueue "CALLSTACK"
+    QueueCallStack = "QUEUED" & US() & "call stack"
+End Function
+
+' args: hwnd of a list box of this process -> items separated by RS. Read in-process: UIPI blocks
+' LB_* messages from the non-elevated server (Phase 2, Call Stack dialog). Read-only.
+Private Function ListItems(ByVal hexHwnd As String) As String
+    Dim h As Long, cls As String
+    h = HexToLong(hexHwnd)
+    cls = OwnWindowClass(h)
+    If cls = "" Then Err.Raise E_BADREQUEST, , "window " & hexHwnd & " doesn't belong to this IDE process"
+    If InStr(1, cls, "ListBox", vbTextCompare) = 0 Then Err.Raise E_BADREQUEST, , "window " & hexHwnd & " is a " & cls & ", not a list box"
+    ListItems = ListBoxItems(h)
+
+End Function
+
+Private Function HexToLong(ByVal hexText As String) As Long
+    On Error GoTo Bad
+    HexToLong = CLng("&H" & hexText)
+    Exit Function
+Bad:
+    Err.Raise E_BADREQUEST, , "bad window handle " & hexText
 End Function
 
 ' args: project, component, name, kind -> procStart US procBody US procCount US text

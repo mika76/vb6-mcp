@@ -179,9 +179,13 @@ public sealed partial class IdeTools
 
     private async Task<ToolResult> DialogRespondAsync(JsonObject a, CancellationToken ct)
     {
-        var inst = ResolveInstance(a);
+        // A VB6 that is still starting can show a dialog before the add-in has loaded (Phase 2b live
+        // test: another add-in's error box). Then there is no add-in to ask; the watchdog can click.
+        InstanceInfo? inst = null; int targetPid;
+        if (a.Int("pid") is int p && _env.Scan().Live.All(i => i.Pid != p) && Discovery.IsVb6Process(p)) targetPid = p;
+        else { inst = ResolveInstance(a); targetPid = inst.Pid; }
         var button = a.Req("button").Replace("&", "", StringComparison.Ordinal);
-        var dialogs = _env.ReadWindows(inst.Pid).Dialogs;
+        var dialogs = _env.ReadWindows(targetPid).Dialogs;
         if (dialogs.Count == 0) throw new ToolException("the IDE isn't showing a dialog");
         var caption = a.Str("dialog");
         var candidates = caption is null ? dialogs : dialogs.Where(d => d.Caption.Equals(caption, StringComparison.OrdinalIgnoreCase)).ToList();
@@ -191,12 +195,24 @@ public sealed partial class IdeTools
         var btn = dlg.Buttons.FirstOrDefault(b => b.Caption.Equals(button, StringComparison.OrdinalIgnoreCase))
                   ?? throw new ToolException($"dialog '{dlg.Caption}' has no button '{button}'. Buttons: {string.Join(", ", dlg.Buttons.Select(b => b.Caption))}");
 
-        await _env.Client(inst).ClickAsync(btn.Hwnd);
+        string via = "add-in";
+        if (inst is null)
+        {
+            if (!await PressViaWatchdogAsync(btn.Hwnd, targetPid)) throw new ToolException($"VB6 {targetPid} has no add-in loaded yet and " + NoWatchdog);
+            via = "watchdog (no add-in yet)";
+        }
+        else try { await _env.Client(inst).ClickAsync(btn.Hwnd); }
+        catch (Exception ex) when (ex is AddinBusyException or AddinUnreachableException)
+        {
+            // The add-in shares the IDE thread; if it can't answer, the elevated watchdog can still click (PLAN §3.1)
+            if (!await PressViaWatchdogAsync(btn.Hwnd, targetPid)) throw new ToolException($"the add-in didn't answer ({ex.Message}) and " + NoWatchdog);
+            via = "watchdog";
+        }
 
         // Verify the effect: a dropped click looks like success (spike 10)
         await Task.Delay(500, ct);
-        var after = _env.ReadWindows(inst.Pid);
+        var after = _env.ReadWindows(targetPid);
         bool gone = after.Dialogs.All(d => d.Hwnd != dlg.Hwnd);
-        return ToolResult.Ok(new { clicked = btn.Caption, dialog = dlg.Caption, text = string.Join("\n", dlg.Texts), dialogClosed = gone, dialogsNow = Dialogs(after) });
+        return ToolResult.Ok(new { clicked = btn.Caption, dialog = dlg.Caption, text = string.Join("\n", dlg.Texts), dialogClosed = gone, dialogsNow = Dialogs(after), via });
     }
 }

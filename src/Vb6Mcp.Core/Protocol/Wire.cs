@@ -90,6 +90,17 @@ public static class Wire
         return new Response(parts[1], status, parts.Length == 4 ? parts[3] : "");
     }
 
+    /// <summary>Parses a request body (the server side: the watchdog). Null if it isn't a VB6MCP1 request.</summary>
+    public static Request? ParseRequest(string body)
+    {
+        var f = body.Split(US);
+        return f.Length < 4 || f[0] != Magic ? null : new Request(f[1], f[2], f[3], f[4..]);
+    }
+
+    /// <summary>Builds a response body: Magic US id US status US payload.</summary>
+    public static string BuildResponse(string id, ResponseStatus status, string payload)
+        => string.Join(US, Magic, id, status switch { ResponseStatus.Ok => "OK", ResponseStatus.Error => "ERR", _ => "QUEUED" }, payload);
+
     /// <summary>Splits a table payload into records (RS) and fields (US). An empty payload has no records.</summary>
     public static IReadOnlyList<string[]> Records(string payload)
         => payload.Length == 0 ? [] : payload.Split(RS).Select(r => r.Split(US)).ToArray();
@@ -104,6 +115,9 @@ public static class Wire
 }
 
 public enum ResponseStatus { Ok, Error, Queued }
+
+/// <summary>A parsed request (token, id, verb, arguments).</summary>
+public sealed record Request(string Token, string Id, string Verb, string[] Args);
 
 /// <summary>A parsed response. For errors, <see cref="ErrorCode"/>/<see cref="ErrorMessage"/> decode the payload.</summary>
 public sealed record Response(string Id, ResponseStatus Status, string Payload)

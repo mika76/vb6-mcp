@@ -82,6 +82,26 @@ public static partial class IdeWindows
         return list;
     }
 
+    /// <summary>Handle of the IDE main window, 0 if not found.</summary>
+    public static long MainWindow(int pid) => FindTopLevel((uint)pid, MainWindowClass).ToInt64();
+
+    /// <summary>
+    /// The Immediate window: a custom-drawn "VbaWindow" captioned "Immediate" under the IDE main window
+    /// (spike 5; VBE.Windows(i).HWnd is always 0, so it has to be found by enumeration). 0 if not found.
+    /// </summary>
+    public static long FindImmediate(int pid)
+    {
+        var main = FindTopLevel((uint)pid, MainWindowClass);
+        if (main == IntPtr.Zero) return 0;
+        long found = 0;
+        EnumChildWindows(main, (c, _) =>
+        {
+            if (ClassName(c) == "VbaWindow" && Caption(c) == "Immediate") { found = c.ToInt64(); return false; }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
     private static IntPtr FindTopLevel(uint pid, string cls)
     {
         IntPtr found = IntPtr.Zero;

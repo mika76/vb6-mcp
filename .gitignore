@@ -36,3 +36,6 @@ MSSCCPRJ.SCC
 
 # Scratch VB6 project used during spikes (contains user-specific SCC files)
 tests/fixtures/scratch/
+
+# written by VB6 itself (e.g. when projects are closed); never part of the repo
+/*.vbg

@@ -1,0 +1,21 @@
+# VB6 source files are Windows-1252 + CRLF and must be stored byte-exact.
+# -text stops git from normalizing line endings (which would corrupt them for the IDE);
+# diff still works because they are plain text.
+*.bas -text diff
+*.cls -text diff
+*.frm -text diff
+*.ctl -text diff
+*.dsr -text diff
+*.pag -text diff
+*.vbp -text diff
+*.vbg -text diff
+
+# VB6 binary companions
+*.frx binary
+*.ctx binary
+*.dsx binary
+*.pgx binary
+*.res binary
+*.dll binary
+*.ocx binary
+*.tlb binary

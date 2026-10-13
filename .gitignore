@@ -1,0 +1,31 @@
+# .NET
+bin/
+obj/
+*.user
+.vs/
+
+# Build output
+build/
+publish/
+
+# VB6 build artifacts and per-user files
+*.exe
+*.dll
+*.ocx
+*.exp
+*.lib
+*.oca
+*.vbw
+*.log
+# ...except the committed binary-compatibility reference for the add-in
+!addin/compat/*.dll
+
+# Local config
+dev.json
+.claude/settings.local.json
+
+# Spike logs
+spikes/**/server.log
+
+# Spike outputs
+spikes/**/out/

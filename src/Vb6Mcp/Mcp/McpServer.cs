@@ -1,0 +1,113 @@
+using System.Text.Encodings.Web;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+
+namespace Vb6Mcp.Mcp;
+
+/// <summary>
+/// Hand-written MCP server: JSON-RPC 2.0, newline-delimited, over stdio (spike 1, no SDK).
+/// stdout carries protocol messages only; diagnostics go to the log writer (stderr or a file).
+/// Requests are handled concurrently so a slow tool call doesn't block ping or other calls;
+/// writes to stdout are serialized.
+/// </summary>
+public sealed class McpServer(TextReader input, TextWriter output, TextWriter log, IReadOnlyList<Tool> tools)
+{
+    public const string ServerName = "vb6-mcp";
+    public static readonly string ServerVersion = typeof(McpServer).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+
+    /// <summary>Protocol versions we accept, newest first. Unknown requested versions get the newest (spike 1).</summary>
+    public static readonly string[] SupportedVersions = ["2025-06-18", "2025-03-26", "2024-11-05"];
+
+    public static readonly JsonSerializerOptions Json = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private readonly Dictionary<string, Tool> _tools = tools.ToDictionary(t => t.Name);
+
+    public async Task RunAsync(CancellationToken ct = default)
+    {
+        var pending = new List<Task>();
+        string? line;
+        while ((line = await input.ReadLineAsync(ct).ConfigureAwait(false)) != null)
+        {
+            if (line.Length == 0) continue;
+            Log("<- " + line);
+            var request = line;   // capture this iteration's value, not the loop variable
+            pending.Add(Task.Run(() => HandleLineAsync(request, ct), ct));
+            pending.RemoveAll(t => t.IsCompleted);
+        }
+        await Task.WhenAll(pending).ConfigureAwait(false);
+        Log("stdin closed");
+    }
+
+    private async Task HandleLineAsync(string line, CancellationToken ct)
+    {
+        JsonObject? msg;
+        try { msg = JsonNode.Parse(line) as JsonObject; }
+        catch (JsonException ex) { await SendAsync(Error(null, -32700, "Parse error: " + ex.Message)).ConfigureAwait(false); return; }
+        if (msg is null) { await SendAsync(Error(null, -32600, "Invalid request")).ConfigureAwait(false); return; }
+
+        var method = (string?)msg["method"];
+        if (method is null) return;                  // a response to us; we never send requests
+        var id = msg["id"]?.DeepClone();
+        bool isNotification = !msg.ContainsKey("id");
+
+        JsonObject? reply;
+        try { reply = await DispatchAsync(method, msg["params"] as JsonObject, id, ct).ConfigureAwait(false); }
+        catch (Exception ex) { reply = Error(id, -32603, "Internal error: " + ex.Message); }
+
+        if (isNotification) return;                  // never answer notifications
+        // Unknown methods must get -32601: the desktop client probes server/discover and falls back on it (spike 1)
+        await SendAsync(reply ?? Error(id, -32601, "Method not found: " + method)).ConfigureAwait(false);
+    }
+
+    private async Task<JsonObject?> DispatchAsync(string method, JsonObject? p, JsonNode? id, CancellationToken ct)
+    {
+        switch (method)
+        {
+            case "initialize":
+                var requested = (string?)p?["protocolVersion"];
+                return Result(id, new JsonObject
+                {
+                    ["protocolVersion"] = requested is not null && SupportedVersions.Contains(requested) ? requested : SupportedVersions[0],
+                    ["capabilities"] = new JsonObject { ["tools"] = new JsonObject() },
+                    ["serverInfo"] = new JsonObject { ["name"] = ServerName, ["version"] = ServerVersion },
+                });
+            case "ping":
+                return Result(id, new JsonObject());
+            case "tools/list":
+                return Result(id, new JsonObject { ["tools"] = new JsonArray(_tools.Values.Select(t => (JsonNode)t.Definition()).ToArray()) });
+            case "tools/call":
+                var name = (string?)p?["name"] ?? "";
+                var args = p?["arguments"] as JsonObject ?? [];
+                var result = _tools.TryGetValue(name, out var tool)
+                    ? await tool.InvokeAsync(args, ct).ConfigureAwait(false)
+                    : ToolResult.Fail($"Unknown tool: {name}");
+                return Result(id, result.ToJson());
+            default:
+                return null;
+        }
+    }
+
+    private async Task SendAsync(JsonObject reply)
+    {
+        var json = reply.ToJsonString(Json);
+        await _writeLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await output.WriteLineAsync(json).ConfigureAwait(false);
+            await output.FlushAsync().ConfigureAwait(false);
+        }
+        finally { _writeLock.Release(); }
+        Log("-> " + (json.Length > 500 ? json[..500] + "..." : json));
+    }
+
+    private void Log(string message)
+    {
+        lock (log) { log.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {message}"); log.Flush(); }
+    }
+
+    private static JsonObject Result(JsonNode? id, JsonNode result) => new() { ["jsonrpc"] = "2.0", ["id"] = id, ["result"] = result };
+
+    private static JsonObject Error(JsonNode? id, int code, string message) =>
+        new() { ["jsonrpc"] = "2.0", ["id"] = id, ["error"] = new JsonObject { ["code"] = code, ["message"] = message } };
+}

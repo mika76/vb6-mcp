@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Vb6Mcp.Core/Vb6Mcp.Core.csproj" />
+    <Project Path="src/Vb6Mcp.UI/Vb6Mcp.UI.csproj" />
+    <Project Path="src/Vb6Mcp/Vb6Mcp.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Vb6Mcp.Tests/Vb6Mcp.Tests.csproj" />
+  </Folder>
+</Solution>

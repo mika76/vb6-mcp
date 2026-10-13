@@ -29,3 +29,10 @@ spikes/**/server.log
 
 # Spike outputs
 spikes/**/out/
+
+# Per-user VB6 / SourceSafe files
+MSSCCPRJ.SCC
+*.scc
+
+# Scratch VB6 project used during spikes (contains user-specific SCC files)
+tests/fixtures/scratch/

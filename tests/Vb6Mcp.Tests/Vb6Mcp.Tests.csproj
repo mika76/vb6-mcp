@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Tests + our own minimal runner (no test framework package; AGENTS.md principle 1). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Vb6Mcp.Core\Vb6Mcp.Core.csproj" />
+    <ProjectReference Include="..\..\src\Vb6Mcp.UI\Vb6Mcp.UI.csproj" />
+    <ProjectReference Include="..\..\src\Vb6Mcp\Vb6Mcp.csproj" />
+  </ItemGroup>
+</Project>

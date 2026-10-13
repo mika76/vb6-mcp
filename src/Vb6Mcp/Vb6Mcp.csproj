@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The executable. Default mode: MCP server over stdio. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>vb6mcp</AssemblyName>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Vb6Mcp.Core\Vb6Mcp.Core.csproj" />
+    <ProjectReference Include="..\Vb6Mcp.UI\Vb6Mcp.UI.csproj" />
+  </ItemGroup>
+</Project>

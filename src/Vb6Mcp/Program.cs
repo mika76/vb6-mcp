@@ -3,6 +3,7 @@
 //        vb6mcp watchdog    elevated sidecar, started by the VB6 add-in (PLAN.md §3.1)
 //        vb6mcp hook        Claude Code PreToolUse hook: blocks Edit/Write on VB6 source files
 //        vb6mcp install-hook <settings.json>   registers this exe as that hook (used by install-server.ps1)
+//        vb6mcp describe <file> [filter]       prints a typelib (DLL/OCX/TLB/OLB) as VB-like declarations
 // Diagnostics go to stderr, or to the file named by VB6MCP_LOG (some clients hide stderr).
 using System.Text;
 using Vb6Mcp.Mcp;
@@ -19,9 +20,14 @@ public static class Program
         if (mode == "watchdog") return await WatchdogMainAsync();
         if (mode == "hook") return Hook.Run(Console.In, Console.Error);
         if (mode == "install-hook") return Hook.Install(args.Length > 1 ? args[1] : Hook.UserSettingsPath, Environment.ProcessPath!, Console.Out);
+        if (mode == "describe" && args.Length > 1)
+        {
+            Console.Out.Write(Core.Files.TypeLibDescriber.Render(Core.Files.TypeLibDescriber.Describe(args[1]), args.Length > 2 ? args[2] : null));
+            return 0;
+        }
         if (mode != "mcp")
         {
-            Console.Error.WriteLine($"vb6mcp: unknown mode '{mode}'. Usage: vb6mcp [mcp|watchdog|hook|install-hook]");
+            Console.Error.WriteLine($"vb6mcp: unknown mode '{mode}'. Usage: vb6mcp [mcp|watchdog|hook|install-hook|describe <file>]");
             return 2;
         }
 
@@ -33,7 +39,8 @@ public static class Program
         var roots = (Environment.GetEnvironmentVariable("VB6MCP_ROOTS") ?? "")
             .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         var env = new IdeEnvironment();
-        var tools = new IdeTools(env) { Roots = roots }.All().Concat(new WorkspaceTools(env, roots).All()).ToList();
+        var workspace = new WorkspaceTools(env, roots);
+        var tools = new IdeTools(env) { Roots = roots, MapProvider = workspace.CurrentMap }.All().Concat(workspace.All()).ToList();
         log.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} vb6mcp {McpServer.ServerVersion} started, pid {Environment.ProcessId}, {tools.Count} tools, roots: {(roots.Length == 0 ? "(none)" : string.Join("; ", roots))}");
         await new McpServer(stdin, stdout, log, tools).RunAsync();
         return 0;

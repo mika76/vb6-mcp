@@ -94,6 +94,13 @@ public sealed partial class IdeTools
         {
             pid = inst.Pid, status = r.Payload, wasTitle = before.Title,
             recovery = RecoverySummary(inst.Pid),
+            // Killed in run/break mode, an ActiveX project's classes stay registered to VB6DEBUG.DLL (spike 24)
+            comLeftovers = before.Mode is IdeMode.Run or IdeMode.Break
+                ? Core.Files.TypeLibRegistry.All().Where(Core.Files.ComRegistry.IsProjectTypeLib).Select(t => t.Win32Path).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
+                : null,
+            comNote = before.Mode is IdeMode.Run or IdeMode.Break
+                ? "it was killed while running: ActiveX projects it was debugging stay registered to the VB6 debugger (comLeftovers lists their .vbp files); com_orphans shows the repair"
+                : null,
             note = "the IDE's discovery file stays behind and is reported as crashed by ide_list; reopen with ide_launch, then restore with recovery_restore",
         });
     }

@@ -52,7 +52,8 @@ public static class McpServerTests
                                     "run_start", "run_break", "run_continue", "run_end", "step_into", "step_over", "step_out", "run_to_cursor",
                                     "bp_toggle", "bp_clear_all", "debug_where", "debug_eval", "debug_immediate", "syntax_check", "debug_locals", "debug_callstack", "debug_output", "debug_error",
                                     "ide_kill", "recovery_list", "recovery_read", "recovery_restore", "recovery_discard",
-                                    "app_windows", "app_tree", "app_click", "app_set_text", "app_mouse", "app_scroll", "app_select", "app_keys", "app_wait", "app_screenshot", "exe_run", "exe_end", "build_make", "build_in_ide", "sync_status", "sync_diff", "sync_take_disk", "sync_take_ide" }, names);
+                                    "app_windows", "app_tree", "app_click", "app_set_text", "app_mouse", "app_scroll", "app_select", "app_keys", "app_wait", "app_screenshot", "exe_run", "exe_end", "build_make", "build_in_ide", "sync_status", "sync_diff", "sync_take_disk", "sync_take_ide",
+            "form_controls", "form_properties", "form_set_property", "form_add_control", "form_remove_control", "refs_list", "refs_add", "refs_remove", "refs_add_component", "refs_fix_broken" }, names);
         var codeRead = r["1"]["result"]!["tools"]!.AsArray().First(t => (string)t!["name"]! == "code_read")!;
         Assert.Equal("component", (string)codeRead["inputSchema"]!["required"]![0]!);
     }

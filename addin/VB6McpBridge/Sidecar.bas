@@ -38,6 +38,11 @@ Private Declare Function CreateProcess Lib "kernel32" Alias "CreateProcessA" (By
 Private Declare Function CloseHandle Lib "kernel32" (ByVal hObject As Long) As Long
 Private Const CREATE_NO_WINDOW As Long = &H8000000
 Private Declare Function GetModuleFileName Lib "kernel32" Alias "GetModuleFileNameA" (ByVal hModule As Long, ByVal lpFileName As String, ByVal nSize As Long) As Long
+Private Declare Function GetExitCodeProcess Lib "kernel32" (ByVal hProcess As Long, lpExitCode As Long) As Long
+Private Declare Function GetSystemDirectory Lib "kernel32" Alias "GetSystemDirectoryA" (ByVal lpBuffer As String, ByVal nSize As Long) As Long
+Private Const STILL_ACTIVE As Long = 259
+
+Private m_regHandles As Collection          ' "p" & pid -> process handle, until REGSTATUS saw it exit
 
 Public Sub StartWatchdog()
     Dim exe As String, si As STARTUPINFO, pi As PROCESS_INFORMATION
@@ -74,4 +79,42 @@ Public Function StartBuild(ByVal vbp As String, ByVal logPath As String) As Long
     CloseHandle pi.hProcess
     LogLine "build started, pid " & pi.dwProcessId & ": " & vbp
     StartBuild = pi.dwProcessId
+End Function
+
+' Starts regsvr32 /s [/u] "<path>" as a child (inherits VB6's elevation, so no UAC prompt) and keeps its
+' process handle, so REGSTATUS can read the exit code without waiting (hard rule 5). GetSystemDirectory in
+' this 32-bit process is redirected to SysWOW64: the 32-bit regsvr32, which registers in the 32-bit view.
+' The caller (Verbs.RegisterFile) has validated the path; returns 0 if the process couldn't start.
+Public Function StartRegsvr(ByVal path As String, ByVal unregister As Boolean) As Long
+    Dim sysDir As String, n As Long, si As STARTUPINFO, pi As PROCESS_INFORMATION, cmd As String
+    sysDir = String$(260, vbNullChar)
+    n = GetSystemDirectory(sysDir, 260)
+    sysDir = Left$(sysDir, n)
+    cmd = """" & sysDir & "\regsvr32.exe"" /s " & IIf(unregister, "/u ", "") & """" & path & """"
+    si.cb = LenB(si)
+    If CreateProcess(vbNullString, cmd, 0, 0, 0, CREATE_NO_WINDOW, 0, vbNullString, si, pi) = 0 Then
+        LogLine "regsvr32: CreateProcess failed (" & Err.LastDllError & ")"
+        Exit Function
+    End If
+    CloseHandle pi.hThread
+    If m_regHandles Is Nothing Then Set m_regHandles = New Collection
+    m_regHandles.Add pi.hProcess, "p" & pi.dwProcessId
+    LogLine "regsvr32 started, pid " & pi.dwProcessId & ": " & cmd
+    StartRegsvr = pi.dwProcessId
+End Function
+
+' "running", or "exit" US code (then the handle is closed). "unknown" for a pid we didn't start.
+Public Function RegsvrStatus(ByVal pid As Long) As String
+    Dim h As Long, code As Long
+    If m_regHandles Is Nothing Then RegsvrStatus = "unknown": Exit Function
+    On Error Resume Next
+    h = m_regHandles("p" & pid)
+    If Err.Number <> 0 Then RegsvrStatus = "unknown": Exit Function
+    On Error GoTo 0
+    If GetExitCodeProcess(h, code) = 0 Then RegsvrStatus = "unknown": Exit Function
+    If code = STILL_ACTIVE Then RegsvrStatus = "running": Exit Function
+    CloseHandle h
+    m_regHandles.Remove "p" & pid
+    LogLine "regsvr32 pid " & pid & " exited with " & code
+    RegsvrStatus = "exit" & US() & code
 End Function

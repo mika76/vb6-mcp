@@ -51,6 +51,14 @@ Public Function Dispatch(ByVal verb As String, args() As String) As String
     Case "KEYSREAL":   NeedArgs args, 2, 2: Dispatch = "QUEUED" & US() & AppKeys(args(0), args(1), True): Exit Function
     Case "MOUSEREAL":  NeedArgs args, 4, 6: Dispatch = "QUEUED" & US() & AppMouseReal(args): Exit Function
     Case "MOUSERESTORE": NeedArgs args, 0, 0: payload = "restored" & US() & RestoreRealMouse()
+    Case "DESIGN":     Dispatch = QueueDesign(args): Exit Function
+    Case "RESULT":     NeedArgs args, 1, 1: payload = DesignResult(args(0))
+    Case "REFS":       NeedArgs args, 1, 1: payload = ListRefs(args(0))
+    Case "REFADD":     NeedArgs args, 3, 5: payload = AddRef(args)
+    Case "REFDEL":     NeedArgs args, 2, 2: payload = RemoveRef(args(0), args(1))
+    Case "TOOLBOX":    NeedArgs args, 2, 3: payload = AddToolbox(args)
+    Case "REGSVR":     NeedArgs args, 2, 2: payload = RegisterFile(args(0), LCase$(args(1)))
+    Case "REGSTATUS":  NeedArgs args, 1, 1: payload = RegsvrStatus(CLng(Val(args(0))))
     Case Else:         Err.Raise E_BADREQUEST, , "unknown verb " & verb
     End Select
     Dispatch = "OK" & US() & payload
@@ -76,7 +84,7 @@ End Function
 
 ' ---------- lookup ----------
 
-Private Function FindProject(ByVal prjName As String) As VBIDE.VBProject
+Public Function FindProject(ByVal prjName As String) As VBIDE.VBProject
     Dim p As Long
     For p = 1 To g_VBE.VBProjects.Count
         If StrComp(g_VBE.VBProjects(p).Name, prjName, vbTextCompare) = 0 Then Set FindProject = g_VBE.VBProjects(p): Exit Function
@@ -84,7 +92,7 @@ Private Function FindProject(ByVal prjName As String) As VBIDE.VBProject
     Err.Raise E_NOTFOUND, , "project not found: " & prjName
 End Function
 
-Private Function FindComponent(ByVal prjName As String, ByVal cmpName As String) As VBIDE.VBComponent
+Public Function FindComponent(ByVal prjName As String, ByVal cmpName As String) As VBIDE.VBComponent
     Dim prj As VBIDE.VBProject, c As Long
     Set prj = FindProject(prjName)
     For c = 1 To prj.VBComponents.Count
@@ -573,8 +581,24 @@ Private Function MakeProject(ByVal vbp As String) As String
     MakeProject = pid & US() & logPath & US() & vbp
 End Function
 
+' args: path, r|u -> pid. Starts the 32-bit regsvr32 elevated (com_register / com_unregister, hard rule 13).
+' Same path rules as MAKE: absolute, no "..", under the workspace roots (checked here too, on the elevated
+' side, hard rule 8), and only .dll/.ocx. The server audits the call and checks the registry afterwards.
+Private Function RegisterFile(ByVal path As String, ByVal mode As String) As String
+    Dim ext As String, pid As Long
+    ext = LCase$(Right$(path, 4))
+    If ext <> ".dll" And ext <> ".ocx" Then Err.Raise E_BADREQUEST, , "only .dll and .ocx files can be registered: " & path
+    If mode <> "r" And mode <> "u" Then Err.Raise E_BADREQUEST, , "mode must be r or u"
+    If InStr(path, "..") > 0 Or Mid$(path, 2, 2) <> ":\" Or InStr(path, """") > 0 Then Err.Raise E_BADREQUEST, , "the path must be absolute, without '..' or quotes"
+    If Not UnderRoots(path) Then Err.Raise E_BADREQUEST, , path & " isn't under the workspace roots (" & BaseDir() & "\roots.txt)"
+    If Len(Dir$(path)) = 0 Then Err.Raise E_NOTFOUND, , "file not found: " & path
+    pid = StartRegsvr(path, (mode = "u"))
+    If pid = 0 Then Err.Raise E_CONFLICT, , "regsvr32 couldn't be started"
+    RegisterFile = CStr(pid)
+End Function
+
 ' True if path is inside one of the roots in roots.txt (one absolute folder per line).
-Private Function UnderRoots(ByVal path As String) As Boolean
+Public Function UnderRoots(ByVal path As String) As Boolean
     Dim f As Integer, root As String
     On Error GoTo Done
     If Len(Dir$(BaseDir() & "\roots.txt")) = 0 Then Exit Function

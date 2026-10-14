@@ -15,6 +15,9 @@ public sealed record VbpFile(
     string? ExeName, string? OutputPath, string? Startup, int CompatibleMode, string? CompatibleFile)
 {
     /// <summary>Keys whose value names a source file of the project.</summary>
+    /// <summary>Every other key = value of the project section (MajorVer, MinorVer, RevisionVer, ...), quotes removed.</summary>
+    public IReadOnlyDictionary<string, string> Settings { get; init; } = new Dictionary<string, string>();
+
     public static readonly string[] MemberKeys = ["Form", "Module", "Class", "UserControl", "PropertyPage", "Designer", "UserDocument", "RelatedDoc"];
 
     public static VbpFile Load(string path) => Parse(path, Vb1252.Encoding.GetString(File.ReadAllBytes(path)));
@@ -57,7 +60,7 @@ public sealed record VbpFile(
         int.TryParse(values.GetValueOrDefault("CompatibleMode"), out int compatMode);
 
         return new VbpFile(PathKey.Normalize(path), values.GetValueOrDefault("Name") ?? System.IO.Path.GetFileNameWithoutExtension(path),
-            values.GetValueOrDefault("Type") ?? "", members, refs, objs, exe, output, values.GetValueOrDefault("Startup"), compatMode, compat);
+            values.GetValueOrDefault("Type") ?? "", members, refs, objs, exe, output, values.GetValueOrDefault("Startup"), compatMode, compat) { Settings = values };
     }
 }
 

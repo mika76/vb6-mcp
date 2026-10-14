@@ -53,6 +53,7 @@ Public Sub RunQueued()
         Case "SELECT": SelectItem CLng("&H" & f(1)), CLng(f(2))
         Case "MOUSEREAL": DeferredRealMouse CLng("&H" & f(1)), f(2), CLng(f(3)), CLng(f(4)), CLng(f(5)), CLng(f(6))
         Case "KEYSREAL": DeferredRealKeys CLng("&H" & f(1)), f(2)
+        Case "DESIGN": RunDesign f
         End Select
     End If
     Exit Sub

@@ -13,7 +13,7 @@ namespace Vb6Mcp.Tools;
 /// (principle 4): when an open IDE has the file loaded, its memory is the truth (hard rule 4), and
 /// file_read says so. Documented in docs/tools.md.
 /// </summary>
-public sealed class WorkspaceTools(IIdeEnvironment env, IReadOnlyList<string> roots)
+public sealed partial class WorkspaceTools(IIdeEnvironment env, IReadOnlyList<string> roots)
 {
     /// <summary>Cached map older than this is rebuilt on the next request.</summary>
     public static readonly TimeSpan MaxMapAge = TimeSpan.FromMinutes(5);
@@ -57,6 +57,7 @@ public sealed class WorkspaceTools(IIdeEnvironment env, IReadOnlyList<string> ro
             Schema.Object(("paths", "array", "Changed source files (full paths).", true),
                           ("refresh", "boolean", "Rescan the roots first.", false)),
             (a, _) => AffectedAsync(a)),
+        .. ComTools(),
     ];
 
     private async Task<ToolResult> AffectedAsync(JsonObject a)
@@ -92,6 +93,9 @@ public sealed class WorkspaceTools(IIdeEnvironment env, IReadOnlyList<string> ro
             note = "references are matched by the typelib in each DLL/OCX's current build (or compatibility file); project references inside groups (*\\A) aren't followed yet",
         });
     }
+
+    /// <summary>The cached project map, or null without workspace roots (for IdeTools: refs_fix_broken).</summary>
+    public ProjectMap? CurrentMap() => roots.Count == 0 ? null : Map(false);
 
     private ProjectMap Map(bool refresh)
     {

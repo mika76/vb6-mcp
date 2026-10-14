@@ -329,6 +329,70 @@ public sealed class AddinClient(InstanceInfo instance, TimeSpan? timeout = null)
         return (Int(f[0]), Int(f[1]), Int(f[2]));
     }
 
+    // ---- designer (Phase 5; deferred, hard rule 14) ----
+
+    /// <summary>
+    /// Runs a designer operation (CONTROLS, PROPS, SET, ADD, REMOVE): DESIGN queues it under a fresh request id
+    /// (it may run a UserControl's code, so never under the request handler), then RESULT is polled until it ran.
+    /// Returns whether the component is now dirty, and the operation's payload. A failed operation throws
+    /// <see cref="AddinErrorException"/> (code 500, the VB error); <paramref name="wait"/> bounds the polling.
+    /// </summary>
+    public async Task<(bool Dirty, string Payload)> DesignAsync(string op, string[] args, TimeSpan? wait = null)
+    {
+        string id = Guid.NewGuid().ToString("N")[..12];
+        try { await SendAsync("DESIGN", [id, op, .. args]).ConfigureAwait(false); }
+        catch (AddinErrorException ex) when (ex.Code == 400 && ex.AddinMessage.StartsWith("unknown verb", StringComparison.Ordinal))
+        {
+            throw new AddinErrorException(400, "the add-in is older than this server (no designer verbs): rebuild and register it (scripts\\build-addin.ps1)");
+        }
+        var deadline = DateTime.UtcNow + (wait ?? TimeSpan.FromSeconds(20));
+        while (true)
+        {
+            var f = (await SendAsync("RESULT", id).ConfigureAwait(false)).Split(Wire.US, 3);
+            switch (f[0])
+            {
+                case "ok": return (f.Length > 1 && f[1] == "1", f.Length > 2 ? f[2] : "");
+                case "failed": throw new AddinErrorException(500, f.Length > 1 ? f[1] : "failed");
+                case "unknown": throw new AddinErrorException(500, "the add-in lost the designer request (was it reloaded?)");
+            }
+            if (DateTime.UtcNow > deadline) throw new AddinBusyException(Instance.Pid, "DESIGN " + op, wait ?? TimeSpan.FromSeconds(20));
+            await Task.Delay(40).ConfigureAwait(false);
+        }
+    }
+
+    // ---- references and toolbox (Phase 5) ----
+
+    /// <summary>A project's references, live from the IDE (works in every mode).</summary>
+    public async Task<IReadOnlyList<RefInfo>> RefsAsync(string project)
+        => Wire.Records(await SendAsync("REFS", project).ConfigureAwait(false)).Select(RefInfo.From).ToList();
+
+    /// <summary>References.AddFromFile (a typelib, DLL, OCX or, for a project reference, a .vbp). Design mode.</summary>
+    public async Task<RefInfo> RefAddFileAsync(string project, string path)
+        => RefInfo.From(Wire.Fields(await SendAsync("REFADD", project, "file", path).ConfigureAwait(false), 9));
+
+    /// <summary>References.AddFromGuid with a LIBID read from the registry or a typelib (hard rule 13). Design mode.</summary>
+    public async Task<RefInfo> RefAddGuidAsync(string project, Guid libId, int major, int minor)
+        => RefInfo.From(Wire.Fields(await SendAsync("REFADD", project, "guid", libId.ToString("B").ToUpperInvariant(), S(major), S(minor)).ConfigureAwait(false), 9));
+
+    /// <summary>Removes a reference by name (not built-in ones). Design mode.</summary>
+    public Task RefRemoveAsync(string project, string name) => SendAsync("REFDEL", project, name);
+
+    /// <summary>VBProject.AddToolboxProgID: adds an ActiveX control's component to the project. Design mode.</summary>
+    public Task ToolboxAddAsync(string project, string progId, string? file) => SendAsync("TOOLBOX", project, progId, file ?? "");
+
+    // ---- COM registration (Phase 5; elevated child process, hard rule 13) ----
+
+    /// <summary>Starts the 32-bit regsvr32 /s (with /u to unregister) on a DLL/OCX under the workspace roots, elevated like VB6. Returns its pid.</summary>
+    public async Task<int> RegsvrAsync(string path, bool unregister)
+        => Int(await SendAsync("REGSVR", path, unregister ? "u" : "r").ConfigureAwait(false));
+
+    /// <summary>Exit code of a REGSVR process, or null while it runs (the add-in keeps its handle; non-blocking).</summary>
+    public async Task<int?> RegStatusAsync(int pid)
+    {
+        var f = (await SendAsync("REGSTATUS", S(pid)).ConfigureAwait(false)).Split(Wire.US);
+        return f[0] == "running" ? null : Int(f[1]);
+    }
+
     private static string S(int v) => v.ToString(CultureInfo.InvariantCulture);
     private static int Int(string s) => int.Parse(s, CultureInfo.InvariantCulture);
     private static int? NInt(string s) => s.Length == 0 ? null : int.Parse(s, CultureInfo.InvariantCulture);
@@ -356,4 +420,11 @@ public sealed class AddinErrorException(int code, string message) : Exception($"
 {
     public int Code { get; } = code;
     public string AddinMessage { get; } = message;
+}
+
+/// <summary>A project reference as VBIDE reports it. Type 0 = typelib, 1 = project reference.</summary>
+public sealed record RefInfo(string Name, string Guid, int Major, int Minor, string FullPath, bool BuiltIn, bool IsBroken, int Type, string Description)
+{
+    internal static RefInfo From(string[] f) => new(f[0], f[1], N(f[2]), N(f[3]), f[4], f[5] == "1", f[6] == "1", N(f[7]), f.Length > 8 ? f[8] : "");
+    private static int N(string s) => int.TryParse(s, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : 0;
 }

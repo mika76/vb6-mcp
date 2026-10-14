@@ -213,6 +213,12 @@ public sealed partial class IdeTools
         await Task.Delay(500, ct);
         var after = _env.ReadWindows(targetPid);
         bool gone = after.Dialogs.All(d => d.Hwnd != dlg.Hwnd);
+        // A run_start that stopped at a dialog (SourceSafe, Debugging options) is still the agent's run once it starts
+        if (_pendingStarts.Contains(targetPid))
+        {
+            if (after.Mode is IdeMode.Run or IdeMode.Break) { _runsWeStarted.Add(targetPid); _pendingStarts.Remove(targetPid); }
+            else if (after.Dialogs.Count == 0) _pendingStarts.Remove(targetPid);
+        }
         return ToolResult.Ok(new { clicked = btn.Caption, dialog = dlg.Caption, text = string.Join("\n", dlg.Texts), dialogClosed = gone, dialogsNow = Dialogs(after), via });
     }
 }

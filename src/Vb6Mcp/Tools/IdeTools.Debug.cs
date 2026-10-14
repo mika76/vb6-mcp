@@ -20,6 +20,8 @@ public sealed partial class IdeTools
 
     /// <summary>IDE pids where this server started the current run (hard rule 11: ending other runs needs force).</summary>
     private readonly HashSet<int> _runsWeStarted = [];
+    /// <summary>IDEs where run_start stopped at a dialog in design mode; the run counts as ours if it starts once the dialog is answered (spike 24 live test).</summary>
+    private readonly HashSet<int> _pendingStarts = [];
     /// <summary>Breakpoints set through this server, per pid. VBIDE can't list breakpoints, so this can drift.</summary>
     private readonly Dictionary<int, HashSet<(string Project, string Component, int Line)>> _breakpoints = [];
 
@@ -92,6 +94,7 @@ public sealed partial class IdeTools
         await _env.Client(inst).CommandAsync(full ? "fullcompile" : CmdStart);
         var w = await WaitForAsync(inst, s => s.Mode is IdeMode.Run or IdeMode.Break || s.Dialogs.Count > 0, ct);
         if (w.Mode is IdeMode.Run or IdeMode.Break) _runsWeStarted.Add(inst.Pid);
+        else if (w.Dialogs.Count > 0) _pendingStarts.Add(inst.Pid);
         return ToolResult.Ok(State("started", w));
     }
 

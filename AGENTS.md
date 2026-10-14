@@ -118,6 +118,27 @@ dotnet run --project tests/Vb6Mcp.Tests -- --cat Build,IDE
 - **Never `For Each` over VBIDE collections** (spike 3): in run/break mode `For Each` over `VBProjects` and `VBE.Windows` raises error 70 "Permission denied". Indexed loops (`For i = 1 To .Count`) work in every mode, so live reads work while running and debugging. The add-in answers socket requests in all modes, including behind a modal MsgBox.
 - **Build-event handlers must not touch VBIDE** (spike 3): reading code inside `EnterRunMode` ended the debugged program as soon as `Form_Load` returned. Log or set a flag only. Entering break mode also fires `EnterDesignMode`.
 - **No designer/property access in run mode** (error 393 "Get not supported at runtime", and it can instantiate the form).
+- **Designer through VBIDE** (spike 23):
+  - `VBComponent.Designer` works with the designer window closed.
+  - An object property's `Value` (Font, icons) is a VBIDE **`Properties` collection** of sub-properties, not a StdFont.
+  - Call `ContainedVBControls.Add` **early-bound**: late-bound with the typed optional omitted gave error 13.
+  - `Add` takes the **`.frm` class name** (`MSComctlLib.ListView`) and returns **Nothing** (no error) for anything else, including the registered ProgID. `AddToolboxProgID` wants the registered ProgID (`MSComctlLib.ListViewCtrl.2`). VBIDE can't list or remove toolbox components.
+  - A form isn't a `VBControl`: its properties are `VBComponent.Properties`.
+  - Designer access is deferred, because a UserControl's own code runs when its properties are read or set (hard rule 14).
+- **`References.AddFromFile` on an unregistered DLL** adds it (empty `FullPath`/`Description`) without registering it. The saved line carries the file's typelib LIBID and a path relative to the `.vbp` (spike 23).
+- **COM** (spike 24):
+  - OLE caches loaded typelibs, so concurrent reads share one COM object. Serialize typelib reads (`TypeLibInfo.ComLock`) and never `Marshal.ReleaseComObject` them, or another thread's read fails ("separated from its underlying RCW").
+  - ActiveX control classes have `TYPEFLAG_FCONTROL`, not `FCANCREATE`, but are registered like creatable ones.
+  - Without binary compatibility each build gets new LIBID/CLSIDs, and `/make` unregisters the old ones.
+  - A medium process can open an elevated one (query/synchronize), but a quick child may be gone first. The add-in keeps the handle (`REGSTATUS`).
+- **Debugger registrations and broken references** (spike 25):
+  - While an ActiveX project runs in the IDE, its classes are registered to `VB98\VB6DEBUG.DLL` and its typelib to the `.vbp`. End restores the previous registration.
+  - A killed IDE leaves them until VB6.EXE next starts.
+  - A reference to an **unregistered** typelib still works if the `.vbp` hint path exists: the hint is a fallback.
+  - A broken reference has no readable `Name`, though Guid and version are readable. `References.Remove` on it fails ("Object library not registered") until its typelib is registered. Registering a file carrying it heals the reference by itself.
+- **Designer lists and pictures** (spike 25):
+  - `Property.IndexedValue(j)` past the end returns ""/0, no error. The end of a List is its last non-empty item.
+  - `Set Property.Object = LoadPicture(file)` sets Picture/Icon; VB writes the `.frx`.
 - **Screenshots need elevation** (spike 15): non-elevated `PrintWindow` on VB6 windows fails, and a screen copy only sees what's on top. Elevated `PrintWindow` (watchdog) captures covered windows, dialogs and running forms, including Labels (no hwnd). For IDE panes, capture the main IDE window and crop; `PrintWindow` on the child panes is misaligned. Use a timeout: `PrintWindow` blocks on a hung window.
 - `VBE.Windows(i).HWnd` is always 0. Find IDE windows by enumerating child windows of the main window (e.g. Immediate = `VbaWindow` captioned "Immediate").
 - Debug command Ids: Start/Continue 186, Break 189, End 228, Restart 515, Step Into/Over/Out 188/194/2559, Run To Cursor 1811, Toggle Breakpoint 51, Clear All Breakpoints 579, Copy 19, Paste 22, Select All 756, Undo 128. Many controls share the generic Id 746: find those by menu path + caption.
@@ -137,7 +158,7 @@ dotnet run --project tests/Vb6Mcp.Tests -- --cat Build,IDE
 - **Opening projects** (spike 22): `VBProjects.AddFromFile(path, False)` makes the IDE a project group even with one project (Save then asks for a group file); `AddFromFile(path, True)` with projects still open writes a `Group1.vbg`. Remove the open projects, then use `True`.
 - **Event signatures: dump the coclass's source interface** (spike 22). `FileControlEvents` sources `_dispVBFileControlEvents` (`AfterWriteFile` has 4 parameters); the similarly named `_FileControlEvents` has 2 and VB rejects a handler written to it.
 - OCX references live in two places: `Object=` in the `.vbp` **and** `Object = "{GUID}#ver#lcid"; "X.OCX"` in every `.frm`/`.ctl` header. Keep them consistent.
-- `.vbp` reference paths are only hints; VB resolves `{GUID}#maj.min` through `HKCR\TypeLib` (32-bit view). Resolve the same way.
+- `.vbp` reference paths are hints: VB resolves `{GUID}#maj.min` through `HKCR\TypeLib` (32-bit view) first, and falls back to the hint path when it isn't registered (spike 25). Resolve the same way.
 - `MISSING:` references show as `IsBroken = True`. Command-line build errors for them don't name the reference.
 - `.vbp` paths are relative to the `.vbp` folder, may climb out of it (`..\..\Shared\x.bas`), and may use either slash. Typelib refs look like `*\G{GUID}#maj.min#lcid#path#desc`.
 - **Mode tag isn't always last in the IDE title** (spike 12): a maximized MDI child appends ` - [Form1 (Code)]`. Match `\[(design|run|break)\]`. The title stays readable while the IDE is busy (cached caption).

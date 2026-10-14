@@ -309,6 +309,57 @@ Posts `WM_VSCROLL`/`WM_HSCROLL` with `code` (`SB_LINEUP` 0, `SB_LINEDOWN` 1, `SB
 
 Payload: `scrolled <hwnd> (<class>)`. The server verifies the effect with `GetScrollInfo` before and after.
 
+### `DESIGN <id> <op> <args...>` (deferred), `RESULT <id>`
+
+Form designer operations (Phase 5, spike 23), on the designer of a form, UserControl or property page (`VBComponent.Designer`, which works with the designer window closed).
+- **Why deferred:** reading or setting a UserControl's properties runs that UserControl's code at design time, and adding one runs its `InitProperties`. User code never runs under the request handler (hard rule 14). So `DESIGN` validates, queues and replies `QUEUED US id`.
+- **Getting the outcome:** the operation runs from a fresh dispatch and stores its outcome under `id`, a server-chosen string of up to 40 characters.
+- **Mode:** design mode only. Checked when queued and again when run, via command 228 (End), which is enabled only in run and break mode.
+
+`RESULT <id>` returns one of:
+- `pending`
+- `ok US dirty(0/1) US payload`
+- `failed US <number>: <message>`
+- `unknown`
+
+A finished result is removed once read. At most 100 uncollected results are kept.
+
+| op | args | payload |
+|----|------|---------|
+| `CONTROLS` | `project component` | records `name US index US progId US className US controlType US container US left US top US width US height`, walking `ContainedVBControls` from the form down. `index` is `-1` outside control arrays; `container` is empty for the form; controlType 1 light, 2 standard, 3 container (VB reports Label as 2). |
+| `PROPS` | `project component control` | records `name US kind US value`; kind `s`/`n`/`b`, `o` object, `i` indexed (not read), `e` read error. An object property's `Value` is a VBIDE `Properties` collection (spike 23), so its scalar members follow as `Parent.Member` records (`Font.Bold`). |
+| `SET` | `project component control property value` | the property read back as `PROPS` records (all members for `Parent.Member`). The text is converted to the property's current type. Numbers must be `-12`, `3.5` or `&H8000000F&`; anything else is 400. |
+| `ADD` | `project component class name container geometry` | the new control's `CONTROLS` record. `class` as a `.frm` writes it (`VB.CommandButton`, `MSComctlLib.ListView`, not the registered ProgID). `container` is empty for the form. `geometry` is `left,top,width,height`, any part empty. |
+| `REMOVE` | `project component control` | `removed <control>` |
+
+- `control` is `Name` or `Name(index)`, or the component's own name for the form (`VBComponent.Properties`).
+- **Indexed properties** (List, ItemData): `PROPS` gives their items LF-separated, read with `IndexedValue(0..1999)`. Past the end VB returns ""/0, not an error, so the server trims (spike 25). `SET` takes LF- or CRLF-separated items and sets `IndexedValue(j)`.
+- **Pictures:** `SET … <prop> @picture:<path>` loads a picture file into an object property (`Set Property.Object = LoadPicture(path)`). The path is checked against `roots.txt` here too: absolute, no `..`. `@picture:` with no path clears it. VB writes it to the `.frx`.
+- Values are formatted locale-independently (`Str$`, so `8.25` never `8,25`).
+
+### `REFS <project>`, `REFADD ...`, `REFDEL <project> <name>`, `TOOLBOX <project> <progId> [<file>]`
+
+References and toolbox components (Phase 5). These are synchronous, because no user code runs.
+- **Mode:** `REFS` works in every mode; the others need design mode (409).
+- **Reference record:** `name US guid US major US minor US fullPath US builtIn US isBroken US type US description`, where type 0 is a typelib and 1 a project reference. A broken reference has empty fields.
+- **`REFADD <project> file <path>`** calls `References.AddFromFile`. For a DLL that isn't registered, VB adds the reference with an empty `fullPath` and description and doesn't register it (spike 23).
+- **`REFADD <project> guid <{libid}> <major> <minor>`** calls `AddFromGuid`. The GUID comes from the registry or a typelib (hard rule 13); the server checks it is registered.
+- Both return the new record. A duplicate gives VB's own error 32813, "Name conflicts with existing module, project, or object library".
+- **`REFDEL`** returns `removed <name>`. Built-in references are refused (409).
+  - The name may be `#<n>`: the n-th reference in `REFS` order, for a broken reference whose name can't be read.
+  - VB removes a broken reference only while its typelib is registered; otherwise it raises "Object library not registered" (spike 25).
+- **`TOOLBOX`** calls `VBProject.AddToolboxProgID` with the **registered** ProgID (`MSComctlLib.ListViewCtrl.2`), which adds the OCX (an `Object=` line). It returns `added <progId>`. VBIDE can neither list nor remove toolbox components.
+
+### `REGSVR <path> <r|u>`, `REGSTATUS <pid>`
+
+COM (un)registration (Phase 5, spike 24).
+- **`REGSVR`** starts the 32-bit `regsvr32 /s [/u] "<path>"` as a child. It inherits VB6's elevation, so there's no UAC prompt. `GetSystemDirectory` in the 32-bit VB6 is redirected to SysWOW64.
+  - The add-in checks the path itself (hard rule 8): absolute, no `..` or quotes, `.dll`/`.ocx` only, under `roots.txt`, file exists.
+  - Payload: the child's pid. The add-in keeps the process handle.
+- **`REGSTATUS <pid>`** returns `running`, `exit US <code>` (then the handle is closed), or `unknown` for a pid it didn't start. It is non-blocking (`GetExitCodeProcess`).
+- **Errors:** 400 for a refused path, 404 file not found, 409 if regsvr32 couldn't start.
+- **Server side:** the server audits the call, polls `REGSTATUS`, and verifies the result in the registry.
+
 ## Watchdog (`vb6mcp watchdog`)
 
 The elevated sidecar (PLAN.md §3.1, spike 12) speaks the **same protocol**: framing, `VB6MCP1` magic, a 128-bit token, `OK`/`ERR`. Its discovery file is `%LOCALAPPDATA%\vb6mcp\watchdog.json`, with the same fields as an add-in's (`addin` is `"watchdog <version>"`). It is written atomically and deleted on a clean exit.
@@ -339,3 +390,6 @@ Breaking changes bump the magic (`VB6MCP2`) and the discovery `protocol` field. 
 
 - **v1** (2026-10-13): initial version (Phase 1).
 - v1, 2026-10-13: added `APPCLICK`, `APPTEXT`, `SNAP`, `MOUSE`, `SCROLL`, `SCROLLPOS`, `MOUSEREAL`, `MOUSERESTORE` (Phase 3), `CALLSTACK`, `LISTITEMS` (Phase 2), `LISTSTATE`, `SELECT`, `KEYS`, `KEYSREAL` (Phase 3), `MAKE`, `MAKEIDE`, `MAKESTATUS`, `WRITES`, `RELOAD` (Phase 4; `MAKE` takes a `.vbp` path, for closed projects). `MOUSEREAL` became deferred (`QUEUED`) and `MOUSERESTORE` returns the outcome. Deferred actions run one per `WM_DEFER`. New verbs only: older servers never send them, and a new server talking to an older add-in gets 400 "unknown verb".
+- v1, 2026-10-14: added `DESIGN` (deferred, with request ids) and `RESULT`, `REFS`, `REFADD`, `REFDEL`, `TOOLBOX` (Phase 5). New verbs only; against an older add-in the server says to rebuild it.
+- v1, 2026-10-15: added `REGSVR`, `REGSTATUS` (Phase 5 round 2). New verbs only.
+- v1, 2026-10-15: `REFDEL` accepts `#<n>`; `DESIGN SET` accepts `@picture:<path>` and indexed properties; `DESIGN PROPS` returns indexed items (spike 25). Older servers never send these forms.

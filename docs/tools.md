@@ -464,7 +464,7 @@ The elevated watchdog (`vb6mcp watchdog`, started by the add-in; PLAN.md §3.1) 
 
 | Tool | Arguments | What it does |
 |------|-----------|--------------|
-| `ide_kill` | `force` (required true), `pid?` | ends a hung VB6 through the watchdog. The result lists the recovery copies of that IDE with their age |
+| `ide_kill` | `force` (required true), `pid?` | ends a hung VB6 through the watchdog. The result lists the recovery copies of that IDE with their age. Killed in run or break mode, it also lists `comLeftovers`: `.vbp` files whose classes stay registered to the VB6 debugger until VB6 next starts (spike 25; repair with `com_orphans`) |
 | `recovery_list` | `from_pid?` | recovery sessions: pid, `running`, `crashed`, projects, and per component when it was copied |
 | `recovery_read` | `from_pid`, `component`, `project?` | the copied text, and whether it differs from the file on disk |
 | `recovery_restore` | `from_pid`, `component`, `project?`, `pid?` (target) | replaces the code of the component **with the same file** in an open project of a running IDE (design mode). The component is left unsaved |
@@ -532,6 +532,294 @@ A conflict ends by itself when the component has no unsaved changes any more: af
 
 ---
 
+## Form designer (Phase 5)
+
+The designer of a form, UserControl or property page as the IDE holds it now, unsaved changes included.
+
+**Served by:** the add-in's deferred `DESIGN` verb (docs/protocol.md). Reading or setting a UserControl's properties runs its own code, so it never runs under the request handler (hard rule 14). The server queues the operation and polls `RESULT`, so each tool is still one call.
+
+**Common rules:**
+- Design mode only, with no dialog open.
+- The designer window doesn't need to be open (spike 23).
+- `control` is `Name`, `Name(index)` for a control-array element, or the component's own name for the form itself.
+- Every change is unsaved (`dirty: true`); save it with `project_save`.
+
+### `form_controls`
+
+**Arguments:** `component`, `project?`, `pid?`.
+
+Every control, walking containers from the form down. Each has:
+- `name`, `index` (null outside control arrays), `progId` (the `.frm` class, e.g. `VB.CommandButton`, `MSComctlLib.ListView`) and `className`;
+- `kind`: `lightweight`, `standard` or `container`. VB reports Label as standard;
+- `container`: null on the form;
+- `left`, `top`, `width`, `height`: in the container's units, usually twips.
+
+```json
+{ "source": "ide", "project": "Basic", "component": "frmMain", "dirty": false, "count": 2,
+  "controls": [ { "name": "fraOptions", "index": null, "progId": "VB.Frame", "className": "Frame", "kind": "standard",
+                  "container": null, "left": 240, "top": 1800, "width": 3000, "height": 1200 },
+                { "name": "chkFast", "index": 0, "progId": "VB.CheckBox", "className": "CheckBox", "kind": "standard",
+                  "container": "fraOptions", "left": 120, "top": 300, "width": 2000, "height": 480 } ] }
+```
+
+### `form_properties`
+
+**Arguments:** `component`, `control`, `project?`, `pid?`.
+
+All design-time properties as `{ name, type, value }`:
+- `type` is `string`, `number`, `boolean`, `object`, `indexed` or `error`.
+- `indexed` properties (List, ItemData) come with `items` instead of `value`. VB returns "" past the end instead of an error, so List ends at its last non-empty item and ItemData has the same count (spike 25).
+- An object property's value is a collection of sub-properties (spike 23), so its members are listed too: `Font.Name`, `Font.Size`, `Font.Bold`, `Font.Weight`, ..., and for pictures `Icon.Handle` (0 = none), `Icon.Type`, `Icon.Width`, `Icon.Height`.
+- Numbers use `.` (`8.25`).
+- Colours are plain numbers: `-2147483633` is the system colour `&H8000000F&`.
+
+### `form_set_property`
+
+**Arguments:** `component`, `control`, `property`, `value` (text), `project?`, `pid?`.
+
+The text is converted to the property's type:
+- **numbers:** `1200`, `-3.5`, `&H0080FFFF&`. Anything else is refused; VB's `Val` would have turned `abc` into 0.
+- **booleans:** `True`/`False`/`1`/`0`.
+- **strings:** as given, in Windows-1252.
+- **object members:** set as `Parent.Member` (`Font.Bold`, `Font.Size`, `Font.Name`).
+- **pictures** (Picture, Icon, MouseIcon, DragIcon):
+  - `@picture:<full path>` loads a .bmp/.ico/.jpg/.gif under the workspace roots. The server and the add-in both check the path.
+  - `@picture:` clears it.
+  - VB writes the picture into the `.frx` itself, so we never touch `.frx` files. A jpg is stored as an uncompressed bitmap: a 37 KB jpg became a 6.9 MB `.frx`.
+- **lists** (List, ItemData): one item per line, set with `IndexedValue(0, 1, ...)`.
+
+Renaming (`Name`) doesn't rename the control's event procedures, just as in the IDE.
+
+Result: `now`, the value read back. For `Font.Bold` that's all the `Font.*` members.
+
+### `form_add_control`
+
+**Arguments:** `component`, `prog_id`, `name?`, `container?`, `left?`, `top?`, `width?`, `height?`, `project?`, `pid?`.
+
+`prog_id` is the class name **as a `.frm` writes it**: `VB.CommandButton`, `VB.Frame`, `MSComctlLib.ListView`.
+- It is not the registered ProgID (`MSComctlLib.ListViewCtrl.2`): with that, VB's `Add` returns nothing (spike 23).
+- An ActiveX control's component must be in the project first (`refs_add_component`).
+- `container` puts it inside a Frame or PictureBox.
+
+Result: `added`, the new control as in `form_controls`. When saved, VB writes the OCX's `Object =` line into the `.frm` header and the `.vbp` itself, consistently (verified).
+
+### `form_remove_control`
+
+**Arguments:** `component`, `control`, `confirm: true` (required), `project?`, `pid?`.
+
+Removes the control and any controls inside it. Its event procedures stay in the code (verified), as when deleting by hand; Edit > Undo in VB6 brings it back.
+
+**Verified live** (2026-10-14, scratch copy of Basic, spike 23):
+- **Listing:** controls and properties listed with the designer window closed.
+- **Setting:** a caption with `–` and `é` (saved as 1252 bytes 0x96/0xE9), a hex colour, a position and `Font.Bold`. `abc` for `Left` was refused.
+- **Adding:** a Frame; a CheckBox inside it; a ListView (after `refs_add_component`).
+- **Control arrays:** `Index` set to 0, then addressed as `chkFast(0)`.
+- **Removing:** a button, with its `Click` code kept.
+- **After saving:** the `.frm` had the nested Frame/CheckBox, `Index = 0`, a `BeginProperty Font` block with `Weight = 700`, the ListView and its `Object =` header line, all in CR LF.
+- **Second round:** the form's own Caption was set (the component's name as `control`). `MSComctlLib.ListViewCtrl.2` was refused with the class-name hint. Picture properties list as `Icon.Handle`, `Icon.Type`, `Icon.Width`, `Icon.Height` (a non-zero handle means a picture is set). Their members are informational: pictures can't be set.
+
+---
+
+## References and components (Phase 5)
+
+Live from the IDE (VBIDE `References`).
+
+**Served by:** the add-in's `REFS`/`REFADD`/`REFDEL`/`TOOLBOX` verbs (synchronous: no user code runs).
+
+**Rules:**
+- **Mode:** changes need design mode.
+- **GUIDs** come only from the registry or a typelib (hard rule 13). Names and GUIDs are resolved against `HKCR\TypeLib` in the 32-bit view, where VB resolves them too.
+- **File paths** must be under the workspace roots, or be the registered file of a typelib (hard rule 8).
+
+### `refs_list`
+
+**Arguments:** `project?`, `pid?`.
+
+- **`references`:** `{ Name, libId, version, file, builtIn, broken, kind (typelib|project), description }`, live from the IDE.
+- **`components`:** the `.vbp`'s `Object=` lines, read **from disk** because VBIDE can't list them, each with its registered version, description and file.
+
+### `refs_add`
+
+Exactly one of:
+- **`name`:** part of a registered description. Registered versions whose file exists are searched, keeping the newest version per LIBID. One match is added. Several are returned as `candidates` (libId, version, description, file), and nothing is added.
+- **`libid` + `version`:** e.g. `2.8`. It must be registered; the registered versions are listed otherwise.
+- **`file`:** a DLL/OCX/TLB, or a `.vbp` for a project reference inside a group. It must be under the roots or a registered typelib's file. VB adds an unregistered DLL without registering it; the reference then has an empty `file` and `description`.
+
+VB's own errors pass through, e.g. "Name conflicts with existing module, project, or object library" for a duplicate.
+
+```json
+{ "source": "ide", "project": "Basic",
+  "added": { "Name": "ADODB", "libId": "{2A75196C-D9EB-4129-B803-931327F72D5C}", "version": "2.8",
+             "file": "C:\\Program Files (x86)\\Common Files\\System\\ado\\msado28.tlb", "broken": false, "kind": "typelib",
+             "description": "Microsoft ActiveX Data Objects 2.8 Library" }, "note": "unsaved in the IDE; save with project_save" }
+```
+
+### `refs_remove`
+
+**Arguments:** `name` (as `refs_list` shows it), `project?`, `pid?`. Built-in references (VBA, VBRUN, VB) are refused.
+
+`name` may also be `#<position>`, 1-based in `refs_list` order. A broken reference has no readable name. VB removes a broken reference **only while its typelib is registered**; otherwise "Object library not registered" (spike 25). `refs_fix_broken` gives the steps.
+
+### `refs_fix_broken`
+
+**Arguments:** `project?`, `pid?`. Report only.
+
+**For each broken (MISSING:) reference:**
+- `position`; the name is usually unreadable.
+- What the `.vbp` asked for: LIBID, major version, the hint path and whether it exists.
+- What's registered for that LIBID.
+- `filesWithThisTypeLib`: the hint path under the roots, plus every workspace build output and compatibility copy carrying exactly that LIBID and major version.
+- `fix`.
+
+**The fix, in order:**
+1. **Same major version registered:** `refs_remove name=#<position>`, then `refs_add libid … version …`.
+2. **A file carrying it exists:** `com_register` it. VB re-resolves the reference as soon as the typelib is registered: verified, the reference healed with no further step. If it's still broken, remove and re-add.
+3. **Only another major version is registered:** `refs_add` it. The broken entry can't be removed through VBIDE until its own version is registered.
+4. **Nothing carries it:** VBIDE can't remove it. Install or build the component, or the user unchecks it in Project > References.
+
+**Not broken, though unregistered:** when the typelib isn't registered but the `.vbp` hint path points at an existing file, VB loads it from there (spike 25).
+
+### `refs_add_component`
+
+**Arguments:** `prog_id`: the **registered** ProgID of one of the OCX's controls (`MSComctlLib.ListViewCtrl.2`), checked in the registry (32-bit view). This calls `VBProject.AddToolboxProgID`. Result: the ProgID, its CLSID and server file. VBIDE can't remove components.
+
+**Verified live** (2026-10-14, spike 23):
+- **By name:** "Scripting Runtime" added `Scripting`; "ActiveX Data Objects" listed 9 candidates.
+- **By libid:** ADODB 2.8 added.
+- **By file:** the unregistered ComFixture.dll was added. The saved `.vbp` line `Reference=*\G{9FAE05B6-…}#1.0#0#..\ComCompat\ComFixture.dll#ComFixture` carries exactly the LIBID our typelib reader reads from the file, which closes `ws_affected`'s open question.
+- **Refused:** notepad.exe (outside the roots and not a typelib), an unregistered GUID, a duplicate (VB's error 32813), and removing VBA.
+- **Component:** MSCOMCTL added (`Object={831FDD16-…}#2.2#0; mscomctl.OCX` after save).
+
+---
+
+## COM components (Phase 5)
+
+What components offer, what's registered where, binary compatibility, and (un)registration.
+
+**Served by:**
+- **Reads:** `vb6mcp.exe` itself (`Vb6Mcp.Core.Files`): the registry in the 32-bit view (where VB6 looks), and our own typelib reader (`LoadTypeLibEx(REGKIND_NONE)`, nothing registered, one read at a time).
+- **(Un)registration:** the add-in's `REGSVR` verb, elevated (spike 24).
+
+GUIDs are only ever read, never typed in (hard rule 13).
+
+### `com_describe`
+
+**Arguments:** exactly one of `file` (DLL/OCX/TLB/OLB under the roots, or a registered typelib's file), `prog_id`, or `libid` + `version?` (newest registered if omitted). Optionally `filter` (type names containing it) and `include_hidden`.
+
+The type library as VB-like declarations:
+- `Class X` with its `Implements` lines (`[default]`, `[source]` = events). Marked `' control` for ActiveX controls, `' not creatable` for PublicNotCreatable classes.
+- Interfaces with `Sub`/`Function`/`Property Get|Let|Set` and parameters: `ByVal`, `Optional`, defaults, `ParamArray`, VB types.
+- `Enum`s with values, and `Type`s.
+- Help strings as comments.
+
+Without a filter, a listing over 60,000 characters returns the type list (name, kind, member count) instead, so the agent can then ask for one type.
+
+```json
+{ "typeLib": { "libId": "{420B2830-E718-11CF-893D-00A0C9054228}", "version": "1.0", "name": "Scripting", "description": "Microsoft Scripting Runtime", "file": "C:\\Windows\\SysWOW64\\scrrun.dll" },
+  "declarations": "' Scripting {420B2830-…} v1.0 - Microsoft Scripting Runtime\r\n\r\ndispinterface IDictionary ...\r\n    Sub Add(Key As Variant, Item As Variant)  ' Add a new key and item to the dictionary.\r\n..." }
+```
+
+The same text is available on the command line: `vb6mcp describe <file> [filter]`.
+
+### `com_search`
+
+**Arguments:** `text`.
+- **Typelibs:** registered ones whose description or file path contains the text (libId, version, description, file, fileExists).
+- **ProgIDs:** registered ones containing it (progId, clsid, server file, fileExists).
+
+At most 50 of each.
+
+### `com_where`
+
+**Arguments:** exactly one of `prog_id`, `clsid`, `libid`, `file`.
+- **`prog_id`/`clsid`:** the server file, whether it exists and when it was written, the threading model, `builtBy` (workspace projects whose build output is that file), and the class's typelib with its registered versions.
+- **`libid`:** every registered version with its file, `builtBy`, and the projects whose current build has that LIBID.
+- **`file`:** its typelib (read from the file) and each creatable or control class, each with `registeredTo` and `here` (whether the registry points at this file), plus `registeredHere` (everything points here).
+
+```json
+{ "file": "D:\\src\\Controls\\XmText.ocx", "written": "2025-07-22 08:30:57", "builtBy": ["D:\\src\\ControlsSrc\\XmText\\XmText.vbp"],
+  "TypeLib": { "libId": "{ABFCD1E9-…}", "version": "1.0", "name": "XmTextCtrl", "registeredTo": "C:\\Program Files (x86)\\Common Files\\Acme\\Controls\\XmText.ocx", "here": false },
+  "Classes": [ { "name": "XmText", "clsid": "{FCBBA601-…}", "progId": "XmTextCtrl.XmText", "registeredTo": "C:\\Program Files (x86)\\Common Files\\Acme\\Controls\\XmText.ocx", "here": false } ],
+  "registeredHere": false }
+```
+
+### `compat_status`
+
+**Arguments:** `project?` (a `.vbp` path, or a name filter; default every ActiveX DLL/EXE/OCX project under the roots), `refresh?`.
+
+Per project:
+- `mode` (none/project/binary), `version` (MajorVer.MinorVer.RevisionVer);
+- the compatibility file and the build output, each with whether it exists and its typelib (LIBID, version);
+- what's registered for that LIBID;
+- `findings`.
+
+| Level | Finding |
+|-------|---------|
+| warning | not binary compatibility. Verified: without it every build gets a new LIBID and new CLSIDs, and the old ones are unregistered (spike 24) |
+| error | binary compatibility without a compatibility file, the file missing, or no readable typelib in it |
+| warning | the compatibility file is the build output itself (each build replaces its own reference) |
+| error | the output's LIBID differs from the compatibility file's (built without, or broke, compatibility) |
+| warning | the output's major version differs from the compatibility file's |
+| warning | no build output; typelib not registered; or registered, but not for the build output (e.g. an installed copy) |
+
+It only reports; it never changes compatibility settings (hard rule 13).
+
+### `com_register` / `com_unregister`
+
+**Arguments:** `file` (a `.dll`/`.ocx` under the workspace roots), `confirm: true` (required), `force?` (unregister only), `pid?` (which IDE's add-in runs it).
+
+**How it runs:**
+- `regsvr32 /s` (32-bit) runs elevated through the add-in; no UAC prompt.
+- The add-in checks the path again on its side.
+- Each call goes to the audit log.
+
+**Result:**
+- `exitCode`.
+- `before` and `after`: the file's typelib and classes, with where the registry points.
+- `verified`: after registering, everything points at this file; after unregistering, nothing does.
+
+`com_unregister` is refused when some of the file's classes are registered to another file, because VB's unregistration removes the class keys whoever they point at. Pass `force: true` if that's intended.
+
+**Verified live** (2026-10-15, spike 24):
+- **Registering:** scratch `ComFixture.dll` registered, then unregistered. Both `verified` and exit code 0.
+- **Refused:** unregistering a second copy with the same CLSIDs (`force` missing), `confirm: false`, and a system DLL outside the roots. Raw `REGSVR` sent to the add-in, bypassing the server, was refused by the add-in itself for a system DLL, a `..` path and a `.cls` file.
+- **Rebuilding without compatibility:** two `build_make` runs of the same source without compatibility gave different LIBIDs and CLSIDs, and the first build's registrations were gone.
+- **Read tools** on the owner's 12 ActiveX projects: the findings above, and `com_where` traced XmText.ocx to an installed copy.
+
+### `com_orphans`
+
+**Arguments:** `text?` (only entries whose ProgID, description or file contains it), `under_roots?` (only files under the workspace roots). Report only.
+
+**`vb6DebugRegistrations`** (spike 25). While an ActiveX project runs in the IDE, VB registers its classes to `VB98\VB6DEBUG.DLL` and its typelib to the `.vbp`. End puts the previous registration back, and so does the next start of VB6.EXE after a crash. Until then a killed IDE leaves them behind, and programs can't create those classes. Per `.vbp`:
+- `state`: debugging now, or left over;
+- `libId`, `classes`;
+- `repair`: `com_register` of a build carrying that typelib. That's the project's own output, or another workspace build or compatibility copy with the same LIBID; otherwise "build it".
+
+**`classesWithMissingServer`, `typeLibsWithMissingFile`:** registrations whose file doesn't exist as a 32-bit program sees it, at most 100 each with the total. These aren't counted as missing:
+- bare system names (`combase.dll`, found through the system folders);
+- typelib resource suffixes (`vbscript.dll\2`);
+- typelibs without a 32-bit file.
+
+On the owner's machine: 137 classes and 15 typelibs, e.g. Codejock OCXs registered from a deleted installer folder.
+
+The scan covers ~9,100 classes and ~800 typelibs and takes a few seconds.
+
+### `com_diagnose`
+
+**Arguments:** `error` (VB runtime error number) and exactly one of `prog_id`, `clsid`, `file`, `project` (a `.vbp`).
+
+**Result:** `meaning`, VB's message and its usual causes for 429, 430, 48 and 53, plus `checks` (`item`, `status` ok/warning/error, `detail`) and the number of `problems`.
+
+**Checks:**
+- **For a class:** ProgID → CLSID; class registered; server file present and **x86** (VB6 programs are 32-bit; a PE header check); server = VB6DEBUG.DLL (debugger leftover); typelib registered, with its file, or registered to a `.vbp`.
+- **For a file:** whether it's registered to this file.
+- **For a project:** each `Reference=`/`Object=` line is checked the same way.
+- **When a workspace project builds the file:** its `compat_status` findings, which matter for 430.
+
+**Verified live:** 429 on `ComFixture.clsGreeter` after an IDE kill reported "registered to the VB6 debugger" and "typelib registered to a project file, left over". On Form1x it found its unregistered ComFixture reference.
+
+---
+
 ## Workspace (disk)
 
 Disk is the secondary channel (principle 4). These tools work on the **workspace roots** configured in `VB6MCP_ROOTS` (semicolon-separated folders; set by `scripts\install-server.ps1 -Roots`). Paths outside the roots are refused (hard rule 8); without roots the tools explain how to configure them.
@@ -591,6 +879,7 @@ Which projects a change affects, **in rebuild order** (`Vb6Mcp.Core.Files.Affect
 - `.vbp` versions of 10 and above: parsed as hex like the registry's TypeLib keys, but not verified.
 
 **Verified:**
+- For a VB-built DLL, VB itself wrote `Reference=*\G{9FAE05B6-…}#1.0#…` (added with `refs_add`, spike 23), the same LIBID the reader reads from the DLL.
 - The LIBID the reader returns for `stdole2.tlb` is the `HKCR\TypeLib` key that VB resolves `Reference=*\G{00020430-…}#2.0` (a line VB wrote itself, in a scratch project) through.
 - Order, transitive `Object=` users, other major versions, unbuilt DLLs and cycles are covered by unit tests (`AffectedTests`).
 - **Live, on the owner's workspace** (43 projects, 2026-10-14): `Common\modBinding.bas` is included by 7 UserControl projects (binary compatibility).
@@ -658,6 +947,9 @@ Reads a `.bas/.cls/.frm/.ctl/.pag/.dsr` from disk **the way the IDE shows it**: 
 
 ## Change log
 
+- 2026-10-15: `com_orphans`, `com_diagnose`, `refs_fix_broken`; pictures and lists in `form_set_property`/`form_properties`; `refs_remove name=#<position>`; `ide_kill` warns about debugger registrations; `com_where` flags them.
+- 2026-10-15: COM tools (`com_describe`, `com_search`, `com_where`, `compat_status`, `com_register`, `com_unregister`).
+- 2026-10-14: form designer tools (`form_controls`, `form_properties`, `form_set_property`, `form_add_control`, `form_remove_control`) and references (`refs_list`, `refs_add`, `refs_remove`, `refs_add_component`).
 - 2026-10-14: `ws_affected` (rebuild order for shared source, by typelib identity).
 - 2026-10-14: `file_replace_lines` (closed projects; routed to the IDE when open); `hash` in `file_read`; Claude Code PreToolUse hook.
 - 2026-10-14: `sync_status`, `sync_diff`, `sync_take_disk`, `sync_take_ide` (sync engine in the watchdog).

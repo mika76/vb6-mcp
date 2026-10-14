@@ -74,6 +74,12 @@ It also registers a **Claude Code hook** in `~/.claude/settings.json` (a backup 
 
 Open a project in VB6 (or let the agent call `project_open`), then ask Claude to use the `vb6` tools: `ide_list`, `ide_status`, `project_components`, `code_read`, `symbol_outline`, `proc_get`, `project_open`. See [docs/tools.md](docs/tools.md).
 
+To see what's inside a DLL, OCX or type library (classes, methods, enums in VB syntax), without registering it:
+
+```powershell
+vb6mcp describe C:\path\to\Component.dll [TypeNameFilter]
+```
+
 ## Elevated or not?
 
 Whether VB6 runs as administrator is your machine's configuration (a "Run as administrator" shortcut or compatibility setting); a default install runs it non-elevated (spike 16). vb6-mcp works either way (`ide_list` shows `elevated` per IDE):

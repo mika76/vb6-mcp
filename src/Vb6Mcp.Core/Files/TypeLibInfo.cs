@@ -21,15 +21,22 @@ public sealed record TypeLibInfo(Guid LibId, int Major, int Minor, string Name)
     /// Null if the file has no typelib or can't be loaded. Runs on its own STA thread (AGENTS.md: in-process
     /// COM never on thread-pool threads), with a timeout so a bad file can't hang a request.
     /// </summary>
+    /// <summary>
+    /// Serializes typelib reads. OLE caches loaded typelibs, so two reads of the same file share one COM object
+    /// (one RCW); with Marshal.ReleaseComObject on one thread the other failed with "COM object that has been
+    /// separated from its underlying RCW" (Phase 5 live test). Reads take this lock and leave release to the GC.
+    /// </summary>
+    internal static readonly object ComLock = new();
+
     public static TypeLibInfo? Read(string path, TimeSpan? timeout = null)
     {
         TypeLibInfo? result = null;
         var t = new Thread(() =>
         {
-            ITypeLib? lib = null;
+            lock (ComLock)
             try
             {
-                lib = LoadTypeLibEx(path, REGKIND_NONE);
+                var lib = LoadTypeLibEx(path, REGKIND_NONE);
                 lib.GetLibAttr(out var p);
                 try
                 {
@@ -40,7 +47,6 @@ public sealed record TypeLibInfo(Guid LibId, int Major, int Minor, string Name)
                 finally { lib.ReleaseTLibAttr(p); }
             }
             catch (Exception ex) when (ex is COMException or FileNotFoundException or ArgumentException or InvalidCastException) { }
-            finally { if (lib is not null) Marshal.ReleaseComObject(lib); }
         }) { IsBackground = true, Name = "typelib" };
         t.SetApartmentState(ApartmentState.STA);
         t.Start();

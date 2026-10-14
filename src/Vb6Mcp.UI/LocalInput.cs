@@ -163,6 +163,9 @@ public static class LocalInput
             SetForegroundWindow(top);
             if (attached) AttachThreadInput(me, fgThread, false);
             Thread.Sleep(100);
+            // SetForegroundWindow alone is often refused (the user is active in another program);
+            // SwitchToThisWindow (what Alt+Tab uses) gets there (Phase 3 live test, spike 19)
+            for (int i = 0; i < 10 && GetForegroundWindow() != top; i++) { SwitchToThisWindow(top, true); Thread.Sleep(100); }
             if (GetForegroundWindow() != top) { RestoreForeground(previous, cursor); return "couldn't bring the form to the front"; }
             var why = send(h);
             Thread.Sleep(400);                                   // let the program process the input
@@ -207,10 +210,17 @@ public static class LocalInput
             case "dblclick": ins.Add(Btn(0x2)); ins.Add(Btn(0x4)); ins.Add(Btn(0x2)); ins.Add(Btn(0x4)); break;
             case "rclick": ins.Add(Btn(0x8)); ins.Add(Btn(0x10)); break;
             case "drag":
+                // One batch, like the add-in. A paced version (moves 15 ms apart) made no difference in
+                // the live test (spike 20), so the simple form stays.
                 ins.Add(Btn(0x2));
                 for (int i = 1; i <= 10; i++) ins.Add(Move(p.X + (p2.X - p.X) * i / 10, p.Y + (p2.Y - p.Y) * i / 10));
                 ins.Add(Btn(0x4)); break;
         }
+        return SendAll(ins);
+    }
+
+    private static string? SendAll(List<INPUT> ins)
+    {
         var arr = ins.ToArray();
         uint sent = SendInput((uint)arr.Length, arr, Marshal.SizeOf<INPUT>());
         return sent == arr.Length ? null : $"SendInput sent {sent} of {arr.Length} events";

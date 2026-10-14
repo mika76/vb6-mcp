@@ -42,3 +42,9 @@ tests/fixtures/scratch/
 
 # compiled fixture programs (exe_run tests)
 tests/fixtures/**/*.exe
+
+# fixture build outputs (build_make tests)
+tests/fixtures/**/*.dll
+tests/fixtures/**/*.lib
+tests/fixtures/**/*.exp
+tests/fixtures/**/*.oca

@@ -57,7 +57,7 @@ public sealed partial class IdeTools
         int? only = a.Int("from_pid");
         var sessions = Store.Sessions().Where(s => only is null || s.Pid == only).Select(s => new
         {
-            pid = s.Pid, running = Discovery.IsVb6Process(s.Pid), crashed = s.Crashed,
+            pid = s.Pid, running = s.Note == null && Discovery.IsVb6Process(s.Pid), crashed = s.Note == null && s.Crashed, note = s.Note,
             updated = s.Updated.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture), projects = s.ProjectFiles,
             recovery = RecoverySummary(s.Pid),
         }).ToList();
@@ -137,7 +137,7 @@ public sealed partial class IdeTools
     {
         int fromPid = a.Int("from_pid") ?? throw new ToolException("missing required argument 'from_pid'");
         if (a.Bool("confirm") != true) throw new ToolException("recovery_discard needs confirm=true: the copies are deleted for good");
-        if (Discovery.IsVb6Process(fromPid)) throw new ToolException($"VB6 {fromPid} is still running; its copies are kept up to date automatically");
+        if (fromPid < RecoveryStore.KeptId(0) && Discovery.IsVb6Process(fromPid)) throw new ToolException($"VB6 {fromPid} is still running; its copies are kept up to date automatically");
         int n = Store.Copies(fromPid).Count;
         Store.DeleteSession(fromPid);
         return ToolResult.Ok(new { pid = fromPid, deleted = n });

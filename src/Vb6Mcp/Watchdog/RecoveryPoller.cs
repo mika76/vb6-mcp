@@ -47,6 +47,12 @@ public sealed class RecoveryPoller(
         foreach (var session in store.Sessions())
         {
             if (livePids.Contains(session.Pid)) continue;
+            // copies kept on purpose (sync_take_disk) and crashed sessions: kept for a while, then pruned
+            if (session.Note != null)
+            {
+                if (DateTime.Now - session.Updated > KeepCrashed) { store.DeleteSession(session.Pid); log($"recovery: kept copies {session.Pid} pruned"); }
+                continue;
+            }
             if (stalePids.Contains(session.Pid))
             {
                 // discovery file left behind, process gone: crashed or killed (spike 12b). Keep the copies.

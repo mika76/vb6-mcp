@@ -36,6 +36,15 @@ public sealed partial class IdeTools
         new("debug_callstack",
             "The call stack in break mode, most recent call first (from View > Call Stack, which is opened, read and closed again).",
             Schema.Object(("pid", "integer", PidDesc, false)), (a, ct) => CallStackAsync(a, ct)),
+        new("debug_output",
+            "OutputDebugString output of the programs being worked on (compiled VB6 programs have no Debug.Print; programs that log " +
+            "usually call OutputDebugString). The first call starts capturing (earlier output is lost); later calls return what " +
+            "arrived, after after_id. By default only VB6.EXE (the program running in the IDE) and programs started with exe_run; " +
+            "all=true shows every process. stop=true releases the capture buffer (only one monitor, e.g. DebugView, can own it).",
+            Schema.Object(("after_id", "integer", "Only messages after this id (the last_id of the previous call).", false),
+                          ("all", "boolean", "Messages of every process.", false), ("max", "integer", "At most this many (default 200).", false),
+                          ("stop", "boolean", "Stop capturing and release the buffer.", false)),
+            (a, _) => Task.FromResult(DebugOutputRead(a))),
         new("debug_error",
             "The runtime error dialog ('Run-time error 11: Division by zero'), if one is open: error number and message. With " +
             "action 'debug' it presses Debug and returns the failing line (then use debug_locals / debug_callstack); with action " +
@@ -172,6 +181,43 @@ public sealed partial class IdeTools
         // the line ends with a separator, so the last part is empty
         if (parts.Length != count + 1 || parts[^1].Length != 0) return null;
         return parts[..count];
+    }
+
+    // ---------- debug_output ----------
+
+    /// <summary>One capture per server process: the DBWIN buffer can only have one owner.</summary>
+    private static DebugOutput? s_dbwin;
+    private static readonly object s_dbwinLock = new();
+
+    private ToolResult DebugOutputRead(JsonObject a)
+    {
+        lock (s_dbwinLock)
+        {
+            if (a.Bool("stop") == true)
+            {
+                bool was = s_dbwin?.Running == true;
+                s_dbwin?.Dispose(); s_dbwin = null;
+                return ToolResult.Ok(new { capturing = false, note = was ? "capture stopped; the DBWIN buffer is free for DebugView" : "wasn't capturing" });
+            }
+            bool started = false;
+            if (s_dbwin is null)
+            {
+                var mon = new DebugOutput();
+                if (mon.Start() is { } why) { mon.Dispose(); throw new ToolException(why); }
+                s_dbwin = mon; started = true;
+            }
+            long after = a.Int("after_id") ?? 0;
+            bool all = a.Bool("all") ?? false;
+            int max = Math.Clamp(a.Int("max") ?? 200, 1, 2000);
+            var msgs = s_dbwin.Read(after, m => all || m.Process.Equals("VB6", StringComparison.OrdinalIgnoreCase) || _exes.ContainsKey(m.Pid), max);
+            return ToolResult.Ok(new
+            {
+                capturing = true, since = s_dbwin.Started.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+                messages = msgs.Select(m => new { id = m.Id, time = m.Time.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture), pid = m.Pid, process = m.Process, text = m.Text }),
+                last_id = s_dbwin.LastId,
+                note = started ? "capture started now; output written before this call isn't available. Call again (with after_id) to read new output" : null,
+            });
+        }
     }
 
     // ---------- debug_callstack ----------

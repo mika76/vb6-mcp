@@ -160,4 +160,20 @@ public static class RecoveryTests
         Assert.True(!r.IsError && r.Text.Contains("watchdog") && r.Text.Contains("\"mode\":\"break\""), r.Text);
         Assert.SequenceEqual(new[] { "BREAK 4242" }, asked, "add-in not tried: the IDE doesn't respond");
     }
+
+    [Test]
+    public static async Task KeptCopiesSurviveThePollerUntilTheyExpire()
+    {
+        using var ide = new FakeIde();
+        var store = TempStore();
+        int kept = RecoveryStore.KeptId(ide.Addin.Instance.Pid);
+        store.WriteSession(new RecoverySession(kept, "", DateTime.Now, true, [], "kept by sync_take_disk"));
+        store.WriteCopy(kept, new RecoveryCopy("Basic", "", "modMath", 1, "D:\\b\\modMath.bas", 1, "h", DateTime.Now), "x");
+        ide.MathDirty = false;
+        await Poller(store, ide, IdeMode.Design, TimeSpan.FromMinutes(1)).PollOnceAsync(default);
+        Assert.Equal(1, store.Copies(kept).Count, "a kept copy isn't pruned as 'saved'");
+        store.WriteSession(new RecoverySession(kept, "", DateTime.Now.AddDays(-8), true, [], "kept by sync_take_disk"));
+        await Poller(store, ide, IdeMode.Design, TimeSpan.FromMinutes(1)).PollOnceAsync(default);
+        Assert.Equal(0, store.Copies(kept).Count, "pruned after 7 days");
+    }
 }

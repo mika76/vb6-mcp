@@ -68,6 +68,8 @@ From an **Administrator** PowerShell (building an ActiveX DLL registers it machi
 
 Publishes `vb6mcp.exe` to a new folder `build\server\<timestamp>\` (a running Claude session locks the installed exe, so each install gets its own folder; old unused ones are removed) and registers it at **local scope** for this folder (`claude mcp add --scope local vb6 …`). Restart the Claude session to load it; check with `claude mcp get vb6` (run from this folder). The server's log goes to `build\vb6mcp.log`.
 
+It also registers a **Claude Code hook** in `~/.claude/settings.json` (a backup is kept as `settings.json.vb6mcp-backup`). The hook stops agents editing VB6 source files with the generic Edit/Write tools, so they use the vb6 tools, which keep the 1252 encoding and hidden header lines and respect a running IDE. Pass `-NoHook` to skip it.
+
 ### 3. Use it
 
 Open a project in VB6 (or let the agent call `project_open`), then ask Claude to use the `vb6` tools: `ide_list`, `ide_status`, `project_components`, `code_read`, `symbol_outline`, `proc_get`, `project_open`. See [docs/tools.md](docs/tools.md).

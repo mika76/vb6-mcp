@@ -41,6 +41,11 @@ Public Function Dispatch(ByVal verb As String, args() As String) As String
     Case "CALLSTACK":  NeedArgs args, 0, 0: Dispatch = QueueCallStack(): Exit Function
     Case "LISTITEMS":  NeedArgs args, 1, 1: payload = ListItems(args(0))
     Case "LISTSTATE":  NeedArgs args, 1, 1: payload = AppListState(args(0))
+    Case "MAKE":       NeedArgs args, 1, 1: payload = MakeProject(args(0))
+    Case "MAKESTATUS": NeedArgs args, 0, 0: payload = MakeStatus()
+    Case "WRITES":     NeedArgs args, 1, 1: payload = WritesSince(CLng(Val(args(0))))
+    Case "RELOAD":     NeedArgs args, 3, 3: Dispatch = QueueReload(args(0), args(1), args(2)): Exit Function
+    Case "MAKEIDE":    NeedArgs args, 1, 1: Dispatch = QueueMakeInIde(args(0)): Exit Function
     Case "SELECT":     NeedArgs args, 2, 2: Dispatch = QueueSelect(args(0), args(1)): Exit Function
     Case "KEYS":       NeedArgs args, 2, 2: payload = AppKeys(args(0), args(1), False)
     Case "KEYSREAL":   NeedArgs args, 2, 2: Dispatch = "QUEUED" & US() & AppKeys(args(0), args(1), True): Exit Function
@@ -542,6 +547,85 @@ Private Function AppKeys(ByVal hexHwnd As String, ByVal events As String, ByVal 
         PostKeys h, events
         AppKeys = "keys " & (UBound(tok) + 1) & US() & Hex$(h)
     End If
+End Function
+
+' args: full path of a .vbp -> pid US log path US vbp. VB6.EXE /make refuses a project that is open in
+' any IDE ("The file '...' is already open.", Phase 4 spike), so this is for closed projects; open ones
+' are built in their IDE (MAKEIDE). The path must be under a workspace root listed in
+' %LOCALAPPDATA%\vb6mcp\roots.txt (written by install-server.ps1) and contain no "..". The token is the
+' real boundary (anything that can read it can already drive this IDE); the roots check is defense
+' in depth, because an elevated /make registers components machine-wide (hard rule 8).
+Private Function MakeProject(ByVal vbp As String) As String
+    Dim logPath As String, pid As Long, p As Long, name As String
+    If LCase$(Right$(vbp, 4)) <> ".vbp" Then Err.Raise E_BADREQUEST, , "not a .vbp: " & vbp
+    If InStr(vbp, "..") > 0 Or Mid$(vbp, 2, 2) <> ":\" Then Err.Raise E_BADREQUEST, , "the path must be absolute, without '..'"
+    If Not UnderRoots(vbp) Then Err.Raise E_BADREQUEST, , vbp & " isn't under the workspace roots (" & BaseDir() & "\roots.txt)"
+    If Len(Dir$(vbp)) = 0 Then Err.Raise E_NOTFOUND, , "project file not found: " & vbp
+    For p = 1 To g_VBE.VBProjects.Count
+        If StrComp(g_VBE.VBProjects(p).FileName, vbp, vbTextCompare) = 0 Then Err.Raise E_CONFLICT, , "the project is open in this IDE; /make can't build it (use MAKEIDE)"
+    Next
+    name = Mid$(vbp, InStrRev(vbp, "\") + 1)
+    name = Left$(name, Len(name) - 4)
+    EnsureDir BaseDir() & "\builds"
+    logPath = BaseDir() & "\builds\" & Format$(Now, "yyyymmdd-hhnnss") & "-" & name & ".log"
+    pid = StartBuild(vbp, logPath)
+    If pid = 0 Then Err.Raise E_CONFLICT, , "VB6.EXE /make couldn't be started"
+    MakeProject = pid & US() & logPath & US() & vbp
+End Function
+
+' True if path is inside one of the roots in roots.txt (one absolute folder per line).
+Private Function UnderRoots(ByVal path As String) As Boolean
+    Dim f As Integer, root As String
+    On Error GoTo Done
+    If Len(Dir$(BaseDir() & "\roots.txt")) = 0 Then Exit Function
+    f = FreeFile
+    Open BaseDir() & "\roots.txt" For Input As #f
+    Do While Not EOF(f)
+        Line Input #f, root
+        root = Trim$(root)
+        If Len(root) > 2 Then
+            If Right$(root, 1) <> "\" Then root = root & "\"
+            If StrComp(Left$(path, Len(root)), root, vbTextCompare) = 0 Then UnderRoots = True: Exit Do
+        End If
+    Loop
+Done:
+    If f <> 0 Then Close #f
+End Function
+
+' -> outcome of the last MAKEIDE: "" (none yet), "running", "ok", or "failed US message".
+' MakeCompiledFile shows no dialog for a compile error: it raises E_FAIL ("Method '~' of object '~'
+' failed"), so the server needs this to know (Phase 4 spike).
+Private Function MakeStatus() As String
+    MakeStatus = LastMakeResult()
+End Function
+
+' args: project name -> QUEUED US output file. VBProject.MakeCompiledFile builds from IDE memory
+' (unsaved edits included) to the project's BuildFileName. Deferred: it compiles and can show
+' modal dialogs (compile errors, compatibility), which must not block the request handler.
+Private Function QueueMakeInIde(ByVal prjName As String) As String
+    Dim prj As VBIDE.VBProject
+    Set prj = FindProject(prjName)
+    If g_VBE.CommandBars.FindControl(, 228).Enabled Then Err.Raise E_CONFLICT, , "the program is running; end it first"
+    MarkMakeQueued
+    Enqueue "MAKEIDE" & US() & prj.Name
+    QueueMakeInIde = "QUEUED" & US() & prj.BuildFileName
+End Function
+
+' args: project, component, mode (clean | discard) -> QUEUED. Reloads a component from its file
+' (VBComponent.Reload, spike 8): refreshes code and designer. "clean" is the sync engine's automatic
+' reload of an unmodified component; "discard" throws away unsaved IDE edits and is only sent by
+' sync_take_disk with explicit confirmation (hard rule 9), after the server kept a recovery copy.
+' Deferred: reloading a form can create design-time instances of user controls (their code runs).
+' Design mode only (Reload fails with error 5 in break mode, spike 8).
+Private Function QueueReload(ByVal prjName As String, ByVal cmpName As String, ByVal mode As String) As String
+    Dim cmp As VBIDE.VBComponent
+    If mode <> "clean" And mode <> "discard" Then Err.Raise E_BADREQUEST, , "mode must be clean or discard"
+    Set cmp = FindComponent(prjName, cmpName)
+    If g_VBE.CommandBars.FindControl(, 228).Enabled Then Err.Raise E_CONFLICT, , "the program is running or in break mode; reload in design mode"
+    If mode = "clean" And cmp.IsDirty Then Err.Raise E_CONFLICT, , cmpName & " has unsaved changes; not reloaded"
+    If cmp.FileCount = 0 Then Err.Raise E_CONFLICT, , cmpName & " has no file"
+    Enqueue "RELOAD" & US() & prjName & US() & cmpName & US() & mode
+    QueueReload = "QUEUED" & US() & "reload " & cmpName
 End Function
 
 Private Function HexToLong(ByVal hexText As String) As Long

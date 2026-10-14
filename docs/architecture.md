@@ -51,10 +51,14 @@ The add-in and the watchdog run elevated and serve loopback TCP; both check a 12
 | `Files.PathKey` | file identity: absolute, `..\` resolved, either slash, subst → target, mapped drive → UNC, case-insensitive key | hard rule 3 (shared source) |
 | `Files.VbpFile`, `Files.VbgFile` | read-only `.vbp`/`.vbg` view: name, type, members with resolved paths, raw `Reference=`/`Object=` values, output file, compatibility mode/file | GUIDs kept raw, never rewritten (hard rule 13) |
 | `Files.ProjectMap` | in-memory index of all `.vbp` under the roots: file → projects, shared files, roots check | 43 projects / 1,498 files in 4.9 s cold, 0.34 s warm on the owner's workspace: no cache file needed (spike [9](spikes/09-project-map-scan.md)) |
+| `Files.TypeLibInfo`, `Files.Affected` | typelib identity (LIBID, version) read with `LoadTypeLibEx(REGKIND_NONE)` on its own STA thread; `.vbp` `Reference=`/`Object=` parsing; affected projects and rebuild order (`ws_affected`) | references matched by LIBID + major, never by file name (hard rule 13); the reader returns the LIBID that VB resolves through `HKCRTypeLib` (`AffectedTests`) |
 | `Vb6Install` | finds VB6.EXE (`VB6MCP_VB6_EXE`, registry `ProductDir`, `.vbp` association, default folder); reads a process's integrity level | no machine-specific paths in code (PLAN §0.2, spike 16) |
 | `VbLocals` | names declared in one procedure (signature, return value, Dim/Static/ReDim) for `debug_locals` | the Locals window is custom-drawn (spike 18); declarations only, no expression parsing |
 | `Recovery.RecoveryStore` | recovery copies of unsaved code: `%LOCALAPPDATA%\vb6mcp\recovery\<pid>\` (session + per component text and metadata) | written by the watchdog, read by the server; atomic writes |
 | `Bridge.WatchdogDiscovery` | `watchdog.json` (same fields as an add-in discovery file) | so `AddinClient` talks to the watchdog unchanged |
+| `LineDiff` | Myers line diff with unified output | for `sync_diff`; no third-party diff library (principle 1) |
+| `SyncState` | `%LOCALAPPDATA%\vb6mcp\sync\state.json`: conflicts and recent sync events | written by the watchdog's sync poller, read by `sync_status` |
+| `BuildLog` | parses `/make` logs: status, compile errors (0-based IDE lines → 1-based), compatibility errors | formats from spike 21 |
 | `VbCode` | module hash, validation of text to insert (CR LF, 1023 chars/line, 24 continuations, strict 1252), slicing, procedure-range trimming | hard rules 1, 10 |
 | `Protocol.Wire` | frames, request building, response/record parsing | [protocol.md](protocol.md) |
 | `Bridge.Discovery` | scans instance files; live vs stale (crashed/killed) | stale = process gone or PID reused (spike 12) |
@@ -67,6 +71,7 @@ The add-in and the watchdog run elevated and serve loopback TCP; both check a 12
 | `IdeWindows` | IDE main window title → mode, `WM_NULL` probe, `IsHungAppWindow`, `#32770` dialogs, Immediate window, main window handle | title tag not always last (spike 12); cached caption readable while busy |
 | `AppWindows` | the running program's windows (top-level windows of the VB6 process minus the IDE's own classes) and their controls (child walk), `Thunder*`/`ThunderRT6*` class → kind, `WM_GETTEXT` with a timeout | reads cross elevation (spike 10); Labels/Images have no hwnd |
 | `LocalInput` | input from the server into compiled programs started with `exe_run` (same integrity): posted click/text/mouse/scroll/keys/select, and `SendInput` real input with foreground and cursor restore | mirrors the add-in's `Input.bas`; only for processes the server started |
+| `DebugOutput` | OutputDebugString capture (DBWIN_BUFFER mapping + DBWIN_BUFFER_READY/DATA_READY events) on a background thread, last 2,000 messages | one owner per session (DebugView competes); started on first `debug_output` |
 | `Screenshots` | `PrintWindow` capture (non-elevated VB6 only), BMP load, PNG with max width (`System.Drawing`) | elevated VB6 is captured by the add-in instead (spike 15) |
 
 ### `Vb6Mcp` (`vb6mcp.exe`)
@@ -76,11 +81,13 @@ The add-in and the watchdog run elevated and serve loopback TCP; both check a 12
 | `Mcp.McpServer` | JSON-RPC loop, initialize/ping/tools | hand-written, no SDK (spike [1](spikes/01-mcp-handshake.md)); unknown methods → -32601 (the desktop client probes `server/discover`); requests handled concurrently |
 | `Mcp.Tool`, `ToolResult`, `Schema` | tool definitions and results | expected failures → `isError` results |
 | `Tools.IdeTools` | read tools (`IdeTools.cs`), editing tools (`IdeTools.Edit.cs`), `ide_launch` (`IdeTools.Launch.cs`: ShellExecute for auto/elevated, RunAsInvoker for normal), run/debug (`IdeTools.Debug.cs`: command, then observe mode/dialogs; tracks runs it started and breakpoints it toggled), inspection (`IdeTools.Inspect.cs`: locals via declarations + Immediate `TypeName`/`CStr`, call stack via the dialog, runtime errors), compiled programs (`IdeTools.Exe.cs`: `exe_run`/`exe_end`), the running program (`IdeTools.App.cs`: a `Target` is the IDE's program (input via the add-in) or an `exe_run` program (input via `LocalInput`); reads by the server, input and elevated screenshots through the add-in, effect verified afterwards) | [tools.md](tools.md); edits: module hash + old-text guard, design mode only |
-| `Tools.WorkspaceTools` | disk tools over `VB6MCP_ROOTS`: project map, file → projects, `file_read` (with "open in an IDE?" check) | paths outside the roots refused (hard rule 8) |
+| `Tools.WorkspaceTools` | disk tools over `VB6MCP_ROOTS`: project map, file → projects, `file_read` (with "open in an IDE?" check), `file_replace_lines` (disk edit, header byte-exact via `VbSourceFile.ReplaceCode`; routed to the IDE when the file is open), `ws_affected` (rebuild order, with where each project is open) | paths outside the roots refused (hard rule 8) |
 | `Tools.Audit` | append-only `%LOCALAPPDATA%\vb6mcp\audit.log`: app input, `debug_eval`, `ide_launch` | hard rule 8; opened shared, never fails the tool |
 | `Tools.IdeTools` (Watchdog, Recovery) | `ide_kill`, the watchdog fallbacks of `run_break`, `ide_dialog_respond`, `app_screenshot`, `ide_launch`; `recovery_*` | the watchdog is optional: tools say when they need it |
 | `Watchdog.WatchdogHost` / `WatchdogActions` | the watchdog mode: TCP endpoint (own threads), BREAK/PRESS/KILL/SNAP/LAUNCH limited to VB6 processes | spike 12; Ctrl+Break only with VB6 in front |
+| `Watchdog.SyncPoller` | every 2 s: own writes (add-in `WRITES`) vs file time stamps; reloads clean components (`RELOAD clean`), records conflicts, waits for design mode | PLAN §8; in the watchdog because outside changes happen without an agent session |
 | `Watchdog.RecoveryPoller` | polls add-ins every 10 s for unsaved components, only while the user is idle and the IDE isn't running the program | hard rule 12; polling instead of add-in heartbeats keeps the add-in thin |
+| `Hook` | `vb6mcp hook`: Claude Code PreToolUse hook blocking Edit/Write on VB6 files (exit 2 + reason); `install-hook` merges it into `~/.claude/settings.json` | PLAN §8; generic tools would write UTF-8 and bypass the IDE |
 | `Tools.IIdeEnvironment` | discovery + window reads + clients | swapped for fakes in tests |
 
 ## The add-in (`addin/VB6McpBridge`)
@@ -94,6 +101,7 @@ VB6 ActiveX DLL, ProgID `VB6McpBridge.Connect`, version 0.1.0, binary-compatible
 | `Verbs.bas` | `PING`, `PROJECTS`, `COMPONENTS`, `READ`, `MEMBERS`, `PROC`, `OPEN`, `REPLACE`, `SAVE`, `CLICK`, `CMD`, `SETSEL`, `WHERE`, `IMM`, `IMMSELECT`/`IMMCOPY`/`IMMPEEK`/`IMMRESTORE`, `CALLSTACK`, `LISTITEMS`, `APPCLICK`, `APPTEXT`, `SNAP`, `MOUSE`, `SCROLL`, `SCROLLPOS`, `MOUSEREAL`, `MOUSERESTORE`; errors → 400/404/409/500 |
 | `Defer.bas` | queue + `WM_DEFER` message: runs deferred actions (`OPEN`, `SAVE`, `CMD`, menu items by path (full compile, Call Stack), `IMM`, `APPTEXT`, `SNAP`) from a fresh dispatch |
 | `Input.bas` | input into the IDE's own process only: `BM_CLICK` to dialog and program buttons, `WM_SETTEXT` to program text boxes, posted mouse and scroll messages, real input (`SendInput`) for windowless controls with cursor/foreground restore (spike 17), `WM_CHAR`/Enter to the Immediate window, clipboard save/restore |
+| `Sync.bas` | records the IDE's own file writes (`FileControlEvents.AfterWriteFile`, hooked in `Connect.cls`) for `WRITES` | event handlers only record |
 | `Sidecar.bas` | starts the watchdog (`App.Path\watchdog\vb6mcp.exe watchdog`) with `CreateProcess`, no wait |
 | `Snap.bas` | `PrintWindow` of an own-process window into a 32 bpp BMP under `%LOCALAPPDATA%\vb6mcp\shots\` (temp + rename) |
 | `Status.bas` | "VB6 MCP" toolbar: version, DLL build time, port, request count |

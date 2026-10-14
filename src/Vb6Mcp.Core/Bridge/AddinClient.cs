@@ -198,6 +198,48 @@ public sealed class AddinClient(InstanceInfo instance, TimeSpan? timeout = null)
         return payload.Length == 0 ? [] : payload.Split(Wire.RS);
     }
 
+    // ---- builds (Phase 4) ----
+
+    /// <summary>Starts VB6.EXE /make for a closed project (elevated child of VB6; path under the roots). Returns the child's pid, the log file and the .vbp.</summary>
+    public async Task<(int Pid, string LogPath, string Vbp)> MakeAsync(string vbpPath)
+    {
+        var f = Wire.Fields(await SendAsync("MAKE", vbpPath).ConfigureAwait(false), 3);
+        return (Int(f[0]), f[1], f[2]);
+    }
+
+    /// <summary>Queues VBProject.MakeCompiledFile (builds from IDE memory). Returns the output file it builds.</summary>
+    public async Task<string> MakeInIdeAsync(string project)
+    {
+        var r = await SendRawAsync("MAKEIDE", [project]).ConfigureAwait(false);
+        if (r.Status == ResponseStatus.Error) throw new AddinErrorException(r.ErrorCode, r.ErrorMessage);
+        return r.Payload;
+    }
+
+    /// <summary>Outcome of the last MAKEIDE: "", "queued", "running", "ok", or "failed" with a message.</summary>
+    public async Task<(string State, string? Message)> MakeStatusAsync()
+    {
+        var f = (await SendAsync("MAKESTATUS").ConfigureAwait(false)).Split(Wire.US, 2);
+        return (f[0], f.Length > 1 ? f[1] : null);
+    }
+
+    // ---- sync (Phase 4) ----
+
+    /// <summary>Files the IDE wrote itself since sequence number <paramref name="since"/>; returns the new sequence number and the writes.</summary>
+    public async Task<(long Next, IReadOnlyList<string> Paths)> WritesAsync(long since)
+    {
+        var payload = await SendAsync("WRITES", since.ToString(CultureInfo.InvariantCulture)).ConfigureAwait(false);
+        var f = payload.Split(Wire.US, 2);
+        var paths = f.Length < 2 || f[1].Length == 0 ? [] : f[1].Split(Wire.RS).Select(r => r.Split(Wire.US)[0]).ToList();
+        return (long.Parse(f[0], CultureInfo.InvariantCulture), paths);
+    }
+
+    /// <summary>Queues VBComponent.Reload: mode "clean" (refused/skipped if the component has unsaved changes) or "discard".</summary>
+    public async Task ReloadAsync(string project, string component, string mode)
+    {
+        var r = await SendRawAsync("RELOAD", [project, component, mode]).ConfigureAwait(false);
+        if (r.Status == ResponseStatus.Error) throw new AddinErrorException(r.ErrorCode, r.ErrorMessage);
+    }
+
     // ---- the running program (Phase 3) ----
 
     /// <summary>Posts a click to a command button / check box / option button of the IDE process.</summary>

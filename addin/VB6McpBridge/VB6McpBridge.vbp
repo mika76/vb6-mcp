@@ -9,6 +9,7 @@ Module=Defer; Defer.bas
 Module=Input; Input.bas
 Module=Snap; Snap.bas
 Module=Sidecar; Sidecar.bas
+Module=Sync; Sync.bas
 Startup="(None)"
 ExeName32="VB6McpBridge.dll"
 Command32=""

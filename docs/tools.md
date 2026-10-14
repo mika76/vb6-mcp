@@ -169,7 +169,10 @@ Open a `.vbp` or `.vbg` in a **running** IDE.
 
 **Rules:**
 - If the IDE has no project, `mode` isn't needed.
-- If it has projects, `mode` is **required** (hard rule 11, don't hijack the user's session). `add` adds to a group; `replace` closes the open projects and is **refused while any of them has unsaved changes**, because VB6 would ask to save and nobody would answer. The add-in removes the open projects and then adds the new one; it doesn't use `AddFromFile(path, True)`, which wrote a `Group1.vbg` into VB6's current folder.
+- If it has projects, `mode` is **required** (hard rule 11, don't hijack the user's session). `add` adds to a group; `replace` closes the open projects and is **refused while any of them has unsaved changes**, because VB6 would ask to save and nobody would answer. The add-in first removes the open projects, then opens the new one with `AddFromFile(path, True)` into the empty IDE.
+  - With projects still open, `AddFromFile(path, True)` wrote a `Group1.vbg` of the closed projects into VB6's current folder.
+  - `AddFromFile(path, False)` makes even a single project a project group, and then Save asks for a group file name.
+  - So only `add` next to other projects uses `False`.
 - If the path is already open, the result is `already-open` and nothing happens.
 - Starting VB6 itself isn't possible from here: a non-elevated process starting VB6 triggers a UAC prompt (spike 2). That's the watchdog's `ide_launch` (Phase 2b).
 
@@ -286,6 +289,20 @@ VB6 has no debugger API. These tools run IDE commands (deferred in the add-in, p
 { "compiles": true, "status": "running-with-dialog", "note": "...", "dialogs": [ ... ] }
 ```
 It runs Start With Full Compile, so on success the program **starts** and is ended again at once; startup code (e.g. `Form_Load`) runs briefly. If that code shows a dialog, the program is left running with the dialog reported.
+### Debug output (`debug_output`)
+
+Compiled VB6 programs have no `Debug.Print`, because it is compiled out. Programs that log usually call `OutputDebugString` (`Declare Sub OutputDebugString Lib "kernel32" Alias "OutputDebugStringA"`). `debug_output` captures that output through the DBWIN shared buffer, the protocol DebugView uses:
+- **Starting:** the first call starts capturing. Output written before then is lost.
+- **Reading:** later calls return the messages after `after_id`. Each call returns `last_id` to pass next time.
+- **Filtering:** by default only `VB6.EXE` (the program running in the IDE) and programs started with `exe_run`; `all: true` shows every process.
+- **Buffer:** only one monitor can own the DBWIN buffer. If DebugView, a debugger or another vb6mcp session owns it, the tool says so. `stop: true` releases it again.
+- **Storage:** messages are kept in memory (the last 2,000). The text is ANSI, decoded with the system code page.
+
+```json
+{ "capturing": true, "since": "2026-10-14 00:50:12", "last_id": 3,
+  "messages": [ { "id": 3, "time": "00:50:31.204", "pid": 17264, "process": "VB6", "text": "UI fixture: text = Hello" } ] }
+```
+
 ### Inspecting a stopped program
 
 | Tool | Arguments | Needs mode | What it does |
@@ -402,7 +419,10 @@ If the click hits a breakpoint or a runtime error, `mode` becomes `break` and th
   - drag in a PictureBox, with exact coordinates;
   - double-click in a ListBox;
   - Label click: no effect without `real_input`; with `real_input: true` the label's `Click` fired ("Label clicked 1"). Run with Claude in front: afterwards the same window was in front again and the cursor was back at the same pixel.
-- Not yet verified: VB drag-and-drop (`DragMode` automatic, OLE drag).
+- **Drag-and-drop** (spike 20):
+  - VB's classic drag (`DragMode`, `DragDrop` event) needs `real_input: true`. It worked in the IDE with exact drop coordinates, and posted drags do nothing.
+  - **OLE drag (`OLEDragMode`/`OLEDropMode`) could not be started with synthetic input** on the test machine, though it works by hand. The machine is a VM used over RDP, and the RDP client pulls the cursor back during slower drags.
+  - Use the program's non-drag path for that, or ask the user.
 
 **`app_keys` syntax:**
 - Plain text is typed as characters (Windows-1252; a line break means Enter).
@@ -468,6 +488,50 @@ After a crash: `ide_launch` the project, then `recovery_list`, `recovery_read` a
 
 ---
 
+## Builds (Phase 4)
+
+VB6 `/make` refuses a project that is open in any IDE (spike 21). So the tools split by whether the project is open:
+
+| Tool | Arguments | What it does |
+|------|-----------|--------------|
+| `build_make` | `path?` (`.vbp`), `project?`, `pid?` | **Closed project** (`path` under `VB6MCP_ROOTS`): `VB6.EXE /make` from the files on disk, started elevated by an add-in, so an ActiveX DLL/OCX is registered on success. Returns `status` (`succeeded`, `failed`, `dialog`, `timeout`), `errors` (file, line, message), the raw `log`, and the output file before/after. **Open project:** if saved, built in its IDE (File > Make; `via` says so); with unsaved changes, refused |
+| `build_in_ide` | `project?`, `pid?` | File > Make from IDE memory (`MakeCompiledFile`), unsaved edits included; design mode. `status`: `succeeded`, `failed` (with `compileCheck`: message and location from a full compile, because `MakeCompiledFile` itself only fails generically), `dialog`, `timeout`. An existing output file is replaced without a prompt |
+
+Notes from spike 21:
+- **Error lines:** `/make` counts the IDE's code lines from 0. `errors[].line` is the 1-based IDE line (as in `code_read`) and `fileLine` the line in the file on disk.
+- **Binary compatibility break:** `/make` fails with a `kind: "compatibility"` error naming the class and member. Nothing is written or registered.
+- **In the IDE:** the same break is a decision dialog. `build_in_ide` returns `status: "compatibility-decision"` and leaves it for the user (hard rule 13).
+
+**Verified live** (2026-10-14): closed EXE and ActiveX DLL builds (the DLL registered and callable), compile errors from `/make` and from memory with location, and a binary compatibility break both ways.
+
+---
+## Sync: files changed outside the IDE (Phase 4)
+
+The watchdog's sync engine checks the files of every loaded project every 2 seconds (PLAN.md §8):
+- **How it knows:** a file whose time stamp or size changed without the IDE writing it (the add-in records the IDE's own saves) was changed outside: git, another editor, or another IDE that has the same shared file. The change must look the same on the next check before anything happens, so half-written files are left alone.
+- **Clean component, design mode:** reloaded automatically (the add-in checks again right before).
+- **Run or break mode:** reloaded once the IDE is back in design mode.
+- **Component with unsaved IDE changes:** a **conflict**. Nothing is touched; it is resolved with the tools below.
+- **`.vbp` changed, file deleted:** reported only. Reloading a project is disruptive and left to the user.
+
+| Tool | Arguments | What it does |
+|------|-----------|--------------|
+| `sync_status` | `pid?` | conflicts (`pid`, `project`, `component`, `file`, `detected`) and the last 30 events (`reloaded`, `pending`, `conflict`, `resolved`, `not-reloaded`, `project-changed`, `deleted`) |
+| `sync_diff` | `component`, `project?`, `pid?` | unified diff of the IDE text (unsaved changes included) against the file on disk (`--- ide`, `+++ disk`); `same` when equal |
+| `sync_take_disk` | `component`, `confirm` (required true), `project?`, `pid?` | keeps a recovery copy of the IDE text (if unsaved) in its own recovery session (`kept`; listed by `recovery_list` with a note, kept 7 days), then reloads the component from disk, **discarding the IDE changes**; design mode. Verifies the IDE text equals the file afterwards |
+| `sync_take_ide` | `component`, `confirm` (required true), `project?`, `pid?` | saves the project, writing the IDE version over the changed file. **All** unsaved components of the project are saved (`alsoSaved` lists them) |
+
+A conflict ends by itself when the component has no unsaved changes any more: after either tool, or after the user saves or reloads in VB6.
+
+**Verified live** (2026-10-14, scratch copy of Basic):
+- An outside change to an unmodified module was reloaded 4 s later, also while the "Add to SourceSafe?" prompt was open.
+- An outside change to a module with an unsaved edit became a conflict, the edit untouched; `sync_diff` showed both sides.
+- `sync_take_disk` reloaded from disk, and the conflict resolved itself on the next poll.
+- **Found in that test:** the recovery poller deleted the kept copy, because the component was no longer unsaved. Kept copies now live in their own session; verified in the second round.
+- `sync_take_ide` saved without a group dialog, and the conflict resolved as "the IDE saved its version". The save was recognised as the IDE's own, with no reload (spike 22).
+
+---
+
 ## Workspace (disk)
 
 Disk is the secondary channel (principle 4). These tools work on the **workspace roots** configured in `VB6MCP_ROOTS` (semicolon-separated folders; set by `scripts\install-server.ps1 -Roots`). Paths outside the roots are refused (hard rule 8); without roots the tools explain how to configure them.
@@ -501,6 +565,81 @@ Which projects include a source file. Paths are compared normalized (hard rule 3
   "projects": [ { "Name": "App1", "Type": "Exe", "path": "D:\\src\\App1\\App1.vbp", "asMember": "..\\Shared\\modUtils.bas" } ] }
 ```
 
+### `ws_affected`
+
+**Arguments:** `paths` (changed source files; a JSON array, or one string separated by `;`), `refresh?`.
+
+Which projects a change affects, **in rebuild order** (`Vb6Mcp.Core.Files.Affected`):
+1. **Direct:** the projects that include one of the files (`includes`).
+2. **Dependents, transitively:** every project that references an affected project's COM output (`uses`).
+   - A `Reference=*\G{LIBID}#maj.min#…` or `Object={LIBID}#maj.min#…` line matches a project when the typelib in that project's **built output** (else its binary compatibility file) has that LIBID and major version.
+   - The typelib is read with `LoadTypeLibEx(REGKIND_NONE)`: nothing is registered, and it runs on its own STA thread with a 10 s timeout.
+   - Never matched by file name (hard rule 13).
+3. **Order:** dependencies come before the projects that use them, ties by name.
+
+`openIn` lists the IDEs that have the project open. Build those with `build_in_ide` (`/make` refuses them, spike 21) and closed ones with `build_make`.
+
+**Warnings** (the result still lists what it found):
+- A file no project includes.
+- A DLL/OCX with no readable typelib (never built): its users can't be found until it's built once.
+- Two projects that build the same typelib.
+- Circular references (listed in name order).
+- An IDE that didn't answer.
+
+**Not covered yet:**
+- Project references inside groups (`*\A…vbp`), until verified.
+- `.vbp` versions of 10 and above: parsed as hex like the registry's TypeLib keys, but not verified.
+
+**Verified:**
+- The LIBID the reader returns for `stdole2.tlb` is the `HKCR\TypeLib` key that VB resolves `Reference=*\G{00020430-…}#2.0` (a line VB wrote itself, in a scratch project) through.
+- Order, transitive `Object=` users, other major versions, unbuilt DLLs and cycles are covered by unit tests (`AffectedTests`).
+- **Live, on the owner's workspace** (43 projects, 2026-10-14): `Common\modBinding.bas` is included by 7 UserControl projects (binary compatibility).
+  - The typelib of each project's built OCX was read, and 23 applications were found through their VB-written `Object=` lines, ordered after the OCXs.
+  - Cross-checked by hand: exactly 18 `.vbp` lines name XmText's LIBID, and 18 projects were listed as using it.
+  - No warnings.
+
+**Result:**
+```json
+{ "files": ["D:\\src\\Shared\\modUtils.bas"],
+  "order": [
+    { "step": 1, "Name": "Lib", "Type": "OleDll", "path": "D:\\src\\Lib\\Lib.vbp", "output": "D:\\src\\Lib\\Lib.dll", "compatibility": "binary",
+      "includes": ["D:\\src\\Shared\\modUtils.bas"], "uses": [],
+      "typeLib": { "libId": "{…}", "version": "1.0", "Name": "Lib" }, "openIn": [] },
+    { "step": 2, "Name": "App", "Type": "Exe", "path": "D:\\src\\App\\App.vbp", "output": "D:\\src\\App\\App.exe", "compatibility": "none",
+      "includes": [], "uses": ["Lib"], "typeLib": null, "openIn": [ { "pid": 4242, "project": "App", "dirty": false } ] } ],
+  "warnings": [], "note": "…" }
+```
+
+### `file_replace_lines`
+
+Edits the code of a VB6 source file **of a closed project** on disk. Arguments: `path`, `start_line` (1-based, the code as the IDE shows it and as `file_read` returns it), `count` (0 inserts before `start_line`), `new_text`, `expected_hash` (from `file_read`), and `pid?` when the file is open in several IDEs.
+
+- **On disk** (the file isn't open in any IDE):
+  - Only the code lines change; header, designer block and everything else stay byte-exact (hard rule 2), and the file stays Windows-1252 with CR LF.
+  - The new text is validated: 1252 only, 1023 characters per line, 24 continuations.
+  - Hidden inline `Attribute` lines (e.g. `VB_UserMemId` after a default property's signature) are put back after the same line when the new text keeps it; otherwise the edit is refused.
+- **Open in an IDE:** the edit goes to the IDE instead, because its memory is the truth (hard rule 4). It stays unsaved there; `routedTo` names the component.
+  - Refused if the IDE's text doesn't match `expected_hash`: it has unsaved changes, so use `code_read`.
+  - Refused if the IDE isn't in design mode.
+- **An IDE didn't answer:** refused, because a busy IDE could have the file open with unsaved changes.
+
+Result: `{ "source": "disk", "path": "...", "component": "modShared", "countOfLines": 5, "hash": "..." }`, or `source: "ide"` with `routedTo`.
+
+**Verified live** (2026-10-14):
+- **Closed file:** a scratch copy of Basic's `clsCounter.cls` (class header, no final line break), with one line replaced by two, one of them containing `é`.
+  - The result matched the expected bytes exactly: header untouched, CR LF everywhere, `é` stored as 0xE9, and still no final line break.
+  - A second edit with the old hash was refused.
+- **Open file:** an insert into `Sync2\modMath.bas`, open and clean in VB6.
+  - It went to the IDE (`source: "ide"`, `dirty: true`, and `code_read` showed the line).
+  - The disk file's SHA-1 didn't change, and the sync engine logged no new event.
+
+### Claude Code hook
+
+`install-server.ps1` registers `vb6mcp.exe hook` as a `PreToolUse` hook (matcher `Edit|Write|MultiEdit`) in `~/.claude/settings.json`, keeping a backup; `-NoHook` skips it.
+- **Blocked:** edits of VB6 source and project files (`.bas .cls .frm .ctl .pag .dsr .dob .vbp .vbg`). The hook exits with 2 and tells the agent to use `code_replace_lines`/`proc_replace` (open in the IDE) or `file_replace_lines` (closed project).
+- **Why:** the generic tools would write UTF-8, break the hidden header and Attribute lines, and bypass a running IDE.
+- **Allowed:** reading those files and every other file type.
+- **Verified live** (2026-10-14): right after `install-server.ps1`, with no restart needed, an Edit of a scratch `.bas` was blocked and the agent got the reason text.
 ### `file_read`
 
 **Arguments:** `path`, `start_line?`, `count?`.
@@ -519,8 +658,13 @@ Reads a `.bas/.cls/.frm/.ctl/.pag/.dsr` from disk **the way the IDE shows it**: 
 
 ## Change log
 
+- 2026-10-14: `ws_affected` (rebuild order for shared source, by typelib identity).
+- 2026-10-14: `file_replace_lines` (closed projects; routed to the IDE when open); `hash` in `file_read`; Claude Code PreToolUse hook.
+- 2026-10-14: `sync_status`, `sync_diff`, `sync_take_disk`, `sync_take_ide` (sync engine in the watchdog).
+- 2026-10-14: `build_make`, `build_in_ide`.
 - 2026-10-13: watchdog: `ide_kill`, `recovery_list/read/restore/discard`; watchdog fallbacks in `run_break`, `ide_dialog_respond`, `app_screenshot`, `ide_launch`; `watchdog` in `ide_list`/`ide_status`.
 - 2026-10-13: `debug_locals`, `debug_callstack`, `debug_error`; `runtimeError` on reported dialogs.
+- 2026-10-14: `debug_output` (OutputDebugString capture through DBWIN).
 - 2026-10-14: `exe_run`, `exe_end`; `exe` argument on all `app_*` tools (compiled programs, input from the server).
 - 2026-10-14: `app_select`, `app_keys`, `app_wait`; `app_mouse` real input deferred in the add-in (hard rule 14).
 - 2026-10-13: running-program tools (`app_windows`, `app_tree`, `app_click`, `app_set_text`, `app_mouse`, `app_scroll`, `app_screenshot`); audit log for input, `debug_eval` and `ide_launch`.

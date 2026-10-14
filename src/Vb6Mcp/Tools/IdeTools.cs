@@ -21,7 +21,7 @@ public sealed partial class IdeTools(IIdeEnvironment env)
     /// <summary>Workspace roots (VB6MCP_ROOTS): exe_run only starts programs under them (hard rule 8).</summary>
     public IReadOnlyList<string> Roots { get; init; } = [];
 
-    public IReadOnlyList<Tool> All() => [.. ReadTools(), .. EditTools(), .. LaunchTools(), .. DebugTools(), .. InspectTools(), .. WatchdogTools(), .. RecoveryTools(), .. AppTools(), .. ExeTools()];
+    public IReadOnlyList<Tool> All() => [.. ReadTools(), .. EditTools(), .. LaunchTools(), .. DebugTools(), .. InspectTools(), .. WatchdogTools(), .. RecoveryTools(), .. AppTools(), .. ExeTools(), .. BuildTools(), .. SyncTools()];
 
     private IReadOnlyList<Tool> ReadTools() =>
     [

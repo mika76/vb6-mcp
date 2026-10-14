@@ -71,7 +71,11 @@ public static class Schema
     public static JsonObject Object(params (string Name, string Type, string Description, bool Required)[] props)
     {
         var properties = new JsonObject();
-        foreach (var (n, t, d, _) in props) properties[n] = new JsonObject { ["type"] = t, ["description"] = d };
+        foreach (var (n, t, d, _) in props)
+        {
+            properties[n] = new JsonObject { ["type"] = t, ["description"] = d };
+            if (t == "array") properties[n]!["items"] = new JsonObject { ["type"] = "string" };   // arrays are string lists
+        }
         var schema = new JsonObject { ["type"] = "object", ["properties"] = properties };
         var required = props.Where(p => p.Required).Select(p => (JsonNode)p.Name).ToArray();
         if (required.Length > 0) schema["required"] = new JsonArray(required);
@@ -86,6 +90,14 @@ public static class Schema
     /// <summary>A boolean argument; also accepts "true"/"false" strings (some clients send those).</summary>
     public static bool? Bool(this JsonObject args, string name)
         => args[name] is JsonValue v ? (v.TryGetValue(out bool b) ? b : v.TryGetValue(out string? s) && bool.TryParse(s, out var p) ? p : null) : null;
+
+    /// <summary>A string-list argument: a JSON array, or one string with items separated by ';' or line breaks (some clients send those).</summary>
+    public static IReadOnlyList<string> List(this JsonObject args, string name) => args[name] switch
+    {
+        JsonArray a => a.Select(n => n is JsonValue v && v.TryGetValue(out string? s) ? s : null).OfType<string>().Where(s => s.Length > 0).ToList(),
+        JsonValue v when v.TryGetValue(out string? s) => s.Split([';', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+        _ => [],
+    };
 
     public static int? Int(this JsonObject args, string name)
         => args[name] is JsonValue v ? (v.TryGetValue(out int i) ? i : v.TryGetValue(out double d) ? (int)d : v.TryGetValue(out string? s) && int.TryParse(s, out var p) ? p : null) : null;

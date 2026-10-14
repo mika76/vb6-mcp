@@ -37,6 +37,7 @@ End Type
 Private Declare Function CreateProcess Lib "kernel32" Alias "CreateProcessA" (ByVal lpApplicationName As String, ByVal lpCommandLine As String, ByVal lpProcessAttributes As Long, ByVal lpThreadAttributes As Long, ByVal bInheritHandles As Long, ByVal dwCreationFlags As Long, ByVal lpEnvironment As Long, ByVal lpCurrentDirectory As String, lpStartupInfo As STARTUPINFO, lpProcessInformation As PROCESS_INFORMATION) As Long
 Private Declare Function CloseHandle Lib "kernel32" (ByVal hObject As Long) As Long
 Private Const CREATE_NO_WINDOW As Long = &H8000000
+Private Declare Function GetModuleFileName Lib "kernel32" Alias "GetModuleFileNameA" (ByVal hModule As Long, ByVal lpFileName As String, ByVal nSize As Long) As Long
 
 Public Sub StartWatchdog()
     Dim exe As String, si As STARTUPINFO, pi As PROCESS_INFORMATION
@@ -54,3 +55,23 @@ Public Sub StartWatchdog()
 Fail:
     LogLine "StartWatchdog error " & Err.Number & ": " & Err.Description
 End Sub
+
+' Starts "VB6.EXE /make <vbp> /out <log>" as a child process (build_make, Phase 4) and returns its
+' pid, without waiting (hard rule 5). The child inherits VB6's elevation, so building an ActiveX
+' DLL/OCX can register it without a UAC prompt. /make reads the files on disk, not IDE memory.
+Public Function StartBuild(ByVal vbp As String, ByVal logPath As String) As Long
+    Dim exe As String, n As Long, si As STARTUPINFO, pi As PROCESS_INFORMATION
+    exe = String$(520, vbNullChar)
+    n = GetModuleFileName(0, exe, 520)                 ' this process: VB6.EXE
+    exe = Left$(exe, n)
+    si.cb = LenB(si)
+    If CreateProcess(vbNullString, """" & exe & """ /make """ & vbp & """ /out """ & logPath & """", 0, 0, 0, CREATE_NO_WINDOW, 0, vbNullString, si, pi) = 0 Then
+        StartBuild = 0
+        LogLine "build: CreateProcess failed (" & Err.LastDllError & ")"
+        Exit Function
+    End If
+    CloseHandle pi.hThread
+    CloseHandle pi.hProcess
+    LogLine "build started, pid " & pi.dwProcessId & ": " & vbp
+    StartBuild = pi.dwProcessId
+End Function

@@ -12,7 +12,9 @@
 #
 # -Roots: workspace folders for the disk tools (ws_projects, ws_file_projects, file_read), stored as
 # VB6MCP_ROOTS. Paths outside them are refused (AGENTS.md hard rule 8).
-param([string]$Name = 'vb6', [string[]]$Roots = @())
+# -NoHook: don't register the Claude Code PreToolUse hook (it blocks Edit/Write on VB6 source files in
+# every project, so agents use the vb6 tools; registered in the user's ~/.claude/settings.json).
+param([string]$Name = 'vb6', [string[]]$Roots = @(), [switch]$NoHook)
 $ErrorActionPreference = 'Stop'
 $root    = Split-Path -Parent $PSScriptRoot
 $servers = Join-Path $root 'build\server'
@@ -33,6 +35,10 @@ try {
     claude mcp remove vb6spike -s local *> $null      # spike 1 test server
     $envArgs = @('-e', "VB6MCP_LOG=$log")
     if ($Roots.Count -gt 0) { $envArgs += @('-e', "VB6MCP_ROOTS=$($Roots -join ';')") }
+    # The add-in reads the same roots for build_make: an elevated /make only builds projects under them
+    $rootsFile = Join-Path $env:LOCALAPPDATA 'vb6mcp\roots.txt'
+    New-Item -ItemType Directory -Force (Split-Path $rootsFile) | Out-Null
+    [IO.File]::WriteAllLines($rootsFile, [string[]]($Roots | ForEach-Object { [IO.Path]::GetFullPath($_) }), [Text.Encoding]::GetEncoding(1252))   # VB reads ANSI
     claude mcp add --scope local $Name @envArgs -- $exe
     if ($LASTEXITCODE) { throw "claude mcp add failed ($LASTEXITCODE)" }
     claude mcp get $Name
@@ -44,4 +50,5 @@ Get-ChildItem $servers -Directory | Where-Object { $_.FullName -ne $out } | ForE
     try { Remove-Item -LiteralPath $old.FullName -Recurse -ErrorAction Stop; Write-Host "removed old install $($old.Name)" }
     catch { Write-Host "kept old install $($old.Name) (in use)" }
 }
+if (-not $NoHook) { & $exe install-hook }
 Write-Host "Installed $exe as MCP server '$Name'. Restart the Claude session to use it."

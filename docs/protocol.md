@@ -208,6 +208,29 @@ No user code runs, so none of these is deferred.
 
 `LISTITEMS <hwnd>` reads a list box of the IDE process (`LB_GETCOUNT`, `LB_GETTEXTLEN`, `LB_GETTEXT`). It's read-only, and it is done in-process because UIPI blocks `LB_*` messages from the non-elevated server. Payload: the items separated by RS (empty payload = no items). Errors (400): not a window of this process, not a list box. The server then closes the dialog by clicking its Close button with `CLICK`.
 
+### `MAKE <vbp>`, `MAKEIDE <project>` (deferred), `MAKESTATUS`
+
+`MAKE <vbp>` starts `"<VB6.EXE>" /make "<vbp>" /out "<log>"` as a child of the IDE with `CreateProcess`, without waiting. The child inherits VB6's elevation, so an ActiveX DLL/OCX is registered on success without a UAC prompt. The log goes to `%LOCALAPPDATA%\vb6mcp\builds\<time>-<name>.log`.
+- **For closed projects only.** VB6 `/make` refuses a project that is open in any IDE ("The file '...' is already open.", spike 21), and the add-in refuses one open in its own IDE (409).
+- **Path check:** the path must be absolute, without `..`, and under one of the roots in `%LOCALAPPDATA%\vb6mcp\roots.txt`, which `install-server.ps1` writes from `-Roots`. The token is the real boundary; this is defense in depth, because an elevated `/make` registers components machine-wide (hard rule 8).
+- Payload: `pid US logPath US vbp`. Errors: 400 bad or unlisted path; 404 file missing; 409 open in this IDE, or the process couldn't be started.
+
+`MAKEIDE <project>` queues `VBProject.MakeCompiledFile`, which compiles **from IDE memory** to the project's `BuildFileName`. It is deferred because compiling may show modal dialogs. Payload: `QUEUED US outputFile`; 409 while the program runs. It sets the outcome to `queued`.
+
+`MAKESTATUS` returns the outcome of the last `MAKEIDE`: `queued`, `running`, `ok`, or `failed US message`. A compile error shows **no dialog**: `MakeCompiledFile` raises E_FAIL (`Method '~' of object '~' failed`, spike 21). So the server polls this, and on `failed` finds the message and location with a full compile (`syntax_check`).
+**Command-line builds load add-ins too.** `VB6.EXE /make` loads startup add-ins with `ConnectMode` 3 (`vbext_cm_CommandLine`). The add-in then starts neither the listener nor the watchdog, and writes no discovery file.
+
+### `WRITES <since>`, `RELOAD <project> <component> <clean|discard>` (deferred)
+
+For the sync engine (PLAN.md §8; the watchdog's `SyncPoller`).
+- **`WRITES <since>`** returns the files the IDE wrote itself, recorded from `FileControlEvents.AfterWriteFile` for all projects (`Events.FileControlEvents(Nothing)`; signature `VBProject As VBProject, FileType As vbext_FileType, FileName As String, Result As Integer`, from the coclass's source interface `_dispVBFileControlEvents` in VB6EXT.OLB; the similarly named `_FileControlEvents` has a 2-parameter version that VB rejects). It keeps the last 200 writes. Payload: `next US (path US tick) RS ...`; pass `next` as `since` on the following call. A file whose time stamp changed without appearing here was changed outside this IDE.
+- **`RELOAD <project> <component> <mode>`** queues `VBComponent.Reload` (spike 8), which refreshes code and designer.
+  - `clean`: the automatic reload of an unmodified component. Refused (409) if the component has unsaved changes, and skipped if it has them by the time the action runs.
+  - `discard`: throws away unsaved IDE changes. Only `sync_take_disk` sends it, with explicit confirmation, after keeping a recovery copy.
+  - It is deferred because reloading a form can create design-time instances of user controls, which run their code.
+  - Design mode only: 409 while running; `Reload` fails in break mode (spike 8).
+  - Payload: `QUEUED`, `reload <component>`.
+
 ### `APPCLICK <hwnd>`
 
 Clicks a button of the program running in the IDE: `<hwnd>` in hex. Only windows of the IDE's own process (the program being debugged runs inside `VB6.EXE`), and only the classes `ThunderCommandButton`, `ThunderCheckBox`, `ThunderOptionButton` (and their `ThunderRT6` forms) and `Button`. Anything else is 400. The add-in **posts** `BM_CLICK` to the control, so the click and its `_Click` event code run later from the message loop, not under the request handler (hard rule 14). Payload: `clicked <hwnd> (<class>)`. The server verifies the effect afterwards.
@@ -315,4 +338,4 @@ Breaking changes bump the magic (`VB6MCP2`) and the discovery `protocol` field. 
 ## Change log
 
 - **v1** (2026-10-13): initial version (Phase 1).
-- v1, 2026-10-13: added `APPCLICK`, `APPTEXT`, `SNAP`, `MOUSE`, `SCROLL`, `SCROLLPOS`, `MOUSEREAL`, `MOUSERESTORE` (Phase 3), `CALLSTACK`, `LISTITEMS` (Phase 2), `LISTSTATE`, `SELECT`, `KEYS`, `KEYSREAL` (Phase 3). `MOUSEREAL` became deferred (`QUEUED`) and `MOUSERESTORE` returns the outcome. Deferred actions run one per `WM_DEFER`. New verbs only: older servers never send them, and a new server talking to an older add-in gets 400 "unknown verb".
+- v1, 2026-10-13: added `APPCLICK`, `APPTEXT`, `SNAP`, `MOUSE`, `SCROLL`, `SCROLLPOS`, `MOUSEREAL`, `MOUSERESTORE` (Phase 3), `CALLSTACK`, `LISTITEMS` (Phase 2), `LISTSTATE`, `SELECT`, `KEYS`, `KEYSREAL` (Phase 3), `MAKE`, `MAKEIDE`, `MAKESTATUS`, `WRITES`, `RELOAD` (Phase 4; `MAKE` takes a `.vbp` path, for closed projects). `MOUSEREAL` became deferred (`QUEUED`) and `MOUSERESTORE` returns the outcome. Deferred actions run one per `WM_DEFER`. New verbs only: older servers never send them, and a new server talking to an older add-in gets 400 "unknown verb".

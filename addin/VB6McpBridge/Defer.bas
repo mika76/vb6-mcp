@@ -11,6 +11,8 @@ Private Declare Function PostMessage Lib "user32" Alias "PostMessageA" (ByVal hW
 Public Const WM_DEFER As Long = &H400 + 101      ' WM_USER + 101
 
 Private m_queue As Collection                     ' of String: "ACTION" US arg1 US arg2 ...
+' Outcome of the last MakeCompiledFile (MAKESTATUS)
+Private m_makeResult As String
 
 Public Sub DeferInit()
     Set m_queue = New Collection
@@ -45,6 +47,8 @@ Public Sub RunQueued()
         Case "APPTEXT": SetWindowText CLng("&H" & f(1)), f(2)
         Case "SNAP": CaptureWindow CLng("&H" & f(1)), f(2)
         Case "KEYSTATE": SetModifierState CLng(f(1))
+        Case "MAKEIDE": MakeInIde f(1)
+        Case "RELOAD": ReloadComponent f(1), f(2), (f(3) = "discard")
         Case "KEYSCONT": PostKeys CLng("&H" & f(1)), f(3), CLng(f(2))
         Case "SELECT": SelectItem CLng("&H" & f(1)), CLng(f(2))
         Case "MOUSEREAL": DeferredRealMouse CLng("&H" & f(1)), f(2), CLng(f(3)), CLng(f(4)), CLng(f(5)), CLng(f(6))
@@ -131,9 +135,13 @@ Fail:
     LogLine "immediate failed: " & Err.Number & ": " & Err.Description
 End Sub
 
-' Opens a project; "replace" closes the open ones first (the server refused if any has unsaved changes).
-' Not AddFromFile(path, True): that wrote a Group1.vbg of the closed projects into VB6's current folder
-' (Phase 3 live test), an unasked-for disk write. Removing the projects first doesn't.
+' Opens a project. "replace" closes the open ones first (the server refused if any has unsaved changes).
+' Two VBIDE traps decide how (Phase 3/4 live tests):
+' - AddFromFile(path, True) with projects still open wrote a Group1.vbg of the closed projects into
+'   VB6's current folder. So the open projects are removed first.
+' - AddFromFile(path, False) makes the IDE a project group, even with only one project, and then
+'   Save asks for a group file name ("Save Project Group As"). So a project opened into an empty IDE
+'   uses True (nothing left to close); only "add" next to other projects uses False.
 ' May show modal dialogs (missing references, source control, ...); the server watches for them.
 Private Sub OpenProject(ByVal path As String, ByVal exclusive As Boolean)
     Dim i As Long
@@ -143,9 +151,65 @@ Private Sub OpenProject(ByVal path As String, ByVal exclusive As Boolean)
             g_VBE.VBProjects.Remove g_VBE.VBProjects(i)
         Next
     End If
-    g_VBE.VBProjects.AddFromFile path, False
+    g_VBE.VBProjects.AddFromFile path, (g_VBE.VBProjects.Count = 0)
     LogLine "opened " & path & IIf(exclusive, " (replace)", " (add)")
     Exit Sub
 Fail:
     LogLine "open failed " & path & ": " & Err.Number & ": " & Err.Description
+End Sub
+
+' VBProject.MakeCompiledFile from a fresh dispatch (build_in_ide). Errors show as dialogs, which the
+' server reads; failures of the call itself are logged.
+Private Sub MakeInIde(ByVal prjName As String)
+    Dim p As Long
+    On Error GoTo Fail
+    m_makeResult = "running"
+    For p = 1 To g_VBE.VBProjects.Count
+        If StrComp(g_VBE.VBProjects(p).Name, prjName, vbTextCompare) = 0 Then
+            LogLine "MakeCompiledFile " & prjName & " -> " & g_VBE.VBProjects(p).BuildFileName
+            g_VBE.VBProjects(p).MakeCompiledFile
+            LogLine "MakeCompiledFile returned"
+            m_makeResult = "ok"
+            Exit Sub
+        End If
+    Next
+    LogLine "MakeCompiledFile: project not found: " & prjName
+    m_makeResult = "failed" & US() & "project not found"
+    Exit Sub
+Fail:
+    LogLine "MakeCompiledFile failed: " & Err.Number & ": " & Err.Description
+    m_makeResult = "failed" & US() & Err.Description
+End Sub
+
+Public Sub MarkMakeQueued()
+    m_makeResult = "queued"
+End Sub
+
+Public Function LastMakeResult() As String
+    LastMakeResult = m_makeResult
+End Function
+
+' VBComponent.Reload from a fresh dispatch. Checks again: between queueing and now the user may
+' have started typing (then a "clean" reload is skipped) or started the program.
+Private Sub ReloadComponent(ByVal prjName As String, ByVal cmpName As String, ByVal discard As Boolean)
+    Dim p As Long, c As Long, cmp As VBIDE.VBComponent
+    On Error GoTo Fail
+    If g_VBE.CommandBars.FindControl(, 228).Enabled Then LogLine "reload " & cmpName & " skipped: not in design mode": Exit Sub
+    For p = 1 To g_VBE.VBProjects.Count
+        If StrComp(g_VBE.VBProjects(p).Name, prjName, vbTextCompare) = 0 Then
+            For c = 1 To g_VBE.VBProjects(p).VBComponents.Count
+                Set cmp = g_VBE.VBProjects(p).VBComponents(c)
+                If StrComp(cmp.Name, cmpName, vbTextCompare) = 0 Then
+                    If cmp.IsDirty And Not discard Then LogLine "reload " & cmpName & " skipped: it has unsaved changes now": Exit Sub
+                    cmp.Reload
+                    LogLine "reloaded " & prjName & "." & cmpName & IIf(discard, " (unsaved edits discarded on request)", "")
+                    Exit Sub
+                End If
+            Next
+        End If
+    Next
+    LogLine "reload: " & prjName & "." & cmpName & " not found"
+    Exit Sub
+Fail:
+    LogLine "reload " & cmpName & " failed: " & Err.Number & ": " & Err.Description
 End Sub

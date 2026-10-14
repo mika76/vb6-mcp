@@ -1,6 +1,8 @@
 // vb6mcp: MCP server for the VB6 IDE. See docs/architecture.md and docs/tools.md.
 // Usage: vb6mcp [mcp]       MCP server on stdio (default; what Claude Code starts)
 //        vb6mcp watchdog    elevated sidecar, started by the VB6 add-in (PLAN.md §3.1)
+//        vb6mcp hook        Claude Code PreToolUse hook: blocks Edit/Write on VB6 source files
+//        vb6mcp install-hook <settings.json>   registers this exe as that hook (used by install-server.ps1)
 // Diagnostics go to stderr, or to the file named by VB6MCP_LOG (some clients hide stderr).
 using System.Text;
 using Vb6Mcp.Mcp;
@@ -15,9 +17,11 @@ public static class Program
     {
         string mode = args.Length > 0 ? args[0].ToLowerInvariant() : "mcp";
         if (mode == "watchdog") return await WatchdogMainAsync();
+        if (mode == "hook") return Hook.Run(Console.In, Console.Error);
+        if (mode == "install-hook") return Hook.Install(args.Length > 1 ? args[1] : Hook.UserSettingsPath, Environment.ProcessPath!, Console.Out);
         if (mode != "mcp")
         {
-            Console.Error.WriteLine($"vb6mcp: unknown mode '{mode}'. Usage: vb6mcp [mcp|watchdog]");
+            Console.Error.WriteLine($"vb6mcp: unknown mode '{mode}'. Usage: vb6mcp [mcp|watchdog|hook|install-hook]");
             return 2;
         }
 
@@ -75,6 +79,18 @@ public static class Program
                 try { await poller.PollOnceAsync(cts.Token); }
                 catch (Exception ex) when (ex is not OperationCanceledException) { Log("recovery poll failed: " + ex.Message); }
                 try { await Task.Delay(10_000, cts.Token); } catch (OperationCanceledException) { }
+            }
+        });
+        // Sync engine: outside changes to files of loaded projects, every 2 s (PLAN §8)
+        var sync = new SyncPoller(() => Core.Bridge.Discovery.Scan(), i => new Core.Bridge.AddinClient(i, TimeSpan.FromSeconds(2)),
+            pid => UI.IdeWindows.ParseMode(UI.IdeWindows.Read(pid, 200).Title), Log, Core.SyncState.DefaultPath);
+        _ = Task.Run(async () =>
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                try { await sync.PollOnceAsync(cts.Token); }
+                catch (Exception ex) when (ex is not OperationCanceledException) { Log("sync poll failed: " + ex.Message); }
+                try { await Task.Delay(2_000, cts.Token); } catch (OperationCanceledException) { }
             }
         });
         Log($"watchdog {WatchdogHost.Version} started, elevated={actions.Elevated}, parent={actions.ParentPid}");

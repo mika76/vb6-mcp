@@ -9,6 +9,23 @@ Begin VB.Form frmUi
    ScaleHeight     =   4800
    ScaleWidth      =   7200
    StartUpPosition =   3  'Windows Default
+   Begin VB.TextBox txtDrop 
+      Height          =   375
+      Left            =   1680
+      OLEDropMode     =   2  'Automatic
+      TabIndex        =   10
+      Top             =   3840
+      Width           =   1215
+   End
+   Begin VB.CommandButton cmdDrag 
+      Caption         =   "Drag me"
+      DragMode        =   1  'Automatic
+      Height          =   375
+      Left            =   240
+      TabIndex        =   9
+      Top             =   3840
+      Width           =   1215
+   End
    Begin VB.ComboBox cboColor 
       Height          =   315
       Left            =   4560
@@ -35,6 +52,7 @@ Begin VB.Form frmUi
    Begin VB.ListBox lstItems 
       Height          =   1815
       Left            =   240
+      OLEDragMode     =   1  'Automatic
       TabIndex        =   2
       Top             =   1200
       Width           =   2655
@@ -92,6 +110,9 @@ Attribute VB_Exposed = False
 ' happened to it in a label, so screenshots and app_tree can verify input.
 Option Explicit
 
+' Logging the way compiled VB6 programs do it (Debug.Print is compiled out): debug_output captures it
+Private Declare Sub OutputDebugString Lib "kernel32" Alias "OutputDebugStringA" (ByVal lpOutputString As String)
+
 Private m_clicks As Long
 Private m_dragX As Single
 Private m_dragY As Single
@@ -107,6 +128,7 @@ End Sub
 
 Private Sub txtName_Change()
     lblEcho.Caption = "Echo: " & txtName.Text
+    OutputDebugString "UI fixture: text = " & txtName.Text & vbCrLf
 End Sub
 
 Private Sub chkOption_Click()
@@ -155,4 +177,14 @@ End Sub
 ' Key code and Shift state in the form caption (readable with app_windows): shows whether modifiers arrive
 Private Sub txtName_KeyDown(KeyCode As Integer, Shift As Integer)
     Me.Caption = "UI fixture - KeyDown " & KeyCode & " shift " & Shift
+End Sub
+
+' Classic VB drag (cmdDrag has DragMode automatic) dropped on the picture box
+Private Sub picDraw_DragDrop(Source As Control, X As Single, Y As Single)
+    lblStatus.Caption = "Dropped " & Source.Name & " at (" & X & "," & Y & ")"
+End Sub
+
+' OLE drop (txtDrop has OLEDropMode automatic): the text arrives by itself; report it
+Private Sub txtDrop_Change()
+    lblStatus.Caption = "OLE drop: " & txtDrop.Text
 End Sub

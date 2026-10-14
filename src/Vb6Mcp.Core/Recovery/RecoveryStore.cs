@@ -7,8 +7,12 @@ namespace Vb6Mcp.Core.Recovery;
 /// <summary>One recovery copy: the IDE text of an unsaved component when it was taken.</summary>
 public sealed record RecoveryCopy(string Project, string ProjectFile, string Component, int Type, string File, int Lines, string Hash, DateTime Taken);
 
-/// <summary>What is known about one IDE session (one VB6 process).</summary>
-public sealed record RecoverySession(int Pid, string Started, DateTime Updated, bool Crashed, IReadOnlyList<string> ProjectFiles);
+/// <summary>
+/// What is known about one IDE session (one VB6 process). <see cref="Note"/> marks a session of copies
+/// kept on purpose (sync_take_disk); such sessions have their own id (<see cref="RecoveryStore.KeptId"/>)
+/// and are kept like a crashed session, so the poller doesn't prune them as "saved".
+/// </summary>
+public sealed record RecoverySession(int Pid, string Started, DateTime Updated, bool Crashed, IReadOnlyList<string> ProjectFiles, string? Note = null);
 
 /// <summary>
 /// The watchdog's recovery store (PLAN.md §3.1): copies of unsaved IDE code, taken only while the
@@ -22,6 +26,9 @@ public sealed class RecoveryStore(string? root = null)
     public string Root { get; } = root ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "vb6mcp", "recovery");
 
     private static readonly JsonSerializerOptions s_json = new() { WriteIndented = true, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
+
+    /// <summary>Session id for copies kept on purpose from IDE <paramref name="pid"/> (not a process id).</summary>
+    public static int KeptId(int pid) => 1_000_000_000 + pid;
 
     private string Dir(int pid) => Path.Combine(Root, pid.ToString(CultureInfo.InvariantCulture));
     private static string BaseName(string project, string component) => $"{project}__{component}";

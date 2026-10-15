@@ -38,6 +38,30 @@ public static class HookTests
             Assert.Equal("other.exe", (string)pre[0]!["hooks"]![0]!["command"]!);
             Assert.Equal("\"C:\\b\\vb6mcp.exe\" hook", (string)pre[1]!["hooks"]![0]!["command"]!);
             Assert.True(File.Exists(settings + ".vb6mcp-backup"), "backup written");
+
+            Hook.Uninstall(settings, TextWriter.Null);
+            var after = JsonNode.Parse(File.ReadAllText(settings))!;
+            var left = after["hooks"]!["PreToolUse"]!.AsArray();
+            Assert.Equal(1, left.Count, "only the other hook stays");
+            Assert.Equal("other.exe", (string)left[0]!["hooks"]![0]!["command"]!);
+            Assert.Equal("x", (string)after["model"]!, "other settings kept");
+            Hook.Uninstall(settings, TextWriter.Null);                              // nothing left of ours: no change, no error
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Test]
+    public static void UninstallRemovesEmptyHookSections()
+    {
+        var dir = Directory.CreateTempSubdirectory("vb6mcp-hook-").FullName;
+        try
+        {
+            var settings = Path.Combine(dir, "settings.json");
+            File.WriteAllText(settings, """{"model":"x"}""");
+            Hook.Install(settings, @"C:\a\vb6mcp.exe", TextWriter.Null);
+            Hook.Uninstall(settings, TextWriter.Null);
+            var root = JsonNode.Parse(File.ReadAllText(settings))!.AsObject();
+            Assert.True(!root.ContainsKey("hooks") && (string)root["model"]! == "x", root.ToJsonString());
         }
         finally { Directory.Delete(dir, true); }
     }

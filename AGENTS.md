@@ -49,13 +49,18 @@ tests/fixtures/         small VB6 projects: a form-heavy EXE (for debug/UI tests
                         layout, an ActiveX DLL w/ binary compat
 spikes/                 Phase 0 throwaway experiments. Never referenced by src/
 docs/spikes/            one write-up per spike
-scripts/                install: register add-in, Claude Code config + hook
+scripts/                development: build-addin, install-server; package.ps1 builds the user package
+installer/              install.ps1 / uninstall.ps1 / INSTALL.txt, shipped in the package (Program Files install)
 ```
 
 ## Environment facts (this machine)
 
 - VB6: `C:\Program Files (x86)\Microsoft Visual Studio\VB98\VB6.EXE`. Extensibility typelib: `VB6EXT.OLB` in the same folder.
-- Add-ins are registered under `HKCU\Software\Microsoft\Visual Basic\6.0\Addins\<ProgID>` and in `C:\Windows\vbaddin.ini` `[Add-Ins32]`.
+- Add-ins are registered under `HKCU\Software\Microsoft\Visual Basic\6.0\Addins\<ProgID>`. That's enough on its own: `C:\Windows\vbaddin.ini` `[Add-Ins32]` was never needed in any phase.
+- **Installed vs development** (spike 26):
+  - The package installs to `%ProgramFiles(x86)%\vb6mcp`: `VB6McpBridge.dll`, `vb6mcp.exe` (server and watchdog), `roots.txt` (admin-only machine policy, read by the add-in and the server), `uninstall.ps1`.
+  - Development builds (`build-addin.ps1`, `install-server.ps1`) use the repo and `%LOCALAPPDATA%\vb6mcp\roots.txt`.
+  - Whichever ran last decides where the ProgID points. A local-scope `vb6` MCP registration in a folder and the installer's user-scope one are separate entries: remove one when testing the other.
 - .NET SDK 10.x, Node 24. Shell: PowerShell 7 or Git Bash.
 - VB6 is 32-bit and runs elevated (UAC consent prompt, same user account). The MCP server runs non-elevated and as x86 (32-bit registry view, same as VB6).
 
@@ -131,6 +136,13 @@ dotnet run --project tests/Vb6Mcp.Tests -- --cat Build,IDE
   - ActiveX control classes have `TYPEFLAG_FCONTROL`, not `FCANCREATE`, but are registered like creatable ones.
   - Without binary compatibility each build gets new LIBID/CLSIDs, and `/make` unregisters the old ones.
   - A medium process can open an elevated one (query/synchronize), but a quick child may be gone first. The add-in keeps the handle (`REGSTATUS`).
+- **PowerShell traps in the scripts** (spike 26):
+  - `-File` doesn't parse arrays (`-Roots a,b` is one string): split it yourself.
+  - Inside `catch`, `$_` is the error record, not the pipeline item: copy it to a variable first.
+  - `claude mcp remove` writes to stderr when there's nothing to remove, and with `$ErrorActionPreference='Stop'` Windows PowerShell 5.1 turns that into a terminating error.
+  - A running exe or loaded DLL can't be overwritten but can be renamed: move it aside, copy the new one. So "can I rename it?" does **not** tell whether it's running; an exclusive open (`FileShare.None`) does, where you may write. An elevated process's path is hidden from medium processes, so the watchdog logs its own `exe=` in `watchdog.log`.
+  - Check arguments **before** elevating, so a mistake costs no UAC prompt.
+  - The installer scripts must stay Windows PowerShell 5.1 compatible.
 - **Debugger registrations and broken references** (spike 25):
   - While an ActiveX project runs in the IDE, its classes are registered to `VB98\VB6DEBUG.DLL` and its typelib to the `.vbp`. End restores the previous registration.
   - A killed IDE leaves them until VB6.EXE next starts.

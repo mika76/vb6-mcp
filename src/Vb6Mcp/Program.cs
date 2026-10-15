@@ -3,6 +3,7 @@
 //        vb6mcp watchdog    elevated sidecar, started by the VB6 add-in (PLAN.md §3.1)
 //        vb6mcp hook        Claude Code PreToolUse hook: blocks Edit/Write on VB6 source files
 //        vb6mcp install-hook <settings.json>   registers this exe as that hook (used by install-server.ps1)
+//        vb6mcp uninstall-hook [settings.json] removes that hook again (used by uninstall.ps1)
 //        vb6mcp describe <file> [filter]       prints a typelib (DLL/OCX/TLB/OLB) as VB-like declarations
 // Diagnostics go to stderr, or to the file named by VB6MCP_LOG (some clients hide stderr).
 using System.Text;
@@ -20,6 +21,7 @@ public static class Program
         if (mode == "watchdog") return await WatchdogMainAsync();
         if (mode == "hook") return Hook.Run(Console.In, Console.Error);
         if (mode == "install-hook") return Hook.Install(args.Length > 1 ? args[1] : Hook.UserSettingsPath, Environment.ProcessPath!, Console.Out);
+        if (mode == "uninstall-hook") return Hook.Uninstall(args.Length > 1 ? args[1] : Hook.UserSettingsPath, Console.Out);
         if (mode == "describe" && args.Length > 1)
         {
             Console.Out.Write(Core.Files.TypeLibDescriber.Render(Core.Files.TypeLibDescriber.Describe(args[1]), args.Length > 2 ? args[2] : null));
@@ -27,7 +29,7 @@ public static class Program
         }
         if (mode != "mcp")
         {
-            Console.Error.WriteLine($"vb6mcp: unknown mode '{mode}'. Usage: vb6mcp [mcp|watchdog|hook|install-hook|describe <file>]");
+            Console.Error.WriteLine($"vb6mcp: unknown mode '{mode}'. Usage: vb6mcp [mcp|watchdog|hook|install-hook|uninstall-hook|describe <file>]");
             return 2;
         }
 
@@ -36,8 +38,7 @@ public static class Program
         var stdin = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false));
         var stdout = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { NewLine = "\n" };
         // Workspace roots for the disk tools (hard rule 8: paths are checked against them)
-        var roots = (Environment.GetEnvironmentVariable("VB6MCP_ROOTS") ?? "")
-            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var roots = Roots();
         var env = new IdeEnvironment();
         var workspace = new WorkspaceTools(env, roots);
         var tools = new IdeTools(env) { Roots = roots, MapProvider = workspace.CurrentMap }.All().Concat(workspace.All()).ToList();
@@ -100,7 +101,7 @@ public static class Program
                 try { await Task.Delay(2_000, cts.Token); } catch (OperationCanceledException) { }
             }
         });
-        Log($"watchdog {WatchdogHost.Version} started, elevated={actions.Elevated}, parent={actions.ParentPid}");
+        Log($"watchdog {WatchdogHost.Version} started, elevated={actions.Elevated}, parent={actions.ParentPid}, exe={Environment.ProcessPath}");   // an elevated process's path is hidden from medium ones: log it (spike 26)
         await host.RunAsync(cts.Token);
         Log("watchdog stopped");
         GC.KeepAlive(mutex);
@@ -108,6 +109,20 @@ public static class Program
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool SetProcessDPIAware();
+
+    /// <summary>
+    /// Workspace roots: VB6MCP_ROOTS (semicolon-separated; development, install-server.ps1), else roots.txt next to this
+    /// exe, one folder per line. The installer writes that file into Program Files, where only administrators can change
+    /// it, and the add-in reads the same file next to its DLL (Phase 6): one admin-controlled list for both sides.
+    /// </summary>
+    public static string[] Roots()
+    {
+        var env = Environment.GetEnvironmentVariable("VB6MCP_ROOTS");
+        if (!string.IsNullOrWhiteSpace(env)) return env.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var file = Path.Combine(AppContext.BaseDirectory, "roots.txt");
+        if (!File.Exists(file)) return [];
+        return File.ReadAllLines(file, Core.Vb1252.Encoding).Select(l => l.Trim()).Where(l => l.Length > 0).ToArray();
+    }
 
     /// <summary>
     /// Several server instances can run at once (one per Claude session, plus `claude mcp get` health

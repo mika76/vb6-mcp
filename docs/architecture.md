@@ -38,7 +38,19 @@ This describes **what exists in `src/` and `addin/` now**, and why. The full des
 
 ### Security
 
-The add-in and the watchdog run elevated and serve loopback TCP; both check a 128-bit token from a discovery file in the user's profile, accept a fixed list of verbs, and act only on VB6 processes (hard rule 8). An elevated process that loads or starts files from a user-writable folder can be abused by other programs running as the same user. In the development layout the add-in DLL (`addin\VB6McpBridge\build`) and the watchdog (`build\watchdog` next to it) are in the repository, which the user can write. Starting the watchdog from the DLL's own folder adds no new exposure, since the DLL itself is already loaded from there. Installing both to a folder only administrators can write (Program Files) closes this, and belongs to packaging (Phase 6).
+The add-in and the watchdog run elevated and serve loopback TCP; both check a 128-bit token from a discovery file in the user's profile, accept a fixed list of verbs, and act only on VB6 processes (hard rule 8). An elevated process that loads or starts files from a user-writable folder can be abused by other programs running as the same user. In the development layout the add-in DLL (`addin\VB6McpBridge\build`) and the watchdog (`build\watchdog` next to it) are in the repository, which the user can write. Starting the watchdog from the DLL's own folder adds no new exposure, since the DLL itself is already loaded from there.
+
+**Installed layout (Phase 6, spike [26](spikes/26-packaging.md))** closes this. `install.ps1` puts `VB6McpBridge.dll`, `vb6mcp.exe` (server and watchdog) and `roots.txt` in `%ProgramFiles(x86)%\vb6mcp`, where only administrators can write:
+- **The add-in** reads `roots.txt` next to its DLL (`Verbs.RootsFile`) and starts the watchdog from `vb6mcp.exe` next to it (`Sidecar.StartWatchdog`).
+- **The server** reads `roots.txt` next to its exe when `VB6MCP_ROOTS` isn't set.
+
+The roots decide what the elevated side may build, register and load. With a user-writable roots file, any program of the user could widen them and get files registered elevated: a UAC bypass.
+
+**Verified:**
+- An ordinary process can't change `roots.txt`, add a file or rename the exe.
+- With `C:\Windows` added to the user-writable `%LOCALAPPDATA%` roots file, the installed add-in still refused a path under `C:\Windows`.
+
+A development build (no `roots.txt` next to the DLL) keeps reading `%LOCALAPPDATA%\vb6mcp\roots.txt`.
 
 ## Components in `src/`
 
@@ -89,7 +101,7 @@ The add-in and the watchdog run elevated and serve loopback TCP; both check a 12
 | `Watchdog.WatchdogHost` / `WatchdogActions` | the watchdog mode: TCP endpoint (own threads), BREAK/PRESS/KILL/SNAP/LAUNCH limited to VB6 processes | spike 12; Ctrl+Break only with VB6 in front |
 | `Watchdog.SyncPoller` | every 2 s: own writes (add-in `WRITES`) vs file time stamps; reloads clean components (`RELOAD clean`), records conflicts, waits for design mode | PLAN §8; in the watchdog because outside changes happen without an agent session |
 | `Watchdog.RecoveryPoller` | polls add-ins every 10 s for unsaved components, only while the user is idle and the IDE isn't running the program | hard rule 12; polling instead of add-in heartbeats keeps the add-in thin |
-| `Hook` | `vb6mcp hook`: Claude Code PreToolUse hook blocking Edit/Write on VB6 files (exit 2 + reason); `install-hook` merges it into `~/.claude/settings.json` | PLAN §8; generic tools would write UTF-8 and bypass the IDE |
+| `Hook` | `vb6mcp hook`: Claude Code PreToolUse hook blocking Edit/Write on VB6 files (exit 2 + reason); `install-hook` merges it into `~/.claude/settings.json`, `uninstall-hook` removes only our entry | PLAN §8; generic tools would write UTF-8 and bypass the IDE |
 | `Tools.IIdeEnvironment` | discovery + window reads + clients | swapped for fakes in tests |
 
 ## The add-in (`addin/VB6McpBridge`)
@@ -119,6 +131,16 @@ Rules it follows, all from spikes:
 - **Deferred execution** for anything that can run user code (IDE commands): queue via `PostMessage` to its own window, run from a fresh dispatch; otherwise a break under the handler deadlocks the IDE (spikes 3, 6/8; hard rule 14).
 - Starts the watchdog with `CreateProcess`, never `Shell` (blocked the IDE ~9 s, spike 12).
 - Status toolbar: version, DLL build time, port, request count (spike 3).
+
+## Packaging and installation (Phase 6)
+
+| Piece | What | Why |
+|-------|------|-----|
+| `scripts\package.ps1` | `dist\vb6mcp-<version>\` + `.zip`: `vb6mcp.exe` (self-contained, single-file, compressed, win-x86, 48 MB), `VB6McpBridge.dll`, `install.ps1`, `uninstall.ps1`, `INSTALL.txt`; refuses an add-in build older than its source | no .NET needed on the target; the add-in can only be built elevated (spike [26](spikes/26-packaging.md)) |
+| `installer\install.ps1` | runs as the user. One elevated pass: copies to `%ProgramFiles(x86)%\vb6mcp` (in-use files moved aside to `*.old-<time>`), writes `roots.txt`, stops a running watchdog, `regsvr32` (32-bit) and checks `InprocServer32` in the registry. Then as the user: HKCU add-in entry, `claude mcp add --scope user`, `vb6mcp install-hook` | admin-only folder for the elevated pieces (Security above); HKCU and Claude settings belong to the user, so they're written unelevated; Windows PowerShell 5.1 compatible |
+| `installer\uninstall.ps1` | the reverse: hook (`uninstall-hook`), MCP registration and HKCU entry as the user; elevated: stop the watchdog, `regsvr32 /u`, delete the folder (files in use reported). It runs its elevated part from a temp copy, since it lives in the folder it deletes | refuses while VB6 runs unless `-Force`; `%LOCALAPPDATA%\vb6mcp` is kept unless `-RemoveData` |
+
+Development keeps its own flow (`build-addin.ps1`, `install-server.ps1`); whichever ran last decides where the add-in's ProgID points.
 
 ## Testing
 

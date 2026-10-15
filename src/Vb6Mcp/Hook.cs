@@ -70,6 +70,23 @@ public static class Hook
         return 0;
     }
 
+    /// <summary>Removes our PreToolUse entry (any install folder) from a settings file; everything else is kept, a backup written.</summary>
+    public static int Uninstall(string settingsPath, TextWriter output)
+    {
+        if (!File.Exists(settingsPath)) { output.WriteLine($"no {settingsPath}; nothing to remove"); return 0; }
+        var root = JsonNode.Parse(File.ReadAllText(settingsPath))?.AsObject() ?? [];
+        if (root["hooks"]?["PreToolUse"] is not JsonArray pre) { output.WriteLine("no vb6mcp hook registered"); return 0; }
+        var ours = pre.OfType<JsonObject>().Where(IsOurs).ToList();
+        if (ours.Count == 0) { output.WriteLine("no vb6mcp hook registered"); return 0; }
+        File.Copy(settingsPath, settingsPath + ".vb6mcp-backup", overwrite: true);
+        foreach (var e in ours) pre.Remove(e);
+        if (pre.Count == 0) root["hooks"]!.AsObject().Remove("PreToolUse");
+        if (root["hooks"] is JsonObject h && h.Count == 0) root.Remove("hooks");
+        File.WriteAllText(settingsPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), new UTF8Encoding(false));
+        output.WriteLine($"PreToolUse hook removed from {settingsPath}");
+        return 0;
+    }
+
     private static bool IsOurs(JsonObject entry)
         => entry["hooks"] is JsonArray hs && hs.OfType<JsonObject>().Any(h => h["command"]?.GetValue<string>() is { } c && c.Contains("vb6mcp", StringComparison.OrdinalIgnoreCase) && c.EndsWith(" hook", StringComparison.Ordinal));
 }

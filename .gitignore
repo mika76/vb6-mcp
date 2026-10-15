@@ -48,3 +48,6 @@ tests/fixtures/**/*.dll
 tests/fixtures/**/*.lib
 tests/fixtures/**/*.exp
 tests/fixtures/**/*.oca
+
+# Packages (scripts\package.ps1)
+dist/

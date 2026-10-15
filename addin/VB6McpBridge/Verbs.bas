@@ -567,7 +567,7 @@ Private Function MakeProject(ByVal vbp As String) As String
     Dim logPath As String, pid As Long, p As Long, name As String
     If LCase$(Right$(vbp, 4)) <> ".vbp" Then Err.Raise E_BADREQUEST, , "not a .vbp: " & vbp
     If InStr(vbp, "..") > 0 Or Mid$(vbp, 2, 2) <> ":\" Then Err.Raise E_BADREQUEST, , "the path must be absolute, without '..'"
-    If Not UnderRoots(vbp) Then Err.Raise E_BADREQUEST, , vbp & " isn't under the workspace roots (" & BaseDir() & "\roots.txt)"
+    If Not UnderRoots(vbp) Then Err.Raise E_BADREQUEST, , vbp & " isn't under the workspace roots (" & RootsFile() & ")"
     If Len(Dir$(vbp)) = 0 Then Err.Raise E_NOTFOUND, , "project file not found: " & vbp
     For p = 1 To g_VBE.VBProjects.Count
         If StrComp(g_VBE.VBProjects(p).FileName, vbp, vbTextCompare) = 0 Then Err.Raise E_CONFLICT, , "the project is open in this IDE; /make can't build it (use MAKEIDE)"
@@ -590,20 +590,28 @@ Private Function RegisterFile(ByVal path As String, ByVal mode As String) As Str
     If ext <> ".dll" And ext <> ".ocx" Then Err.Raise E_BADREQUEST, , "only .dll and .ocx files can be registered: " & path
     If mode <> "r" And mode <> "u" Then Err.Raise E_BADREQUEST, , "mode must be r or u"
     If InStr(path, "..") > 0 Or Mid$(path, 2, 2) <> ":\" Or InStr(path, """") > 0 Then Err.Raise E_BADREQUEST, , "the path must be absolute, without '..' or quotes"
-    If Not UnderRoots(path) Then Err.Raise E_BADREQUEST, , path & " isn't under the workspace roots (" & BaseDir() & "\roots.txt)"
+    If Not UnderRoots(path) Then Err.Raise E_BADREQUEST, , path & " isn't under the workspace roots (" & RootsFile() & ")"
     If Len(Dir$(path)) = 0 Then Err.Raise E_NOTFOUND, , "file not found: " & path
     pid = StartRegsvr(path, (mode = "u"))
     If pid = 0 Then Err.Raise E_CONFLICT, , "regsvr32 couldn't be started"
     RegisterFile = CStr(pid)
 End Function
 
+' The workspace roots file. An installed add-in (Program Files, Phase 6) reads roots.txt next to its DLL: that folder is
+' admin-writable only, so ordinary processes can't widen what this elevated add-in builds, registers or loads (with a
+' user-writable roots file, any process could get files registered elevated). A development build has no file there
+' and reads %LOCALAPPDATA%\vb6mcp\roots.txt (install-server.ps1); its DLL folder is user-writable anyway.
+Public Function RootsFile() As String
+    If Len(Dir$(App.Path & "\roots.txt")) > 0 Then RootsFile = App.Path & "\roots.txt" Else RootsFile = BaseDir() & "\roots.txt"
+End Function
+
 ' True if path is inside one of the roots in roots.txt (one absolute folder per line).
 Public Function UnderRoots(ByVal path As String) As Boolean
     Dim f As Integer, root As String
     On Error GoTo Done
-    If Len(Dir$(BaseDir() & "\roots.txt")) = 0 Then Exit Function
+    If Len(Dir$(RootsFile())) = 0 Then Exit Function
     f = FreeFile
-    Open BaseDir() & "\roots.txt" For Input As #f
+    Open RootsFile() For Input As #f
     Do While Not EOF(f)
         Line Input #f, root
         root = Trim$(root)

@@ -1,0 +1,42 @@
+vb6-mcp: lets AI agents (Claude Code) work inside the Visual Basic 6 IDE.
+
+REQUIREMENTS
+  - Windows 10/11 with Visual Basic 6.0 (SP6) installed.
+  - Claude Code (the "claude" command) for the automatic registration; otherwise register by hand (below).
+  - No .NET installation is needed: vb6mcp.exe carries its own runtime.
+
+INSTALL
+  1. Unpack this folder anywhere (e.g. your Downloads folder).
+  2. Open PowerShell in it (not as administrator) and run, with the folders that contain your VB6 projects:
+
+       powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Roots "D:\src;E:\work"
+
+     You'll get one UAC prompt: the add-in and its helper are installed to
+     "C:\Program Files (x86)\vb6mcp", where only administrators can change them, because they run
+     with VB6's (administrator) rights. The roots are stored there too: the tools only work on files
+     under these folders.
+  3. Restart VB6 and Claude Code.
+  4. In Claude Code, ask for example "list the open VB6 IDEs" (tool ide_list).
+
+  Options: -Name <server name> (default vb6), -NoHook (don't install the Claude Code hook that stops
+  agents from editing VB6 files with the plain Edit/Write tools), -NoClaude (skip Claude Code setup).
+
+UPGRADE
+  Run install.ps1 from the new package. Without -Roots the existing roots are kept. Files in use are
+  replaced as well; the new version runs after VB6 and Claude Code restart.
+
+CHANGE THE ROOTS
+  Run install.ps1 again with a new -Roots list.
+
+REGISTER WITH CLAUDE CODE BY HAND
+  claude mcp add --scope user vb6 -- "C:\Program Files (x86)\vb6mcp\vb6mcp.exe"
+
+UNINSTALL
+  Close VB6, then:
+    powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Program Files (x86)\vb6mcp\uninstall.ps1"
+  Add -RemoveData to also delete %LOCALAPPDATA%\vb6mcp (logs, recovery copies, audit log).
+
+TROUBLESHOOTING
+  - "ide_list" shows no IDE: check VB6's Add-Ins > Add-In Manager: "VB6 MCP Bridge" must be loaded.
+  - Logs: %LOCALAPPDATA%\vb6mcp\addin.log (add-in), watchdog.log, audit.log.
+  - Every tool is documented in the project's docs\tools.md.

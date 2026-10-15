@@ -9,12 +9,12 @@ An MCP server that lets AI agents (Claude Code) work **inside the Visual Basic 6
 - **MCP tool reference:** [docs/tools.md](docs/tools.md)
 - **Experiments that back the design:** [docs/spikes/](docs/spikes/)
 
-> Status: **Phase 1 in progress** (MCP server + production add-in). The spike code under `spikes/` is throwaway and is never referenced by `src/`.
+> Status: **Phases 1-6 built** (live code, debugging, UI automation, watchdog, builds and sync, forms, references and COM, packaging). The spike code under `spikes/` is throwaway and is never referenced by `src/`.
 
 ## Requirements
 
 - Windows 10/11, **Visual Basic 6.0 (SP6)**, normally run **as Administrator**
-- .NET 10 SDK
+- .NET 10 SDK (development only; the package needs no .NET)
 - Claude Code (desktop app or CLI)
 
 ## Repository layout
@@ -22,13 +22,15 @@ An MCP server that lets AI agents (Claude Code) work **inside the Visual Basic 6
 | Path | What |
 |------|------|
 | `src/Vb6Mcp.Core` | Wire protocol, discovery, add-in client, VB6 file formats |
-| `src/Vb6Mcp.UI` | Window enumeration, IDE title/mode, dialogs (later: screenshots) |
-| `src/Vb6Mcp` | `vb6mcp.exe`: the MCP server (stdio) |
+| `src/Vb6Mcp.UI` | Window enumeration, IDE title/mode, dialogs, screenshots, input for compiled programs |
+| `src/Vb6Mcp` | `vb6mcp.exe`: the MCP server (stdio), the watchdog (`watchdog` mode), the hook and `describe` |
 | `addin/VB6McpBridge` | The VB6 add-in that runs inside the IDE |
 | `tests/Vb6Mcp.Tests` | Tests and our own minimal test runner |
 | `tests/fixtures` | Small VB6 projects used by tests |
 | `spikes/` | Phase 0 experiments (throwaway) |
 | `docs/` | Architecture, protocol, tools, spike write-ups |
+| `installer/` | `install.ps1`, `uninstall.ps1`, `INSTALL.txt`: shipped in the package |
+| `scripts/` | development: `build-addin.ps1`, `install-server.ps1`; `package.ps1` builds `dist\vb6mcp-<version>.zip` |
 
 ## Build and test
 
@@ -41,7 +43,33 @@ dotnet run --project tests/Vb6Mcp.Tests -- --all       # everything
 
 The test runner's exit code is the number of failed tests.
 
-## Setup
+## Install (users)
+
+Get the package (`vb6mcp-<version>.zip`, built with `scripts\package.ps1`), unpack it anywhere, and run **as yourself** (not as administrator):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Roots "D:\src;E:\work"
+```
+
+**What you need:** VB6 (SP6) and Claude Code. No .NET is needed: `vb6mcp.exe` carries its own runtime (spike 26).
+
+**What happens:**
+- **One UAC prompt.** The add-in DLL, `vb6mcp.exe` (MCP server and watchdog) and `roots.txt` go to `C:\Program Files (x86)\vb6mcp`, and the DLL is registered.
+  - Only administrators can change files there. That matters, because the add-in and watchdog run with VB6's administrator rights, and the roots decide what they may build, register and load (docs/architecture.md, "Security").
+- **Your part, without elevation:**
+  - VB6's add-in entry (HKCU);
+  - `claude mcp add --scope user vb6`;
+  - the Claude Code hook.
+- **Then restart VB6 and Claude Code.**
+
+**Changing things later:**
+- **Upgrade:** run the new package's `install.ps1`. Without `-Roots` it keeps the existing roots, and files in use are replaced too.
+- **Change the roots:** run `install.ps1 -Roots ...` again.
+- **Uninstall:** close VB6, then `powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Program Files (x86)\vb6mcp\uninstall.ps1"`. `-RemoveData` also deletes `%LOCALAPPDATA%\vb6mcp`.
+
+## Development setup
+
+The steps below build from source and register the repo's builds instead of the Program Files install. A development add-in has no `roots.txt` next to its DLL, so it reads `%LOCALAPPDATA%\vb6mcp\roots.txt` (written by `install-server.ps1`). Its DLL and watchdog live in the user-writable repo, which is fine for development but not for users. Running `build-addin.ps1` re-registers the add-in from the repo; running `install.ps1` points it back at Program Files.
 
 ### 1. Build and register the VB6 add-in (elevated)
 
@@ -72,7 +100,7 @@ It also registers a **Claude Code hook** in `~/.claude/settings.json` (a backup 
 
 ### 3. Use it
 
-Open a project in VB6 (or let the agent call `project_open`), then ask Claude to use the `vb6` tools: `ide_list`, `ide_status`, `project_components`, `code_read`, `symbol_outline`, `proc_get`, `project_open`. See [docs/tools.md](docs/tools.md).
+Open a project in VB6 (or let the agent call `project_open`), then ask Claude to use the `vb6` tools: `ide_list` first, then whatever the task needs: code, debugging, the running app, builds, forms, references, COM (78 tools). See [docs/tools.md](docs/tools.md).
 
 To see what's inside a DLL, OCX or type library (classes, methods, enums in VB syntax), without registering it:
 
@@ -105,5 +133,7 @@ Whether VB6 runs as administrator is your machine's configuration (a "Run as adm
 | Build fails with "Permission denied" | The add-in DLL is loaded in VB6: unload it first |
 | `vb6` isn't in the app's Connectors list | Expected: Connectors shows claude.ai account connectors and desktop extensions. Claude Code's own MCP servers (like `vb6`) are listed under `/mcp` in the session |
 | New tools don't show up after `install-server.ps1` | The session keeps running the previously started server, even across a session restart. Quit and reopen the Claude app (the desktop app's `/mcp` list didn't offer a Reconnect button for `vb6`) |
+| Installed: tools refuse a path you expect to work | It must be under the roots in `C:Program Files (x86)vb6mcpoots.txt`; change them with `install.ps1 -Roots ...` (one UAC prompt) |
+| Install says "the elevated part didn't start (UAC declined?)" | The UAC prompt was declined or never seen (it can open behind other windows); run it again |
 | `ide_launch` with `normal` says elevation is required | VB6.EXE has a "Run as administrator"/compatibility setting on that path (spike 16); use `auto`/`elevated` or change the setting |
 | Opening a project shows "Add this project to SourceSafe?" | Your source-control add-in; `project_open` reports it and leaves the answer to you |

@@ -310,6 +310,13 @@ Elevated `/make` + log parsing, `build_in_ide`, shadow builds; sync engine + rel
 ### Phase 6: Packaging
 Installer: add-in registration (regsvr32 + `HKCU\...\Addins` + `vbaddin.ini`), config, Claude Code MCP config + hook. No service or Scheduled Task.
 
+**Built (2026-10-15, spike 26):** `scripts\package.ps1` → a zip with a self-contained single-file `vb6mcp.exe` (no .NET on the target), the add-in DLL, and `install.ps1`/`uninstall.ps1`.
+- **Elevated part** (one UAC prompt): Program Files plus `regsvr32`, checked in the registry.
+- **User part:** the HKCU add-in entry, user-scope `claude mcp add`, and the hook.
+- **Not needed:** `vbaddin.ini`. The HKCU key is enough; VB6 loaded the add-in from it in every phase.
+- **Roots** are machine policy in `Program Files\vb6mcp\roots.txt`, read by both the add-in and the server, so ordinary processes can't widen what the elevated side may touch.
+- **Verified live:** install, use, uninstall and reinstall, all with VB6 and Claude Code holding the files.
+
 The phase order follows the principle that the IDE is the main workspace: live code first, then debugging, then UI testing. The disk-centric pieces come after.
 
 ## 12. Risks

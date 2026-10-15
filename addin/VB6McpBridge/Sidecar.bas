@@ -47,7 +47,10 @@ Private m_regHandles As Collection          ' "p" & pid -> process handle, until
 Public Sub StartWatchdog()
     Dim exe As String, si As STARTUPINFO, pi As PROCESS_INFORMATION
     On Error GoTo Fail
-    exe = App.Path & "\watchdog\vb6mcp.exe"
+    ' Installed (Phase 6): vb6mcp.exe sits next to this DLL in Program Files. Development: the watchdog folder that
+    ' build-addin.ps1 publishes into.
+    exe = App.Path & "\vb6mcp.exe"
+    If Len(Dir$(exe)) = 0 Then exe = App.Path & "\watchdog\vb6mcp.exe"
     If Len(Dir$(exe)) = 0 Then LogLine "watchdog not installed (" & exe & "); hang handling unavailable": Exit Sub
     si.cb = LenB(si)
     If CreateProcess(vbNullString, """" & exe & """ watchdog", 0, 0, 0, CREATE_NO_WINDOW, 0, vbNullString, si, pi) = 0 Then

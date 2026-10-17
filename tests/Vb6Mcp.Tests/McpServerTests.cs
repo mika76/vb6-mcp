@@ -36,6 +36,8 @@ public static class McpServerTests
         Assert.Equal(-32601, (int)r["\"server-discover-probe-1\""]["error"]!["code"]!);
         // unknown requested version -> our newest
         Assert.Equal(McpServer.SupportedVersions[0], (string)r["0"]["result"]!["protocolVersion"]!);
+        // instructions steer the agent to the vb6 tools before it tries Edit on VB6 files (benchmark 2026-10-15)
+        Assert.True(((string?)r["0"]["result"]!["instructions"] ?? "").Contains("file_replace_lines"), "server instructions sent");
         Assert.True(r["1"]["result"] is JsonObject, "ping result");
         Assert.Equal(0, r["2"]["result"]!["tools"]!.AsArray().Count);
         Assert.Equal(-32700, (int)r["null"]["error"]!["code"]!);
@@ -51,9 +53,9 @@ public static class McpServerTests
                                     "code_replace_lines", "code_insert", "proc_replace", "project_save", "ide_dialog_respond", "ide_launch",
                                     "run_start", "run_break", "run_continue", "run_end", "step_into", "step_over", "step_out", "run_to_cursor",
                                     "bp_toggle", "bp_clear_all", "debug_where", "debug_eval", "debug_immediate", "syntax_check", "debug_locals", "debug_callstack", "debug_output", "debug_error",
-                                    "ide_kill", "recovery_list", "recovery_read", "recovery_restore", "recovery_discard",
+                                    "ide_kill", "ide_quit", "recovery_list", "recovery_read", "recovery_restore", "recovery_discard",
                                     "app_windows", "app_tree", "app_click", "app_set_text", "app_mouse", "app_scroll", "app_select", "app_keys", "app_wait", "app_screenshot", "exe_run", "exe_end", "build_make", "build_in_ide", "sync_status", "sync_diff", "sync_take_disk", "sync_take_ide",
-            "form_controls", "form_properties", "form_set_property", "form_add_control", "form_remove_control", "refs_list", "refs_add", "refs_remove", "refs_add_component", "refs_fix_broken" }, names);
+            "form_controls", "form_properties", "form_set_property", "form_set_properties", "form_layout", "form_add_control", "form_screenshot", "form_remove_control", "refs_list", "refs_add", "refs_remove", "refs_add_component", "refs_fix_broken", "project_close", "project_add_component", "project_settings", "project_checkpoint", "project_rollback", "ide_claim", "ide_release" }, names);
         var codeRead = r["1"]["result"]!["tools"]!.AsArray().First(t => (string)t!["name"]! == "code_read")!;
         Assert.Equal("component", (string)codeRead["inputSchema"]!["required"]![0]!);
     }

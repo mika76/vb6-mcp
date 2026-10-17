@@ -82,8 +82,11 @@ public sealed partial class IdeTools
             vbpAskedFor = asked.Select(x =>
             {
                 var versions = registered.Where(t => t.LibId == x.Dep.LibId && !ComRegistry.IsProjectTypeLib(t)).OrderByDescending(t => t.Major).ThenByDescending(t => t.Minor).ToList();
-                var usable = versions.Where(t => t.FileExists).ToList();
+                // usable = the registered file exists AND contains a type library (a .NET COM DLL registered without /tlb doesn't)
+                var noTypeLib = versions.Where(t => t.FileExists && TypeLibInfo.Read(t.Win32Path!) is null).ToList();
+                var usable = versions.Where(t => t.FileExists && !noTypeLib.Contains(t)).ToList();
                 var sameMajor = usable.FirstOrDefault(t => t.Major == x.Dep.Major);
+                var sameMajorNoTlb = noTypeLib.FirstOrDefault(t => t.Major == x.Dep.Major);
                 string id = x.Dep.LibId.ToString("B").ToUpperInvariant();
                 int? pos = broken.FirstOrDefault(b => Guid.TryParse(b.Ref.Guid, out var g) && g == x.Dep.LibId).Position is int p && p > 0 ? p : null;
                 string at = pos is null ? "#<position>" : $"#{pos}";
@@ -97,6 +100,8 @@ public sealed partial class IdeTools
                 // VBIDE removes a broken reference only while its typelib is registered (spike 25: "Object library not registered" otherwise)
                 string fix = sameMajor is not null
                         ? $"refs_remove name={at}, then refs_add libid={id} version={sameMajor.Major}.{sameMajor.Minor}"
+                    : sameMajorNoTlb is not null
+                        ? $"{id} {sameMajorNoTlb.Major}.{sameMajorNoTlb.Minor} is registered to {sameMajorNoTlb.Win32Path}, but that file contains no type library, so VB6 can't load it. Register one (for a .NET COM DLL, elevated: RegAsm \"{sameMajorNoTlb.Win32Path}\" /tlb) or provide the .tlb at the .vbp's hint path; VB then resolves the reference by itself"
                     : carriers.Count > 0
                         ? $"com_register file=\"{carriers[0]}\" confirm=true (VB re-resolves the reference as soon as it's registered, spike 25); then refs_fix_broken again: if it's still broken, refs_remove name={at} and refs_add libid={id} version={x.Dep.Major}.<minor as registered>"
                     : usable.Count > 0
@@ -106,7 +111,7 @@ public sealed partial class IdeTools
                 {
                     position = pos, filesWithThisTypeLib = carriers,
                     description = x.Desc, libId = x.Dep.LibId.ToString("B").ToUpperInvariant(), major = x.Dep.Major, fileHint = x.Hint, fileHintExists = x.Hint is not null && File.Exists(x.Hint),
-                    registered = versions.Select(t => new { version = $"{t.Major}.{t.Minor}", file = t.Win32Path, fileExists = t.FileExists }),
+                    registered = versions.Select(t => new { version = $"{t.Major}.{t.Minor}", file = t.Win32Path, fileExists = t.FileExists, hasTypeLib = t.FileExists && !noTypeLib.Contains(t) }),
                     fix,
                 };
             }),

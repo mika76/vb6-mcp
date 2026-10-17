@@ -82,7 +82,7 @@ A development build (no `roots.txt` next to the DLL) keeps reading `%LOCALAPPDAT
 
 | Type | What | Notes |
 |------|------|-------|
-| `IdeWindows` | IDE main window title → mode, `WM_NULL` probe, `IsHungAppWindow`, `#32770` dialogs, Immediate window, main window handle | title tag not always last (spike 12); cached caption readable while busy |
+| `IdeWindows` | IDE main window title → mode, `WM_NULL` probe, `IsHungAppWindow`, `#32770` dialogs, Immediate window, main window handle, all child windows with rectangles (`Descendants`: designer windows for `form_screenshot`, `vb6mcp windows <pid>`), current window and client rectangles (stitching) | title tag not always last (spike 12); cached caption readable while busy |
 | `AppWindows` | the running program's windows (top-level windows of the VB6 process minus the IDE's own classes) and their controls (child walk), `Thunder*`/`ThunderRT6*` class → kind, `WM_GETTEXT` with a timeout | reads cross elevation (spike 10); Labels/Images have no hwnd |
 | `LocalInput` | input from the server into compiled programs started with `exe_run` (same integrity): posted click/text/mouse/scroll/keys/select, and `SendInput` real input with foreground and cursor restore | mirrors the add-in's `Input.bas`; only for processes the server started |
 | `DebugOutput` | OutputDebugString capture (DBWIN_BUFFER mapping + DBWIN_BUFFER_READY/DATA_READY events) on a background thread, last 2,000 messages | one owner per session (DebugView competes); started on first `debug_output` |
@@ -104,6 +104,36 @@ A development build (no `roots.txt` next to the DLL) keeps reading `%LOCALAPPDAT
 | `Hook` | `vb6mcp hook`: Claude Code PreToolUse hook blocking Edit/Write on VB6 files (exit 2 + reason); `install-hook` merges it into `~/.claude/settings.json`, `uninstall-hook` removes only our entry | PLAN §8; generic tools would write UTF-8 and bypass the IDE |
 | `Tools.IIdeEnvironment` | discovery + window reads + clients | swapped for fakes in tests |
 
+### Watchdog started by the user (`--stay`)
+
+The add-in starts the watchdog (`vb6mcp watchdog`), which exits 2 minutes after the last VB6 closes, or 30 minutes after a crash (a discovery file left behind by a gone process), so the agent can still relaunch through it without a UAC prompt once it notices (PLAN.md D2). The server notices a crash before running the next tool and adds an `ideCrashed` notice to that tool's result (`IdeTools.Crash.cs`: only IDEs it saw running, each once; `ide_kill` and `ide_quit` don't count), with the Application-log entry read through `wevtutil`. `vb6mcp watchdog --stay`, started elevated by the user once, keeps running without any VB6.
+- Because it is elevated, `ide_launch` can start elevated IDEs through it (`LAUNCH`, spike 12b) without a UAC prompt, so each Claude session can have its own IDE (PLAN Phase 7 A9).
+- Its capabilities are unchanged: `LAUNCH` still starts only `VB6.EXE`, with project paths checked against the roots. It is only around for longer.
+
+### IDE ownership between sessions (Phase 7 A9)
+
+`IdeOwnership` (Core) records which MCP server process owns an IDE, in `%LOCALAPPDATA%\vb6mcp\owners\<ide pid>.json`. It is kept apart from `instances\`, because `Discovery` reads every `*.json` there. The record holds the server's pid and start time and the client name from `initialize`; a dead owner owns nothing.
+- `IdeTools.All()` wraps every write tool (`IdeTools.WriteTools`) with a guard. The guard resolves the target IDE as the tool would and refuses one owned by another live session.
+- `ResolveInstance` prefers the session's own IDE when several run.
+- `ide_launch` claims what it starts. `ide_claim`/`ide_release` handle the rest.
+- This is coordination between the user's own sessions, not a security boundary.
+
+### Checkpoints
+
+`Checkpoints` (Core, `Files/Checkpoints.cs`) copies a project's files (from its parsed `.vbp`) byte-exact to `%LOCALAPPDATA%\vb6mcp\checkpoints`, one folder per project keyed by its normalized path (hard rule 3), with a manifest of SHA-256 hashes. It only reads the project. `project_rollback` writes the files back; for an open project it reuses the `project_close` discard machinery (snapshot what VB writes on close, restore it) and then opens the project again, because VBIDE can't drop unsaved changes or reload a whole project (spike 31). No add-in change.
+
+### `form_layout`
+
+`FormLayout` (server, `Tools/FormLayout.cs`) turns a grid of control names into rectangles, from the controls' current sizes (one `DESIGN CONTROLS` read) and the container's inside size (`DESIGN PROPS` of the form or PictureBox; a Frame's own size). It is pure arithmetic, unit-tested without an IDE. The tool then sets only the changed `Left`/`Top`/`Width`/`Height` through the same `DESIGN SET` loop as `form_set_properties` (`ApplyChangesAsync`), so there is no new add-in verb and the usual overlap review runs afterwards.
+
+### `batch_run`
+
+`BatchTool` (built in `Program.cs` over every other tool) runs a list of tool calls in order through each tool's own `InvokeAsync`, so guards and checks apply per call. `ToolResult.Batch` concatenates their content. It saves model turns, not work in the IDE. It needs no add-in verb, so the add-in's verb list (hard rule 8) is unchanged.
+
+### Busy, not unreachable
+
+While the IDE thread runs a long operation the server queued (`MakeCompiledFile` for `build_in_ide` took ~30 s in a production project, or a full compile for `syntax_check`), the add-in can't accept connections and Windows refuses them. `AddinClient` remembers such operations per IDE pid (`MarkBusy`, at most 10 minutes, cleared by the next successful reply). A refused connection in that window, with the VB6 process alive, raises `AddinBusyException` ("VB6 is busy compiling (started 12 s ago)…"), which tools and polling loops already treat as busy, instead of "unreachable" (hard rule 6, improvement notes 21).
+
 ## The add-in (`addin/VB6McpBridge`)
 
 VB6 ActiveX DLL, ProgID `VB6McpBridge.Connect`, version 0.1.0, binary-compatible with `addin/compat/VB6McpBridge.dll`. Built and registered by `scripts/build-addin.ps1` (elevated); registered with VB6 by `scripts/register-addin.ps1` (HKCU, called by the build after the DLL's ProgID exists: a VB6 that starts while the Addins key names an unregistered ProgID deletes the key).
@@ -116,10 +146,11 @@ VB6 ActiveX DLL, ProgID `VB6McpBridge.Connect`, version 0.1.0, binary-compatible
 | `Defer.bas` | queue + `WM_DEFER` message: runs deferred actions (`OPEN`, `SAVE`, `CMD`, menu items by path (full compile, Call Stack), `IMM`, `APPTEXT`, `SNAP`) from a fresh dispatch |
 | `Input.bas` | input into the IDE's own process only: `BM_CLICK` to dialog and program buttons, `WM_SETTEXT` to program text boxes, posted mouse and scroll messages, real input (`SendInput`) for windowless controls with cursor/foreground restore (spike 17), `WM_CHAR`/Enter to the Immediate window, clipboard save/restore |
 | `Sync.bas` | records the IDE's own file writes (`FileControlEvents.AfterWriteFile`, hooked in `Connect.cls`) for `WRITES` | event handlers only record |
-| `Design.bas` | form designer verbs `DESIGN`/`RESULT`: controls, properties (object properties via their sub-`Properties` collection), add, remove | deferred with request ids: a UserControl's own code runs when its properties are touched (hard rule 14, spike [23](spikes/23-designer-references.md)) |
+| `Design.bas` | form designer verbs `DESIGN`/`RESULT`: controls, properties (object properties via their sub-`Properties` collection), add, remove, show (open the designer for `form_screenshot`) | deferred with request ids: a UserControl's own code runs when its properties are touched (hard rule 14, spike [23](spikes/23-designer-references.md)) |
 | `Sidecar.bas` (registration) | `REGSVR`: 32-bit `regsvr32 /s [/u]` as an elevated child, handle kept for `REGSTATUS` (non-blocking exit code) | path checked on the elevated side too: roots, absolute, no `..`, .dll/.ocx (spike [24](spikes/24-com-registration.md)) |
 | `Refs.bas` | `REFS`, `REFADD` (`AddFromFile`/`AddFromGuid`), `REFDEL`, `TOOLBOX` (`AddToolboxProgID`) | synchronous, design mode for changes; GUIDs only from the registry or a typelib (hard rule 13) |
 | `Sidecar.bas` | starts the watchdog (`App.Path\watchdog\vb6mcp.exe watchdog`) with `CreateProcess`, no wait |
+| `ProjectVerbs.bas` | `CLOSE` (with discard: `IsDirty` cleared, then `VBProjects.Remove`), `COMPADD` (`VBComponents.Add`/`AddFile`), `SAVECOMP` (`VBComponent.SaveAs`), all deferred; `PRJGET`/`PRJSET` (project properties, startup object), synchronous | Phase 7; paths checked against the roots here too |
 | `Snap.bas` | `PrintWindow` of an own-process window into a 32 bpp BMP under `%LOCALAPPDATA%\vb6mcp\shots\` (temp + rename) |
 | `Status.bas` | "VB6 MCP" toolbar: version, DLL build time, port, request count |
 | `Log.bas` | shared state, `%LOCALAPPDATA%\vb6mcp\addin.log` |

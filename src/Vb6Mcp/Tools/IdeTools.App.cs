@@ -131,7 +131,16 @@ public sealed partial class IdeTools
         return ToolResult.Ok(new
         {
             window = new { hwnd = Hex(form.Hwnd), form.Kind, form.Caption },
-            controls = controls.Select(c => new { hwnd = Hex(c.Hwnd), c.Kind, c.Text, c.Left, c.Top, c.Width, c.Height, c.Visible, c.Enabled, c.Depth, c.Class }),
+            // Compact on purpose (token breakdown, docs/benchmarks): no window class (Kind comes from it), and hidden/disabled
+            // only when true. app_tree was up to 8% of a run's re-read tokens.
+            controls = controls.Select(c =>
+            {
+                var o = new System.Text.Json.Nodes.JsonObject { ["hwnd"] = Hex(c.Hwnd), ["kind"] = c.Kind, ["text"] = c.Text, ["left"] = c.Left, ["top"] = c.Top, ["width"] = c.Width, ["height"] = c.Height };
+                if (c.Depth > 0) o["depth"] = c.Depth;
+                if (!c.Visible) o["hidden"] = true;
+                if (!c.Enabled) o["disabled"] = true;
+                return o;
+            }),
             note = "Labels, Images, Shapes and Lines have no window and aren't listed; use app_screenshot to see them",
         });
     }

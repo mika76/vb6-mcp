@@ -84,6 +84,39 @@ public static class EditToolsTests
         Assert.Equal(VbCode.Hash(ide.Text), (string)r["json"]!["hash"]!);
     }
 
+    /// <summary>Several ranges in one call, numbered against the text read, applied bottom-up (improvement notes 5).</summary>
+    [Test]
+    public static async Task SeveralEditsInOneCallUseTheOriginalNumbering()
+    {
+        using var ide = new FakeIde();
+        var r = await Call(ide.Tools(), "code_replace_lines", new JsonObject
+        {
+            ["component"] = "modA", ["expected_hash"] = VbCode.Hash(Module),
+            ["edits"] = new JsonArray(
+                new JsonObject { ["start_line"] = 1, ["count"] = 1, ["new_text"] = "Option Explicit\n' header" },   // grows the top
+                new JsonObject { ["start_line"] = 4, ["count"] = 1, ["new_text"] = "    Beep\nEnd Sub" }),            // still line 4 of the original
+        });
+        Assert.Equal(false, (bool)r["isError"]!, (string?)r["text"]);
+        Assert.Equal("Option Explicit\r\n' header\r\n\r\nPrivate Sub A()\r\n    Beep\r\nEnd Sub", ide.Text);
+        Assert.Equal(4, int.Parse(ide.Replaces[0][2]), "the lower edit goes first");
+        Assert.Equal(2, r["json"]!["edits"]!.AsArray().Count);
+    }
+
+    [Test]
+    public static async Task OverlappingEditsAreRefusedBeforeAnythingIsSent()
+    {
+        using var ide = new FakeIde();
+        var r = await Call(ide.Tools(), "code_replace_lines", new JsonObject
+        {
+            ["component"] = "modA", ["expected_hash"] = VbCode.Hash(Module),
+            ["edits"] = new JsonArray(
+                new JsonObject { ["start_line"] = 3, ["count"] = 2, ["new_text"] = "x" },
+                new JsonObject { ["start_line"] = 4, ["count"] = 0, ["new_text"] = "y" }),
+        });
+        Assert.True((bool)r["isError"]! && ((string)r["text"]!).Contains("overlap"), (string)r["text"]!);
+        Assert.Equal(0, ide.Replaces.Count, "nothing sent");
+    }
+
     [Test]
     public static async Task StaleHashIsRefusedWithoutSendingAnything()
     {

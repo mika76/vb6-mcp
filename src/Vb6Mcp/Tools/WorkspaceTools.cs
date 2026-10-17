@@ -37,7 +37,8 @@ public sealed partial class WorkspaceTools(IIdeEnvironment env, IReadOnlyList<st
             (a, _) => Task.FromResult(FileProjects(a))),
         new("file_read",
             "Read a VB6 source file from disk the way the IDE shows it (code only: no designer block, no hidden Attribute lines). " +
-            "For files loaded in a running IDE, the IDE's memory is the truth: the result says so, and code_read gives the live text.",
+            "For files loaded in a running IDE, the IDE's memory is the truth: the result says so, and code_read gives the live text. " +
+            "Without a range, at most 2000 lines are returned; nextStartLine says where to read on.",
             Schema.Object(("path", "string", "Full path of the .bas/.cls/.frm/.ctl/.pag/.dsr file.", true),
                           ("start_line", "integer", "First line to read (1-based).", false), ("count", "integer", "Number of lines.", false)),
             (a, _) => FileReadAsync(a)),
@@ -45,10 +46,13 @@ public sealed partial class WorkspaceTools(IIdeEnvironment env, IReadOnlyList<st
             "Edit a VB6 source file of a closed project on disk: replace count lines from start_line (1-based, the code as the IDE " +
             "shows it, as file_read returns it; count 0 inserts) with new_text. The header, designer block and hidden Attribute lines " +
             "stay byte-exact; the file stays Windows-1252 with CR LF. expected_hash (from file_read) guards against changes since. " +
-            "If the file is open in a running IDE the edit goes to the IDE instead (its memory is the truth; it stays unsaved there).",
-            Schema.Object(("path", "string", "Full path of the .bas/.cls/.frm/.ctl/.pag/.dsr file.", true), ("start_line", "integer", "First line (1-based).", true),
-                          ("count", "integer", "Lines to replace (0 = insert before start_line).", true), ("new_text", "string", "Replacement text (lines separated by line breaks).", true),
-                          ("expected_hash", "string", "The hash from file_read.", true), ("pid", "integer", "IDE to edit in, when the file is open in several.", false)),
+            "Several ranges in one call: edits; mechanical renames: find/replace (preview, then apply=true). If the file is open in a running IDE the edit goes to the IDE instead (its memory is the " +
+            "truth; it stays unsaved there).",
+            FindReplace.WithSchema(EditList.WithSchema(Schema.Object(("path", "string", "Full path of the .bas/.cls/.frm/.ctl/.pag/.dsr file.", true), ("start_line", "integer", "First line (1-based).", false),
+                          ("count", "integer", "Lines to replace (0 = insert before start_line).", false), ("new_text", "string", "Replacement text." + EditList.CodeRule, false),
+                          ("edits", "array", EditList.Description, false),
+                          ("drop_var_help_ids", "boolean", "Allow the edit to drop the hidden 'Attribute x.VB_VarHelpID' of a WithEvents variable it rewrites (VB writes it again on save).", false),
+                          ("expected_hash", "string", "The hash from file_read.", true), ("pid", "integer", "IDE to edit in, when the file is open in several.", false)))),
             (a, _) => FileReplaceAsync(a)),
         new("ws_affected",
             "Which projects a change to (shared) source files affects, in rebuild order: the projects that include the files, then every project " +
@@ -57,8 +61,96 @@ public sealed partial class WorkspaceTools(IIdeEnvironment env, IReadOnlyList<st
             Schema.Object(("paths", "array", "Changed source files (full paths).", true),
                           ("refresh", "boolean", "Rescan the roots first.", false)),
             (a, _) => AffectedAsync(a)),
+        new("symbol_refs",
+            "Every statement that uses a name (a procedure, variable, constant...) across the projects under the workspace roots: file, " +
+            "line, the full statement with ' _' continuations joined (so the arguments passed are visible), and which projects include " +
+            "the file. Whole-word, case-insensitive; matches in strings and comments don't count. Files a running IDE has with unsaved " +
+            "changes are read from the IDE. Declarations are marked. symbol_find finds only declarations.",
+            Schema.Object(("name", "string", "The identifier, e.g. Add_To_Audit.", true),
+                          ("project", "string", "Only projects whose name contains this, or one .vbp path.", false),
+                          ("declarations", "boolean", "Include declarations (default true).", false),
+                          ("refresh", "boolean", "Rescan the roots first.", false)),
+            (a, _) => RefsAsync(a)),
+        FormResourcesTool(),
+        ResReadTool(),
         .. ComTools(),
     ];
+
+    /// <summary>symbol_refs stops after this many statements.</summary>
+    public const int MaxRefs = 300;
+
+    /// <summary>
+    /// symbol_refs (PLAN.md C5). A disk scan of every member of the selected projects, with the IDE's text for components
+    /// that are dirty in a running IDE (hard rule 4: its memory is the truth). Each shared file is scanned once.
+    /// </summary>
+    private async Task<ToolResult> RefsAsync(JsonObject a)
+    {
+        var name = a.Req("name").Trim();
+        if (!VbRefs.IsIdentifier(name)) throw new ToolException($"'{name}' isn't a VB identifier (letters, digits and _, starting with a letter); pass one name, e.g. Add_To_Audit");
+        var map = Map(a.Bool("refresh") == true);
+        IEnumerable<VbpFile> projects = map.Projects;
+        if (a.Str("project") is { Length: > 0 } spec)
+            projects = spec.EndsWith(".vbp", StringComparison.OrdinalIgnoreCase)
+                ? projects.Where(p => PathKey.Same(p.Path, PathKey.Normalize(spec)))
+                : projects.Where(p => p.Name.Contains(spec, StringComparison.OrdinalIgnoreCase));
+        var selected = projects.ToList();
+        if (selected.Count == 0) throw new ToolException($"no project under the roots matches '{a.Str("project")}'");
+        var files = selected.SelectMany(p => p.Members).Select(m => m.FullPath)
+            .Where(p => VbSourceFile.KindOf(p) != VbFileKind.Other).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+        // components with unsaved changes in a running IDE: read those from the IDE
+        var dirty = new Dictionary<string, (InstanceInfo Inst, string Project, string Component)>(StringComparer.OrdinalIgnoreCase);
+        var warnings = new List<string>();
+        foreach (var inst in env.Scan().Live)
+        {
+            try
+            {
+                var client = env.Client(inst);
+                foreach (var prj in await client.ProjectsAsync())
+                    foreach (var c in await client.ComponentsAsync(prj.Name))
+                        if (c.IsDirty && c.FileName.Length > 0) dirty[PathKey.Normalize(c.FileName)] = (inst, prj.Name, c.Name);
+            }
+            catch (Exception ex) when (ex is AddinBusyException or AddinUnreachableException or AddinErrorException)
+            {
+                warnings.Add($"VB6 {inst.Pid} didn't answer: unsaved changes there aren't included (the files were read from disk)");
+            }
+        }
+
+        bool withDecl = a.Bool("declarations") != false;
+        var results = new List<object>();
+        int total = 0; bool truncated = false;
+        foreach (var path in files.OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
+        {
+            string code, source = "disk";
+            try
+            {
+                if (dirty.TryGetValue(path, out var d)) { code = (await env.Client(d.Inst).ReadAsync(d.Project, d.Component)).Text; source = "ide"; }
+                else if (File.Exists(path)) code = VbSourceFile.Load(path).Code;
+                else continue;
+            }
+            catch (Exception ex) when (ex is IOException or AddinBusyException or AddinUnreachableException or AddinErrorException)
+            {
+                warnings.Add($"{path}: {ex.Message}");
+                continue;
+            }
+            var refs = VbRefs.Find(code, name).Where(r => withDecl || !r.Declaration).ToList();
+            if (refs.Count == 0) continue;
+            if (total + refs.Count > MaxRefs) { refs = refs.Take(MaxRefs - total).ToList(); truncated = true; }
+            total += refs.Count;
+            results.Add(new
+            {
+                path, source, projects = map.ProjectsUsing(path).Select(p => p.Name),
+                refs = refs.Select(r => new { line = r.Line, endLine = r.EndLine > r.Line ? r.EndLine : (int?)null, declaration = r.Declaration ? true : (bool?)null, statement = r.Statement }),
+            });
+            if (truncated) break;
+        }
+        return ToolResult.Ok(new
+        {
+            name, projects = selected.Count, filesScanned = files.Count, count = total, truncated = truncated ? true : (bool?)null,
+            files = results, warnings = warnings.Count > 0 ? warnings : null,
+            note = truncated ? $"stopped at {MaxRefs} statements; narrow it with project" : null,
+        });
+    }
 
     private async Task<ToolResult> AffectedAsync(JsonObject a)
     {
@@ -149,16 +241,16 @@ public sealed partial class WorkspaceTools(IIdeEnvironment env, IReadOnlyList<st
         if (!File.Exists(path)) throw new ToolException("file not found: " + path);
         if (VbSourceFile.KindOf(path) == VbFileKind.Other) throw new ToolException("not a VB6 source file (.bas/.cls/.frm/.ctl/.pag/.dsr)");
         var f = VbSourceFile.Load(path);
-        int start = a.Int("start_line") ?? 1;
-        string text = a.Int("start_line") is null && a.Int("count") is null ? f.Code : VbCode.Slice(f.Code, start, a.Int("count") ?? int.MaxValue);
+        var page = Paging.Page(f.Code, a.Int("start_line"), a.Int("count"));
         var loaded = await FindInIdesAsync(path);
         return ToolResult.Ok(new
         {
-            source = "disk", path, component = f.VbName, kind = f.Kind.ToString(), countOfLines = f.CountOfLines, startLine = start, hash = VbCode.Hash(f.Code),
+            source = "disk", path, component = f.VbName, kind = f.Kind.ToString(), countOfLines = f.CountOfLines, startLine = page.StartLine, hash = VbCode.Hash(f.Code),
+            truncated = page.Truncated ? true : (bool?)null, nextStartLine = page.NextStartLine, note = Paging.Note(page, f.CountOfLines),
             // named objects: System.Text.Json skips tuple fields
             openInIde = loaded.Select(l => new { l.pid, l.project, l.component, l.dirty }),
             warning = loaded.Any(l => l.dirty) ? "a running IDE has unsaved changes to this file; its memory is the truth (use code_read)" : null,
-            text,
+            text = page.Text,
         });
     }
 
@@ -173,12 +265,13 @@ public sealed partial class WorkspaceTools(IIdeEnvironment env, IReadOnlyList<st
         RequireUnderRoots(path);
         if (!File.Exists(path)) throw new ToolException("file not found: " + path);
         if (VbSourceFile.KindOf(path) is VbFileKind.Other) throw new ToolException("not a VB6 source file (.bas/.cls/.frm/.ctl/.pag/.dsr)");
-        int start = a.Int("start_line") ?? throw new ToolException("missing required argument 'start_line'");
-        int count = a.Int("count") ?? throw new ToolException("missing required argument 'count'");
+        var fr = FindReplace.Args(a);
+        var edits = fr is null ? EditList.From(a) : [];   // one range or a list, validated before anything changes
+        // find/replace (PLAN.md A6): edits from the matches in the text the hash covers; without apply only a preview
+        IReadOnlyList<FoundLine> Find(string text) => FindReplace.Compute(text, fr!.Value.Find, fr.Value.Replace, fr.Value.WholeWord, fr.Value.MatchCase, fr.Value.InStrings, fr.Value.InComments);
+        IReadOnlyList<LineEdit> FoundEdits(IReadOnlyList<FoundLine> found)
+            => found.Count == 0 ? throw new ToolException("no matches, nothing was changed (whole words, code only by default)") : FindReplace.Edits(found);
         var expected = a.Req("expected_hash");
-        string prepared;
-        try { prepared = VbCode.PrepareForInsert(a.Str("new_text") ?? throw new ToolException("missing required argument 'new_text'")); }
-        catch (ArgumentException ex) { throw new ToolException(ex.Message); }
 
         // Every running IDE must answer: a busy one could have the file open (and unsaved)
         var (loaded, unknown) = await FindInIdesStrictAsync(path);
@@ -194,28 +287,53 @@ public sealed partial class WorkspaceTools(IIdeEnvironment env, IReadOnlyList<st
             if (VbCode.Hash(ide.Text) != expected)
                 throw new ToolException($"the file is open in VB6 {target.Inst.Pid} as {target.Project}.{target.Component}{(target.Dirty ? " with unsaved changes" : "")}, and its text there " +
                                         "doesn't match expected_hash. Read it with code_read and edit with code_replace_lines");
+            if (fr is { Apply: false })
+                return ToolResult.Ok(new { source = "ide", routedTo = new { pid = target.Inst.Pid, project = target.Project, component = target.Component }, path, preview = FindReplace.Preview(Find(ide.Text)), hash = expected });
+            if (fr is not null) edits = FoundEdits(Find(ide.Text));
             if (env.ReadWindows(target.Inst.Pid).Mode != IdeMode.Design)
                 throw new ToolException($"the file is open in VB6 {target.Inst.Pid}, which isn't in design mode; edits need design mode");
-            var old = VbCode.Slice(ide.Text, start, count);
-            var (lines, dirty) = await client.ReplaceAsync(target.Project, target.Component, start, count, old, prepared);
+            int lines = 0; bool dirty = false; int done = 0;
+            foreach (var e in edits)   // bottom-up: the original numbering stays valid above each edit
+            {
+                var old = e.Count > 0 ? VbCode.Slice(ide.Text, e.Start, e.Count) : "";
+                try { (lines, dirty) = await client.ReplaceAsync(target.Project, target.Component, e.Start, e.Count, old, e.Text); }
+                catch (AddinErrorException ex) when (ex.Code == 409)
+                {
+                    throw new ToolException($"conflict at lines {e.Start}-{e.Start + e.Count - 1} ({ex.AddinMessage}); " +
+                        (done == 0 ? "nothing was changed" : $"{done} later edit(s) were already applied in the IDE (undo there, or re-read)"));
+                }
+                done++;
+            }
             var now = await client.ReadAsync(target.Project, target.Component);
             return ToolResult.Ok(new
             {
                 source = "ide", routedTo = new { pid = target.Inst.Pid, project = target.Project, component = target.Component }, path, countOfLines = lines, dirty,
                 hash = VbCode.Hash(now.Text), note = "the file is open in the IDE, so the edit went there (unsaved); save with project_save",
+                codeHints = VbCode.LiteralHints(string.Join("\r\n", edits.Select(e => e.Text))) is { Count: > 0 } ideHints ? ideHints : null,
             });
         }
 
         var f = VbSourceFile.Load(path);
         if (VbCode.Hash(f.Code) != expected) throw new ToolException("the file changed since it was read (hash mismatch); read it again with file_read");
-        byte[] bytes;
-        try { bytes = f.ReplaceCode(start, count, prepared); }
-        catch (ArgumentException ex) { throw new ToolException(ex.Message); }
+        if (fr is { Apply: false }) return ToolResult.Ok(new { source = "disk", path, preview = FindReplace.Preview(Find(f.Code)), hash = expected });
+        if (fr is not null) edits = FoundEdits(Find(f.Code));
+        // All edits are applied in memory, bottom-up, before the file is written once: a failing edit changes nothing.
+        byte[] bytes = f.Bytes;
+        foreach (var e in edits)
+        {
+            try { bytes = f.ReplaceCode(e.Start, e.Count, e.Text, a.Bool("drop_var_help_ids") == true); }
+            catch (ArgumentException ex) { throw new ToolException(edits.Count == 1 ? ex.Message : $"edit at line {e.Start}: {ex.Message} (nothing was changed)"); }
+            f = VbSourceFile.Parse(path, bytes);
+        }
         var tmp = path + ".vb6mcp.tmp";
         File.WriteAllBytes(tmp, bytes);
         File.Move(tmp, path, overwrite: true);
         var after = VbSourceFile.Load(path);
-        return ToolResult.Ok(new { source = "disk", path, component = after.VbName, countOfLines = after.CountOfLines, hash = VbCode.Hash(after.Code) });
+        return ToolResult.Ok(new
+        {
+            source = "disk", path, component = after.VbName, countOfLines = after.CountOfLines, hash = VbCode.Hash(after.Code),
+            codeHints = VbCode.LiteralHints(string.Join("\r\n", edits.Select(e => e.Text))) is { Count: > 0 } ch ? ch : null,
+        });
     }
 
     /// <summary>Like FindInIdesAsync, but also lists the IDEs that couldn't be asked.</summary>

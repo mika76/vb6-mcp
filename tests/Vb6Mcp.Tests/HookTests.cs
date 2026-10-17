@@ -17,6 +17,9 @@ public static class HookTests
         Assert.True(bas.Code == 2 && bas.Err.Contains("file_replace_lines"), bas.Err);
         Assert.Equal(2, Run("""{"tool_name":"Write","tool_input":{"file_path":"D:\\p\\App.vbp","content":"x"}}""").Code, ".vbp too");
         Assert.Equal(0, Run("""{"tool_name":"Edit","tool_input":{"file_path":"D:\\p\\Program.cs"}}""").Code, "other files allowed");
+        var frx = Run("""{"tool_name":"Write","tool_input":{"file_path":"D:\\p\\frmMain.frx","content":"x"}}""");
+        Assert.True(frx.Code == 2 && frx.Err.Contains("binary file VB6 writes itself"), "companions get their own reason: " + frx.Err);
+        Assert.Equal(2, Run("""{"tool_name":"Edit","tool_input":{"file_path":"D:\\p\\App.vbw"}}""").Code, ".vbw too");
         Assert.Equal(0, Run("not json").Code, "malformed input never blocks");
         Assert.Equal(0, Run("""{"tool_name":"Bash","tool_input":{"command":"ls"}}""").Code, "no file_path");
     }

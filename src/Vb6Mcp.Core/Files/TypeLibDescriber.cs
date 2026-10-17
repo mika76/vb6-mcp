@@ -55,6 +55,13 @@ public static class TypeLibDescriber
     }
 
     /// <summary>
+    /// The member with DISPID_VALUE (memid 0) of an interface or dispinterface: what VB uses when code names the object
+    /// itself (x = obj, If obj Then). Enum and record members have no default, whatever their ids.
+    /// </summary>
+    public static TlbMember? DefaultMember(TlbType t)
+        => t.Kind is "interface" or "dispinterface" ? t.Members.FirstOrDefault(m => m.MemId == 0 && m.Kind != "const") : null;
+
+    /// <summary>
     /// Renders types as compact VB-like declarations, one member per line (what an agent reads best).
     /// <paramref name="filter"/> keeps types whose name contains it (case-insensitive); hidden members are left out unless asked.
     /// </summary>
@@ -71,9 +78,18 @@ public static class TypeLibDescriber
                 "enum" => $"Enum {t.Name}", "record" => $"Type {t.Name}", "alias" => $"' alias {t.Name} = {t.AliasOf}",
                 "coclass" => $"Class {t.Name}{(t.Control ? " ' control" : t.Creatable ? "" : " ' not creatable")}", _ => $"{t.Kind} {t.Name}",
             };
-            sb.AppendLine(head + (t.Doc is null ? "" : "  ' " + t.Doc) + (t.Hidden ? "  ' hidden" : ""));
+            // A class's default member, through its default interface (improvement notes 14: code passed an MSComm
+            // control where a Boolean was expected, and the agent needed to know that means MSComm.CommPort)
+            string? classDefault = t.Kind == "coclass" && t.Implements.FirstOrDefault(i => i.StartsWith("[default]", StringComparison.Ordinal)) is { } di
+                && d.Types.FirstOrDefault(x => x.Name == di["[default]".Length..].Trim()) is { } iface && DefaultMember(iface) is { } dm
+                    // controls often make a hidden alias the default (MSComm: _CommPort for CommPort): name the visible one
+                    ? (dm.Hidden && dm.Name.StartsWith('_') && iface.Members.Any(x => !x.Hidden && x.Name == dm.Name[1..]) ? $"{dm.Name[1..]} (as hidden {dm.Name})" : dm.Name)
+                    : null;
+            sb.AppendLine(head + (t.Doc is null ? "" : "  ' " + t.Doc) + (t.Hidden ? "  ' hidden" : "") + (classDefault is null ? "" : $"  ' default member: {classDefault}"));
             foreach (var i in t.Implements) sb.AppendLine("    Implements " + i);
-            foreach (var m in t.Members.Where(m => includeHidden || !m.Hidden))
+            var deflt = DefaultMember(t);
+            // the default member is listed even when hidden (it is often a hidden _Default or Value)
+            foreach (var m in t.Members.Where(m => includeHidden || !m.Hidden || m.MemId == deflt?.MemId))
             {
                 string ps = string.Join(", ", m.Params.Select(p =>
                     (p.Optional ? "Optional " : "") + (p.ParamArray ? "ParamArray " : "") + (p.ByRef ? "" : "ByVal ") + p.Name + " As " + p.Type + (p.Default is null ? "" : " = " + p.Default)));
@@ -86,7 +102,7 @@ public static class TypeLibDescriber
                     "get" => $"Property Get {m.Name}({ps}) As {m.ReturnType}",
                     _ => $"Property {(m.Kind == "let" ? "Let" : "Set")} {m.Name}({ps})",
                 };
-                sb.AppendLine("    " + line + (m.Doc is null ? "" : "  ' " + m.Doc) + (m.Hidden ? "  ' hidden" : ""));
+                sb.AppendLine("    " + line + (m.Doc is null ? "" : "  ' " + m.Doc) + (m.Hidden ? "  ' hidden" : "") + (deflt is not null && m.MemId == deflt.MemId ? "  ' default member" : ""));
             }
             if (t.Kind is "enum" or "record") sb.AppendLine($"End {(t.Kind == "enum" ? "Enum" : "Type")}");
         }

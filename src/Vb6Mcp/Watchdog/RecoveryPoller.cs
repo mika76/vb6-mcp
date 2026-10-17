@@ -20,6 +20,9 @@ public sealed class RecoveryPoller(
     Func<TimeSpan> userIdle,
     Action<string> log)
 {
+    /// <summary>IDEs whose "waits: a dialog is open" was already logged (logged once until a copy succeeds again).</summary>
+    private readonly HashSet<int> _quietSkips = [];
+
     /// <summary>How long the user must have been idle (no keyboard or mouse input) before reading.</summary>
     public TimeSpan IdleNeeded { get; init; } = TimeSpan.FromSeconds(5);
 
@@ -39,7 +42,11 @@ public sealed class RecoveryPoller(
                 if (ct.IsCancellationRequested) return;
                 var m = mode(inst.Pid);
                 if (m is not (IdeMode.Design or IdeMode.Break)) continue;     // never while the program runs
-                try { await CopyAsync(inst); }
+                try { await CopyAsync(inst); _quietSkips.Remove(inst.Pid); }
+                // While VB loads a project (or another modal dialog is up) VBIDE refuses access with E_FAIL; the copy waits, and
+                // it is logged once instead of every 10 s (spike 36; improvement notes 10 saw the error repeated).
+                catch (AddinErrorException ex) when (ex.Code == 500 && UI.IdeWindows.Dialogs(inst.Pid).Count > 0)
+                { if (_quietSkips.Add(inst.Pid)) log($"recovery: pid {inst.Pid} waits: a dialog is open (VB loading a project?); VBIDE refuses access until it is answered"); }
                 catch (Exception ex) when (ex is AddinBusyException or AddinUnreachableException or AddinErrorException or Core.Protocol.ProtocolException or IOException)
                 { log($"recovery: pid {inst.Pid} skipped: {ex.Message}"); }
             }

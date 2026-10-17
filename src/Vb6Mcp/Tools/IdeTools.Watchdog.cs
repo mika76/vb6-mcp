@@ -21,7 +21,89 @@ public sealed partial class IdeTools
             "run_break and ide_dialog_respond first. Needs the watchdog (it runs elevated like VB6).",
             Schema.Object(("force", "boolean", "Required: true.", true), ("pid", "integer", PidDesc, false)),
             (a, ct) => KillAsync(a, ct)),
+        new("ide_quit",
+            "Close a VB6 IDE normally (File > Exit), e.g. one this session started with ide_launch and no longer needs. Refused while " +
+            "anything is unsaved, unless discard=true (the unsaved changes are thrown away, as project_close discard does). Only for an " +
+            "IDE this session owns; another one needs force=true (only when the user asked). Design mode. Needs the watchdog.",
+            Schema.Object(("discard", "boolean", "Close even with unsaved changes, discarding them.", false),
+                          ("force", "boolean", "Close an IDE this session doesn't own.", false), ("pid", "integer", PidDesc, false)),
+            (a, ct) => QuitAsync(a, ct)),
     ];
+
+    /// <summary>How long ide_quit waits for VB6 to exit after WM_CLOSE.</summary>
+    public TimeSpan QuitWait { get; init; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// ide_quit (PLAN.md C7). Unsaved work is never lost silently (hard rule 4): refused, or discarded per project
+    /// through project_close's snapshot path with discard=true. The close itself is WM_CLOSE from the elevated watchdog
+    /// (a non-elevated post to the IDE is refused, spike 10). Afterwards the owner file goes; ide_list removes the
+    /// discovery file of the gone process.
+    /// </summary>
+    private async Task<ToolResult> QuitAsync(JsonObject a, CancellationToken ct)
+    {
+        var inst = ResolveInstance(a);
+        RequireDesignMode(inst);
+        if (OwnerOf(inst.Pid) is not { } owner || !IdeOwnership.IsMe(owner))
+            if (a.Bool("force") != true)
+                throw new ToolException($"VB6 {inst.Pid} isn't this session's (it didn't start or claim it): closing it could end the user's work. Pass force=true only if the user asked");
+        var wd = Watchdog() ?? throw new ToolException(NoWatchdog + "; close VB6 yourself (File > Exit)");
+        var client = _env.Client(inst);
+        var unsaved = new List<string>();
+        var projects = await client.ProjectsAsync();
+        foreach (var p in projects)
+        {
+            var dirty = (await client.ComponentsAsync(p.Name)).Where(c => c.IsDirty).Select(c => $"{p.Name}.{c.Name}").ToList();
+            if (dirty.Count == 0 && p.IsDirty) dirty.Add($"{p.Name} (project settings)");
+            unsaved.AddRange(dirty);
+        }
+        var discarded = new List<object>();
+        if (unsaved.Count > 0)
+        {
+            if (a.Bool("discard") != true)
+                throw new ToolException($"unsaved changes: {string.Join(", ", unsaved)}. Save them (project_save), or pass discard=true to throw them away");
+            foreach (var p in projects.Where(p => unsaved.Any(u => u.StartsWith(p.Name + ".", StringComparison.Ordinal) || u.StartsWith(p.Name + " ", StringComparison.Ordinal))))
+            {
+                var r = (await CloseProjectAsync(new JsonObject { ["pid"] = inst.Pid, ["project"] = p.Name, ["discard"] = true }, ct)).ToJson();
+                var text = (string?)r["content"]?[0]?["text"] ?? "";
+                if ((bool?)r["isError"] == true || !text.Contains("\"status\":\"closed\""))
+                    return ToolResult.Ok(new { status = "not-quit", pid = inst.Pid, note = $"discarding {p.Name} didn't finish, so VB6 was left open", closeResult = JsonNode.Parse(text) });
+                discarded.Add(new { project = p.Name, result = JsonNode.Parse(text) });
+            }
+        }
+        Audit.Write("ide_quit", inst.Pid, $"WM_CLOSE{(discarded.Count > 0 ? $", discarded {string.Join(", ", unsaved)}" : "")}");
+        EndedOnPurpose(inst.Pid);
+        var q = await wd.SendRawAsync("QUIT", [inst.Pid.ToString(CultureInfo.InvariantCulture)], ct);
+        if (q.Status == ResponseStatus.Error)
+            throw new ToolException(q.ErrorMessage.StartsWith("unknown verb", StringComparison.Ordinal)
+                ? "the running watchdog is older than this server (no QUIT verb): restart it (scripts\\build-addin.ps1 -WatchdogOnly), or close VB6 yourself"
+                : "the watchdog couldn't close VB6: " + q.ErrorMessage);
+        var deadline = DateTime.UtcNow + QuitWait;
+        DateTime? dialogSince = null;
+        while (DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(300, ct);
+            if (!ProcessAlive(inst.Pid))
+            {
+                IdeOwnership.Release(inst.Pid, OwnersFolder);
+                return ToolResult.Ok(new { status = "quit", pid = inst.Pid, discarded = discarded.Count > 0 ? discarded : null });
+            }
+            // A dialog can flash up while VB shuts down (the launch integration test saw one, and VB still exited): report
+            // only one that stays for 2 s while the process lives on
+            var w = _env.ReadWindows(inst.Pid);
+            if (w.Dialogs.Count == 0) { dialogSince = null; continue; }
+            dialogSince ??= DateTime.UtcNow;
+            if (DateTime.UtcNow - dialogSince >= TimeSpan.FromSeconds(2))
+                return ToolResult.Ok(new { status = "dialog", pid = inst.Pid, dialogs = Dialogs(w), note = "VB6 shows a dialog while closing (another add-in, or a save prompt); it was not answered" });
+        }
+        return ToolResult.Ok(new { status = "still-running", pid = inst.Pid, note = $"VB6 didn't exit within {QuitWait.TotalSeconds:0} s; check ide_status" });
+    }
+
+    /// <summary>Whether a process still runs (tests replace it). A medium process can open an elevated one for SYNCHRONIZE (spike 24).</summary>
+    public Func<int, bool> ProcessAlive { get; init; } = pid =>
+    {
+        try { using var p = System.Diagnostics.Process.GetProcessById(pid); return !p.HasExited; }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception) { return false; }
+    };
 
     /// <summary>A client for the running watchdog, or null. 10 s timeout: BREAK alone waits up to 3 s for break mode.</summary>
     private AddinClient? Watchdog() => _env.FindWatchdog() is { } wd ? new AddinClient(wd, TimeSpan.FromSeconds(10)) : null;
@@ -88,6 +170,7 @@ public sealed partial class IdeTools
         var wd = Watchdog() ?? throw new ToolException(NoWatchdog + "; end VB6 with Task Manager instead");
         var before = _env.ReadWindows(inst.Pid);
         Audit.Write("ide_kill", inst.Pid, $"force (title '{before.Title}', responds={before.Responds})");
+        EndedOnPurpose(inst.Pid);   // its discovery file stays behind, but this isn't a crash to report
         var r = await wd.SendRawAsync("KILL", [inst.Pid.ToString(CultureInfo.InvariantCulture), "force"], ct);
         if (r.Status == ResponseStatus.Error) throw new ToolException("the watchdog couldn't kill VB6: " + r.ErrorMessage);
         return ToolResult.Ok(new

@@ -54,6 +54,9 @@ Public Sub RunQueued()
         Case "MOUSEREAL": DeferredRealMouse CLng("&H" & f(1)), f(2), CLng(f(3)), CLng(f(4)), CLng(f(5)), CLng(f(6))
         Case "KEYSREAL": DeferredRealKeys CLng("&H" & f(1)), f(2)
         Case "DESIGN": RunDesign f
+        Case "CLOSE": CloseProject f(1), (f(2) = "1")
+        Case "COMPADD": AddComponent f
+        Case "SAVECOMP": SaveComponent f(1), f(2), f(3)
         End Select
     End If
     Exit Sub

@@ -1,10 +1,13 @@
 // vb6mcp: MCP server for the VB6 IDE. See docs/architecture.md and docs/tools.md.
 // Usage: vb6mcp [mcp]       MCP server on stdio (default; what Claude Code starts)
 //        vb6mcp watchdog    elevated sidecar, started by the VB6 add-in (PLAN.md §3.1)
+//        vb6mcp watchdog --stay   the same, started by the user (elevated) and kept running with no VB6, so sessions
+//                                 can start their own IDEs through it (ide_launch) without a UAC prompt each
 //        vb6mcp hook        Claude Code PreToolUse hook: blocks Edit/Write on VB6 source files
 //        vb6mcp install-hook <settings.json>   registers this exe as that hook (used by install-server.ps1)
 //        vb6mcp uninstall-hook [settings.json] removes that hook again (used by uninstall.ps1)
 //        vb6mcp describe <file> [filter]       prints a typelib (DLL/OCX/TLB/OLB) as VB-like declarations
+//        vb6mcp windows <pid>                   prints the IDE's window tree (diagnosis)
 // Diagnostics go to stderr, or to the file named by VB6MCP_LOG (some clients hide stderr).
 using System.Text;
 using Vb6Mcp.Mcp;
@@ -18,10 +21,17 @@ public static class Program
     public static async Task<int> Main(string[] args)
     {
         string mode = args.Length > 0 ? args[0].ToLowerInvariant() : "mcp";
-        if (mode == "watchdog") return await WatchdogMainAsync();
+        if (mode == "watchdog") return await WatchdogMainAsync(args.Skip(1).Any(x => x.Equals("--stay", StringComparison.OrdinalIgnoreCase)));
         if (mode == "hook") return Hook.Run(Console.In, Console.Error);
         if (mode == "install-hook") return Hook.Install(args.Length > 1 ? args[1] : Hook.UserSettingsPath, Environment.ProcessPath!, Console.Out);
         if (mode == "uninstall-hook") return Hook.Uninstall(args.Length > 1 ? args[1] : Hook.UserSettingsPath, Console.Out);
+        if (mode == "windows" && args.Length > 1 && int.TryParse(args[1], out var wpid))
+        {
+            // diagnosis: the IDE's window tree (classes, captions, rectangles), e.g. to see how a form designer is built
+            foreach (var w in UI.IdeWindows.Descendants(wpid))
+                Console.WriteLine($"{w.Hwnd:X8} parent {w.Parent:X8} {(w.Visible ? "visible" : "hidden ")} {w.Left},{w.Top} {w.Width}x{w.Height}  {w.Class}  \"{w.Caption}\"");
+            return 0;
+        }
         if (mode == "describe" && args.Length > 1)
         {
             Console.Out.Write(Core.Files.TypeLibDescriber.Render(Core.Files.TypeLibDescriber.Describe(args[1]), args.Length > 2 ? args[2] : null));
@@ -29,7 +39,7 @@ public static class Program
         }
         if (mode != "mcp")
         {
-            Console.Error.WriteLine($"vb6mcp: unknown mode '{mode}'. Usage: vb6mcp [mcp|watchdog|hook|install-hook|uninstall-hook|describe <file>]");
+            Console.Error.WriteLine($"vb6mcp: unknown mode '{mode}'. Usage: vb6mcp [mcp|watchdog|hook|install-hook|uninstall-hook|describe <file>|windows <pid>]");
             return 2;
         }
 
@@ -41,7 +51,32 @@ public static class Program
         var roots = Roots();
         var env = new IdeEnvironment();
         var workspace = new WorkspaceTools(env, roots);
-        var tools = new IdeTools(env) { Roots = roots, MapProvider = workspace.CurrentMap }.All().Concat(workspace.All()).ToList();
+        var tools = new IdeTools(env) { Roots = roots, MapProvider = workspace.CurrentMap,
+            EvalOpen = string.Equals(Environment.GetEnvironmentVariable("VB6MCP_EVAL"), "open", StringComparison.OrdinalIgnoreCase) }.All().Concat(workspace.All()).ToList();
+        tools.Add(BatchTool.Create(tools));   // several calls in one (each with its own checks)
+        // PLAN.md E7 (spike): the desktop app's MCP dialog offers Reconnect only for a failed server, so picking up a
+        // reinstalled build meant restarting the Claude session. Ending the process after answering should make the
+        // server show as failed, with Reconnect. Nothing in the IDE is touched, so it isn't a write tool.
+        tools.Add(new Tool("server_restart",
+            "End this vb6 MCP server process (after answering), e.g. after scripts\\install-server.ps1 installed a newer build. " +
+            "The vb6 tools are then unavailable until the user reconnects the server (the MCP servers dialog, /mcp) or restarts the " +
+            "session. IDEs, the watchdog and unsaved code are not affected. Only when the user asks for it.",
+            Schema.Object(("confirm", "boolean", "Required: true.", true)),
+            (a, _) =>
+            {
+                if (a.Bool("confirm") != true) throw new ToolException("ending the server needs confirm=true");
+                log.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} server_restart: exiting pid {Environment.ProcessId}");
+                // after the reply is written, and after any call that is still running (at most 2 minutes)
+                Task.Run(async () =>
+                {
+                    await Task.Delay(1000);
+                    for (var until = DateTime.UtcNow.AddMinutes(2); McpServer.InFlight > 0 && DateTime.UtcNow < until;) await Task.Delay(200);
+                    log.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} server_restart: exiting pid {Environment.ProcessId} now");
+                    Environment.Exit(3);
+                });
+                return Task.FromResult(ToolResult.Ok(new { exiting = Environment.ProcessId, version = McpServer.ServerVersion, exe = Environment.ProcessPath,
+                    note = "the server ends in a second; reconnect vb6 in the MCP servers dialog (/mcp) or restart the session" }));
+            }));
         log.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} vb6mcp {McpServer.ServerVersion} started, pid {Environment.ProcessId}, {tools.Count} tools, roots: {(roots.Length == 0 ? "(none)" : string.Join("; ", roots))}");
         await new McpServer(stdin, stdout, log, tools).RunAsync();
         return 0;
@@ -52,7 +87,7 @@ public static class Program
     /// The add-in starts it with CreateProcess (not VB Shell, which blocked the IDE ~9 s, spike 12),
     /// so it inherits VB6's elevation without a UAC prompt and keeps running if VB6 crashes.
     /// </summary>
-    private static async Task<int> WatchdogMainAsync()
+    private static async Task<int> WatchdogMainAsync(bool stay)
     {
         string baseDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "vb6mcp");
         Directory.CreateDirectory(baseDir);
@@ -69,11 +104,18 @@ public static class Program
         _ = Task.Run(async () =>
         {
             var lastSeen = DateTime.UtcNow;
+            DateTime? crashSeen = null;
             while (!cts.IsCancellationRequested)
             {
                 await Task.Delay(5000);
-                if (System.Diagnostics.Process.GetProcessesByName("VB6").Length > 0) lastSeen = DateTime.UtcNow;
-                else if (DateTime.UtcNow - lastSeen > TimeSpan.FromMinutes(2)) { Log("no VB6 for 2 minutes; exiting"); cts.Cancel(); }
+                // A discovery file left behind by a gone process is a crash (spike 12b). Then stay 30 minutes instead of 2, so the
+                // agent can relaunch through the watchdog without a UAC prompt once it notices (improvement notes 25, PLAN D2).
+                try { if (Core.Bridge.Discovery.Scan().Stale.Count > 0) crashSeen ??= DateTime.UtcNow; } catch (IOException) { }
+                var linger = crashSeen is { } c && DateTime.UtcNow - c < TimeSpan.FromMinutes(30) ? TimeSpan.FromMinutes(30) : TimeSpan.FromMinutes(2);
+                if (System.Diagnostics.Process.GetProcessesByName("VB6").Length > 0) { lastSeen = DateTime.UtcNow; crashSeen = null; }
+                // Started by the add-in it leaves 2 minutes after the last VB6. Started by the user with --stay it keeps running,
+                // so a session can launch its own IDE through it (ide_launch, elevated without a UAC prompt).
+                else if (!stay && DateTime.UtcNow - lastSeen > linger) { Log($"no VB6 for {linger.TotalMinutes:0} minutes; exiting"); cts.Cancel(); }
             }
         });
         // Recovery copies of unsaved code, every 10 s while the user is idle (hard rule 12)
@@ -101,7 +143,7 @@ public static class Program
                 try { await Task.Delay(2_000, cts.Token); } catch (OperationCanceledException) { }
             }
         });
-        Log($"watchdog {WatchdogHost.Version} started, elevated={actions.Elevated}, parent={actions.ParentPid}, exe={Environment.ProcessPath}");   // an elevated process's path is hidden from medium ones: log it (spike 26)
+        Log($"watchdog {WatchdogHost.Version} started, elevated={actions.Elevated}, parent={actions.ParentPid}, exe={Environment.ProcessPath}{(stay ? ", --stay" : "")}");   // an elevated process's path is hidden from medium ones: log it (spike 26)
         await host.RunAsync(cts.Token);
         Log("watchdog stopped");
         GC.KeepAlive(mutex);
@@ -134,6 +176,7 @@ public static class Program
         if (path is not { Length: > 0 }) return Console.Error;
         try
         {
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);   // %LOCALAPPDATA%\vb6mcp may not exist yet on a fresh install
             var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
             return TextWriter.Synchronized(new StreamWriter(fs, new UTF8Encoding(false)) { AutoFlush = true });
         }

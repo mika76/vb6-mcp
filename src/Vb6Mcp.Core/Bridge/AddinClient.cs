@@ -33,6 +33,7 @@ public sealed class AddinClient(InstanceInfo instance, TimeSpan? timeout = null)
                         ?? throw new ProtocolException("add-in closed the connection without replying");
             var response = Wire.ParseResponse(reply);
             if (response.Id != id) throw new ProtocolException($"response id {response.Id} doesn't match request id {id}");
+            s_busy.TryRemove(Instance.Pid, out _);   // it answers again: whatever it was busy with is over
             return response;
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
@@ -41,8 +42,30 @@ public sealed class AddinClient(InstanceInfo instance, TimeSpan? timeout = null)
         }
         catch (SocketException ex)
         {
+            // While the IDE thread runs a long operation we queued (MakeCompiledFile took ~30 s in a production project), the add-in
+            // can't accept connections and Windows refuses them. That is busy, not gone (hard rule 6, improvement notes 21).
+            if (s_busy.TryGetValue(Instance.Pid, out var busy) && DateTime.UtcNow - busy.Since < BusyWindow && ProcessAlive(Instance.Pid))
+                throw new AddinBusyException(Instance.Pid, verb, busy.What, DateTime.UtcNow - busy.Since);
             throw new AddinUnreachableException(Instance.Pid, ex.Message);
         }
+    }
+
+    /// <summary>Long IDE-thread operations this server queued, per IDE pid: a refused connection then means busy.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, (string What, DateTime Since)> s_busy = new();
+    private static readonly TimeSpan BusyWindow = TimeSpan.FromMinutes(10);
+
+    /// <summary>Records that the IDE is about to be busy (until it answers again, at most 10 minutes).</summary>
+    public void MarkBusy(string what) => s_busy[Instance.Pid] = (what, DateTime.UtcNow);
+
+    /// <summary>Forgets a busy mark (normally cleared by the next successful reply).</summary>
+    public void ClearBusy() => s_busy.TryRemove(Instance.Pid, out _);
+
+    private static bool ProcessAlive(int pid)
+    {
+        try { using var p = System.Diagnostics.Process.GetProcessById(pid); return !p.HasExited; }
+        catch (ArgumentException) { return false; }
+        catch (InvalidOperationException) { return false; }
+        catch (System.ComponentModel.Win32Exception) { return true; }   // elevated: can't query, but it exists
     }
 
     /// <summary>Sends a request and throws <see cref="AddinErrorException"/> on ERR. Returns the payload.</summary>
@@ -131,6 +154,7 @@ public sealed class AddinClient(InstanceInfo instance, TimeSpan? timeout = null)
         var r = await SendRawAsync("CMD", [idOrFullCompile]).ConfigureAwait(false);
         if (r.Status == ResponseStatus.Error) throw new AddinErrorException(r.ErrorCode, r.ErrorMessage);
         if (r.Status != ResponseStatus.Queued) throw new ProtocolException("CMD should answer QUEUED");
+        if (idOrFullCompile.Equals("fullcompile", StringComparison.OrdinalIgnoreCase)) MarkBusy("compiling (full compile)");
     }
 
     /// <summary>Shows the code pane and puts the cursor at the start of the line.</summary>
@@ -201,10 +225,47 @@ public sealed class AddinClient(InstanceInfo instance, TimeSpan? timeout = null)
     // ---- builds (Phase 4) ----
 
     /// <summary>Starts VB6.EXE /make for a closed project (elevated child of VB6; path under the roots). Returns the child's pid, the log file and the .vbp.</summary>
-    public async Task<(int Pid, string LogPath, string Vbp)> MakeAsync(string vbpPath)
+    public async Task<(int Pid, string LogPath, string Vbp)> MakeAsync(string vbpPath, string? defines = null)
     {
-        var f = Wire.Fields(await SendAsync("MAKE", vbpPath).ConfigureAwait(false), 3);
+        // defines ("name=1:other=0") becomes /make's /d; an older add-in without it answers 400 (2 arguments)
+        var f = Wire.Fields(await (string.IsNullOrEmpty(defines) ? SendAsync("MAKE", vbpPath) : SendAsync("MAKE", vbpPath, defines)).ConfigureAwait(false), 3);
         return (Int(f[0]), f[1], f[2]);
+    }
+
+    // ---- projects (Phase 7) ----
+
+    /// <summary>Queues closing a project (CLOSE). Without <paramref name="discard"/> the add-in refuses unsaved changes (409).</summary>
+    public async Task CloseAsync(string project, bool discard) => await QueuedAsync("CLOSE", project, discard ? "1" : "0").ConfigureAwait(false);
+
+    /// <summary>Queues adding a new component (kind: module, class, form, mdiform, usercontrol, propertypage).</summary>
+    public async Task AddComponentAsync(string project, string kind, string name) => await QueuedAsync("COMPADD", project, "new", kind, name).ConfigureAwait(false);
+
+    /// <summary>Queues adding an existing source file to the project (path under the roots, checked by the add-in too).</summary>
+    public async Task AddComponentFileAsync(string project, string path) => await QueuedAsync("COMPADD", project, "file", path).ConfigureAwait(false);
+
+    /// <summary>
+    /// Queues saving one component (SAVECOMP) without the .vbp: to its own file, or with <paramref name="path"/> to a new
+    /// file (a component that was never saved; File > Save Project would show Save As for it).
+    /// </summary>
+    public async Task SaveComponentAsync(string project, string component, string? path = null)
+        => await (path is null ? QueuedAsync("SAVECOMP", project, component) : QueuedAsync("SAVECOMP", project, component, path)).ConfigureAwait(false);
+
+    /// <summary>The project properties VBIDE exposes (PRJGET).</summary>
+    public async Task<ProjectProps> ProjectPropsAsync(string project) => ProjectProps.From(await SendAsync("PRJGET", project).ConfigureAwait(false));
+
+    /// <summary>Sets one project property (PRJSET) and returns the properties after the change.</summary>
+    public async Task<ProjectProps> SetProjectPropAsync(string project, string key, string value) => ProjectProps.From(await SendAsync("PRJSET", project, key, value).ConfigureAwait(false));
+
+    private async Task QueuedAsync(string verb, params string[] args)
+    {
+        var r = await SendRawAsync(verb, args).ConfigureAwait(false);
+        if (r.Status == ResponseStatus.Error)
+        {
+            if (r.ErrorCode == 400 && r.ErrorMessage.StartsWith("unknown verb", StringComparison.Ordinal))
+                throw new AddinErrorException(400, $"the add-in is older than this server (no {verb}): rebuild and register it (scripts\\build-addin.ps1)");
+            throw new AddinErrorException(r.ErrorCode, r.ErrorMessage);
+        }
+        if (r.Status != ResponseStatus.Queued) throw new ProtocolException($"{verb} should answer QUEUED");
     }
 
     /// <summary>Queues VBProject.MakeCompiledFile (builds from IDE memory). Returns the output file it builds.</summary>
@@ -212,6 +273,7 @@ public sealed class AddinClient(InstanceInfo instance, TimeSpan? timeout = null)
     {
         var r = await SendRawAsync("MAKEIDE", [project]).ConfigureAwait(false);
         if (r.Status == ResponseStatus.Error) throw new AddinErrorException(r.ErrorCode, r.ErrorMessage);
+        MarkBusy("compiling (File > Make)");
         return r.Payload;
     }
 
@@ -337,7 +399,7 @@ public sealed class AddinClient(InstanceInfo instance, TimeSpan? timeout = null)
     /// Returns whether the component is now dirty, and the operation's payload. A failed operation throws
     /// <see cref="AddinErrorException"/> (code 500, the VB error); <paramref name="wait"/> bounds the polling.
     /// </summary>
-    public async Task<(bool Dirty, string Payload)> DesignAsync(string op, string[] args, TimeSpan? wait = null)
+    public async Task<(bool Dirty, string Payload)> DesignAsync(string op, string[] args, TimeSpan? wait = null, Func<string?>? blockedBy = null)
     {
         string id = Guid.NewGuid().ToString("N")[..12];
         try { await SendAsync("DESIGN", [id, op, .. args]).ConfigureAwait(false); }
@@ -345,7 +407,8 @@ public sealed class AddinClient(InstanceInfo instance, TimeSpan? timeout = null)
         {
             throw new AddinErrorException(400, "the add-in is older than this server (no designer verbs): rebuild and register it (scripts\\build-addin.ps1)");
         }
-        var deadline = DateTime.UtcNow + (wait ?? TimeSpan.FromSeconds(20));
+        var started = DateTime.UtcNow;
+        var deadline = started + (wait ?? TimeSpan.FromSeconds(20));
         while (true)
         {
             var f = (await SendAsync("RESULT", id).ConfigureAwait(false)).Split(Wire.US, 3);
@@ -356,6 +419,10 @@ public sealed class AddinClient(InstanceInfo instance, TimeSpan? timeout = null)
                 case "unknown": throw new AddinErrorException(500, "the add-in lost the designer request (was it reloaded?)");
             }
             if (DateTime.UtcNow > deadline) throw new AddinBusyException(Instance.Pid, "DESIGN " + op, wait ?? TimeSpan.FromSeconds(20));
+            // A modal dialog (typically a UserControl on the form running its own code, e.g. a failed database login)
+            // holds the deferred op until someone answers it: report it instead of waiting out the timeout.
+            if (blockedBy != null && DateTime.UtcNow > started + TimeSpan.FromSeconds(1) && blockedBy() is { } dialog)
+                throw new AddinErrorException(409, dialog);
             await Task.Delay(40).ConfigureAwait(false);
         }
     }
@@ -400,6 +467,16 @@ public sealed class AddinClient(InstanceInfo instance, TimeSpan? timeout = null)
 
 public sealed record PingResult(int Pid, string AddinVersion, int Protocol);
 public sealed record ProjectInfo(int Index, string Name, int Type, string FileName, bool IsDirty);
+
+/// <summary>PRJGET: name US description US helpFile US helpContextId US startMode US buildFileName US startup US type.</summary>
+public sealed record ProjectProps(string Name, string Description, string HelpFile, string HelpContextId, string StartMode, string BuildFileName, string Startup, int Type)
+{
+    public static ProjectProps From(string payload)
+    {
+        var f = Wire.Fields(payload, 8);
+        return new ProjectProps(f[0], f[1], f[2], f[3], f[4], f[5], f[6], int.TryParse(f[7], out int t) ? t : 0);
+    }
+}
 public sealed record ComponentInfo(string Name, int Type, bool IsDirty, int CountOfLines, string FileName);
 public sealed record CodeText(int CountOfLines, bool IsDirty, string Text);
 public sealed record MemberInfo(string Name, int MemberType, int Scope, bool IsStatic, int CodeLocation,
@@ -408,8 +485,15 @@ public sealed record ProcText(int ProcStart, int ProcBody, int ProcCount, string
 public sealed record Where(string Project, string Component, int StartLine, int StartColumn, int EndLine, int EndColumn, string Procedure);
 
 /// <summary>The add-in didn't answer in time: the IDE thread is busy (run mode loop) or blocked.</summary>
-public sealed class AddinBusyException(int pid, string verb, TimeSpan timeout)
-    : Exception($"VB6 (pid {pid}) didn't answer '{verb}' within {timeout.TotalSeconds:0.#} s: the IDE is busy or blocked");
+public sealed class AddinBusyException : Exception
+{
+    public AddinBusyException(int pid, string verb, TimeSpan timeout)
+        : base($"VB6 (pid {pid}) didn't answer '{verb}' within {timeout.TotalSeconds:0.#} s: the IDE is busy or blocked") { }
+
+    /// <summary>The IDE is running an operation this server queued, so it can't answer yet.</summary>
+    public AddinBusyException(int pid, string verb, string what, TimeSpan since)
+        : base($"VB6 (pid {pid}) is busy {what} (started {since.TotalSeconds:0} s ago) and can't answer '{verb}' yet; try again in a moment") { }
+}
 
 /// <summary>Couldn't connect: the add-in isn't listening (IDE closed, add-in unloaded, stale discovery file).</summary>
 public sealed class AddinUnreachableException(int pid, string detail)

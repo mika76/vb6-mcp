@@ -29,11 +29,13 @@ public sealed partial class IdeTools
             "(File > Make); one with unsaved changes is refused (use build_in_ide to compile memory). Returns status, errors, the log " +
             "(for /make) and the output file. Dialogs are reported, never answered.",
             Schema.Object(("path", "string", "Full path of a .vbp (closed or open project).", false), ("project", "string", ProjectDesc + " (an open project)", false),
+                          ("defines", "object", "Conditional compilation constants for this build (/make /d), e.g. {\"noterm\": 1}. Closed projects only.", false),
                           ("pid", "integer", PidDesc, false)),
             (a, ct) => BuildMakeAsync(a, ct)),
         new("build_in_ide",
             "Compile an open project from the IDE's memory (unsaved edits included) with File > Make, to its output file. Design mode. " +
-            "On a compile error, the message and location (found with a full compile) are returned. Other dialogs are reported, never answered.",
+            "On a compile error, the message and location (found with a full compile) are returned. Other dialogs are reported, never answered. " +
+            "Other conditional compilation constants: project_settings set CondComp with reopen=true (VBIDE can't set them in memory), or build_make defines on a closed project.",
             Schema.Object(("project", "string", ProjectDesc, false), ("pid", "integer", PidDesc, false)),
             (a, ct) => BuildInIdeAsync(a, ct)),
     ];
@@ -42,6 +44,31 @@ public sealed partial class IdeTools
     public static string? OutputFileOf(VbpFile vbp) => vbp.OutputPath ?? (Path.GetDirectoryName(vbp.Path) is { } dir
         ? Path.Combine(dir, vbp.Name + vbp.Type.ToLowerInvariant() switch { "oledll" => ".dll", "control" => ".ocx", _ => ".exe" })
         : null);
+
+    /// <summary>
+    /// Why a make can fail although the code compiles, as far as a non-elevated process can tell: the output folder is
+    /// missing, the output file is held open (a running copy of the program; spike 26: only an exclusive open tells),
+    /// or the file is read-only. Folders only administrators can write are noted, since the elevated IDE may still write there.
+    /// </summary>
+    public static List<string> MakeFailureCauses(string? output)
+    {
+        var causes = new List<string>();
+        if (output is null) { causes.Add("the output file isn't known (no ExeName32 in the .vbp)"); return causes; }
+        var dir = Path.GetDirectoryName(output);
+        if (dir is null || !Directory.Exists(dir)) { causes.Add($"the output folder doesn't exist: {dir}"); return causes; }
+        if (File.Exists(output))
+        {
+            if (File.GetAttributes(output).HasFlag(FileAttributes.ReadOnly)) causes.Add($"{output} is read-only");
+            try { using var fs = new FileStream(output, FileMode.Open, FileAccess.Read, FileShare.None); }
+            catch (IOException) { causes.Add($"{output} is in use (a running copy of the program, or a process that loaded the DLL/OCX): end it and build again"); }
+            catch (UnauthorizedAccessException) { causes.Add($"{output} can't be opened from here (permissions), so whether it's in use is unknown"); }
+        }
+        try { var probe = Path.Combine(dir, $".vb6mcp-probe-{Environment.ProcessId}"); File.WriteAllBytes(probe, []); File.Delete(probe); }
+        catch (UnauthorizedAccessException) { causes.Add($"{dir} isn't writable without elevation; the elevated IDE can usually still write there, unless it's protected"); }
+        catch (IOException ex) { causes.Add($"{dir}: {ex.Message}"); }
+        if (causes.Count == 0) causes.Add("no cause visible from here: the output folder is writable and the output file isn't in use");
+        return causes;
+    }
 
     private static object FileState(string? path) => path is null ? new { path = (string?)null, exists = false, modified = (string?)null }
         : File.Exists(path) ? new { path = (string?)path, exists = true, modified = (string?)File.GetLastWriteTime(path).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) }
@@ -76,10 +103,19 @@ public sealed partial class IdeTools
             var client = _env.Client(openIn);
             var dirty = (await client.ComponentsAsync(openPrj.Name)).Where(c => c.IsDirty).Select(c => c.Name).ToList();
             if (openPrj.IsDirty || dirty.Count > 0)
+            {
+                // spike 32: forms the last run marked changed (same code as on disk) are the usual cause after testing
+                var marked = await MarkedChangedByRunAsync(openIn);
+                var byRun = marked?.Where(m => m.Project == openPrj.Name).Select(m => m.Component).ToList() ?? [];
                 throw new ToolException($"{openPrj.Name} is open in VB6 (pid {openIn.Pid}) with unsaved changes ({(dirty.Count > 0 ? string.Join(", ", dirty) : "project settings")}). " +
                                         "/make can't build an open project, and building the saved files would ignore the changes: save first (project_save, " +
-                                        "with the user's agreement) or use build_in_ide to compile what is in memory");
+                                        "with the user's agreement) or use build_in_ide to compile what is in memory" +
+                    (byRun.Count > 0 ? $". {string.Join(", ", byRun)} {(byRun.Count == 1 ? "was" : "were")} only marked changed by the last run (VB does that to forms the program loaded; " +
+                                       $"saving writes the same bytes, spike 32): project_save components=[{string.Join(", ", byRun)}]" : ""));
+            }
             // Saved and open: memory equals disk, and VB6 refuses /make of an open project (spike 21)
+            if (Defines(a) is not null)
+                throw new ToolException("defines work only for /make of a closed project: VBIDE can't set conditional compilation constants of an open one. Close it (project_close), or change CondComp with project_settings");
             var r = await InIdeBuildAsync(client, openPrj.Name, ct);
             return ToolResult.Ok(new { via = $"VB6 pid {openIn.Pid} (File > Make): /make can't build a project that is open in an IDE", result = r });
         }
@@ -89,14 +125,32 @@ public sealed partial class IdeTools
         if (!Roots.Any(r => PathKey.Key(path!).StartsWith(PathKey.Key(r).TrimEnd('\\') + "\\", StringComparison.Ordinal)))
             throw new ToolException($"{path} isn't under the workspace roots ({string.Join("; ", Roots)})");
         if (!File.Exists(path)) throw new ToolException("file not found: " + path);
-        var launcher = _env.Scan().Live.OrderByDescending(i => Vb6Install.IsElevated(i.Pid) == true).FirstOrDefault()
-                       ?? throw new ToolException("no VB6 IDE with the add-in is running; one is needed to start the elevated build (ide_launch)");
+        // The elevated build is started by an IDE's add-in, or, with no IDE running, by the elevated watchdog (PLAN.md D1).
+        // Starting VB6.EXE from here would show a UAC prompt (spike 2), so without either there is no build.
+        var launcher = _env.Scan().Live.OrderByDescending(i => Vb6Install.IsElevated(i.Pid) == true).FirstOrDefault();
+        var watchdog = launcher is null ? _env.FindWatchdog() : null;
+        if (launcher is null && watchdog is null)
+            throw new ToolException("no VB6 IDE with the add-in and no watchdog is running, and the build must be started elevated: start VB6 (ide_launch, " +
+                                    "a UAC prompt unless a watchdog runs), or ask the user to start the watchdog once (vb6mcp watchdog --stay; builds then need no IDE)");
         VbpFile? vbp = null;
         try { vbp = VbpFile.Load(path!); } catch (IOException) { }
         var output = vbp is null ? null : OutputFileOf(vbp);
         var before = FileState(output);
-        Audit.Write("build_make", launcher.Pid, path!);
-        var (pid, logPath, vbpPath) = await _env.Client(launcher).MakeAsync(path!);
+        var defines = Defines(a);
+        Audit.Write("build_make", launcher?.Pid ?? 0, path! + (defines is null ? "" : " /d " + defines) + (launcher is null ? " (via the watchdog)" : ""));
+        int pid; string logPath, vbpPath;
+        if (launcher is not null) (pid, logPath, vbpPath) = await _env.Client(launcher).MakeAsync(path!, defines);
+        else
+        {
+            var r = await new AddinClient(watchdog!, TimeSpan.FromSeconds(10)).SendRawAsync("MAKE", [path!, defines ?? ""], ct);
+            if (r.Status == Core.Protocol.ResponseStatus.Error)
+                throw new ToolException(r.ErrorMessage.StartsWith("unknown verb", StringComparison.Ordinal)
+                    ? "no VB6 IDE is running, and the running watchdog is older than this server (no MAKE verb): restart it, or start VB6 (ide_launch)"
+                    : "the watchdog couldn't start the build: " + r.ErrorMessage);
+            var f = r.Payload.Split(Core.Protocol.Wire.US);
+            (pid, logPath, vbpPath) = (int.Parse(f[0], CultureInfo.InvariantCulture), f[1], f[2]);
+        }
+        string via = launcher is not null ? $"VB6.EXE /make (started by VB6 pid {launcher.Pid})" : $"VB6.EXE /make (started by the watchdog, pid {watchdog!.Pid}: no IDE was running)";
 
         var start = DateTime.UtcNow;
         while (DateTime.UtcNow - start < BuildWait && Alive(pid))
@@ -117,15 +171,54 @@ public sealed partial class IdeTools
         var parsed = BuildLog.Parse(log);
         return ToolResult.Ok(new
         {
-            status = parsed.Succeeded ? "succeeded" : "failed", vbp = vbpPath, via = $"VB6.EXE /make (started by VB6 pid {launcher.Pid})",
+            status = parsed.Succeeded ? "succeeded" : "failed", vbp = vbpPath, via,
             seconds = Math.Round((DateTime.UtcNow - start).TotalSeconds, 1),
             output = new { before, after = FileState(output) },
-            errors = parsed.Errors.Select(e => new { kind = e.Kind, file = e.File, line = e.Line, fileLine = FileLineOf(e.File, e.Line), message = e.Message, @class = e.Class, member = e.Member }),
+            errors = parsed.Errors.Select(e => new
+            {
+                kind = e.Kind, file = e.File, line = e.Line, fileLine = FileLineOf(e.File, e.Line), message = e.Message, @class = e.Class, member = e.Member,
+                details = e.Kind == "load" ? LoadLogLines(e.File) : null,
+            }),
             log = log.Trim(), logFile = logPath,
             note = parsed.Errors.Any(e => e.Kind == "compatibility")
                 ? "binary compatibility would break; /make refuses (nothing was written or registered). Make the declaration compatible, or decide with the user to break compatibility (in the IDE: Project Properties or the Make dialog)"
                 : vbp?.Type is "OleDll" or "Control" or "OleExe" && parsed.Succeeded ? "the component was registered by the build (VB6 does that on success)" : null,
         });
+    }
+
+    /// <summary>
+    /// The lines of a form's load log (VB writes <c>frmMain.log</c> next to the form when a control can't be loaded, e.g.
+    /// "Line 12: Cannot load control WinHook1; license not found", spike 27). The build log only points at it.
+    /// </summary>
+    private static string[]? LoadLogLines(string? path)
+    {
+        try
+        {
+            if (path is null || !File.Exists(path)) return null;
+            return Vb1252.Encoding.GetString(File.ReadAllBytes(path)).Replace("\r\n", "\n").Split('\n')
+                .Select(l => l.Trim()).Where(l => l.Length > 0).Take(50).ToArray();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    /// <summary>
+    /// build_make's defines ({"noterm": 1, "debug": 0}) as /make's /d argument ("noterm=1:debug=0"), or null. Names are
+    /// VB identifiers and values integers: they end up on an elevated command line (the add-in checks the same).
+    /// </summary>
+    private static string? Defines(JsonObject a)
+    {
+        if (a["defines"] is null) return null;
+        if (a["defines"] is not JsonObject o || o.Count == 0) throw new ToolException("defines must be an object of name: integer, e.g. {\"noterm\": 1}");
+        var parts = new List<string>();
+        foreach (var (k, v) in o)
+        {
+            if (k.Length == 0 || !char.IsAsciiLetter(k[0]) || !k.All(c => char.IsAsciiLetterOrDigit(c) || c == '_'))
+                throw new ToolException($"defines: '{k}' isn't a valid constant name");
+            if (v is not JsonValue jv || !(jv.TryGetValue(out int n) || (jv.TryGetValue(out string? t) && int.TryParse(t, out n))))
+                throw new ToolException($"defines: {k} must be an integer (VB conditional constants are numbers; True is -1)");
+            parts.Add($"{k}={n.ToString(CultureInfo.InvariantCulture)}");
+        }
+        return string.Join(":", parts);
     }
 
     /// <summary>The line in the file on disk for a 1-based IDE code line: hidden header and inline Attribute lines added back.</summary>
@@ -150,6 +243,12 @@ public sealed partial class IdeTools
 
     private async Task<ToolResult> BuildInIdeAsync(JsonObject a, CancellationToken ct)
     {
+        var settled = await SettleReloadsAsync(ResolveInstance(a).Pid, ct);
+        return (await BuildInIdeCoreAsync(a, ct)).With("reloads", settled);
+    }
+
+    private async Task<ToolResult> BuildInIdeCoreAsync(JsonObject a, CancellationToken ct)
+    {
         var (client, project) = await ResolveProjectAsync(a);
         return ToolResult.Ok(await InIdeBuildAsync(client, project, ct));
     }
@@ -163,6 +262,11 @@ public sealed partial class IdeTools
     {
         var inst = client.Instance;
         RequireMode(inst, IdeMode.Design);
+        // An empty (or not loaded) project: MakeCompiledFile then opens Project Properties and "Must have startup form or
+        // Sub Main()" instead of building (improvement notes 9)
+        if ((await client.ComponentsAsync(project)).Count == 0)
+            throw new ToolException($"{project} has no components loaded, so there is nothing to build (VB would open Project Properties instead). " +
+                                    "If the .vbp has members, the project didn't load completely: check project_open's load logs");
         var output = await client.MakeInIdeAsync(project);        // queued; the IDE compiles from memory
         var before = FileState(output);
         DateTime? beforeTime = File.Exists(output) ? File.GetLastWriteTime(output) : null;
@@ -208,6 +312,16 @@ public sealed partial class IdeTools
                         dialog = new { caption = compat.Caption, text = string.Join("\n", compat.Texts), buttons = compat.Buttons.Select(b => b.Caption) },
                         note = "the change breaks binary compatibility. This is the user's decision (hard rule 13): ask them. Cancel leaves everything as it was; " +
                                "or make the declaration compatible again",
+                    };
+                // The full compile passed: the make step itself failed (improvement notes 20: a production project got E_FAIL from
+                // MakeCompiledFile while its code compiled). Check the usual causes we can see from here.
+                if (checkNode?["compiles"]?.GetValue<bool?>() == true)
+                    return new
+                    {
+                        status = "make-failed", project, message = s.Message, output = new { before, now = FileState(output) },
+                        compileCheck = checkNode, causes = MakeFailureCauses(output),
+                        note = "the code compiles (full compile passed); the make step itself failed. See causes; the native compiler's own errors (C2.EXE, LINK.EXE) " +
+                               "aren't reported by VBIDE: try File > Make by hand to see them, or build_make after saving and closing the project",
                     };
                 return new
                 {

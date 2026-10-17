@@ -105,6 +105,29 @@ public static class WorkspaceToolsTests
             Assert.Equal("Attribute VB_Name = \"modShared\"\r\nOption Explicit\r\n\r\nPublic Function Twice(ByVal x As Long) As Long\r\n    Twice = x + x\r\nEnd Function\r\n",
                          Vb1252.Encoding.GetString(File.ReadAllBytes(file)), "header kept, CR LF, final line break");
 
+            // several edits in one call, on disk: all against the same text, written once
+            hash = (string)JsonNode.Parse((await Call(tools, "file_read", new JsonObject { ["path"] = file })).Text)!["hash"]!;
+            var many = await Call(tools, "file_replace_lines", new JsonObject
+            {
+                ["path"] = file, ["expected_hash"] = hash,
+                ["edits"] = new JsonArray(
+                    new JsonObject { ["start_line"] = 2, ["count"] = 0, ["new_text"] = "' shared helpers" },
+                    new JsonObject { ["start_line"] = 4, ["count"] = 1, ["new_text"] = "    Twice = x * 2" }),
+            });
+            Assert.True(!many.IsError, many.Text);
+            Assert.Equal("Attribute VB_Name = \"modShared\"\r\nOption Explicit\r\n' shared helpers\r\n\r\nPublic Function Twice(ByVal x As Long) As Long\r\n    Twice = x * 2\r\nEnd Function\r\n",
+                         Vb1252.Encoding.GetString(File.ReadAllBytes(file)), "both edits, original numbering");
+            // back to the first version for the routed test below
+            hash = (string)JsonNode.Parse((await Call(tools, "file_read", new JsonObject { ["path"] = file })).Text)!["hash"]!;
+            var back = await Call(tools, "file_replace_lines", new JsonObject
+            {
+                ["path"] = file, ["expected_hash"] = hash,
+                ["edits"] = new JsonArray(
+                    new JsonObject { ["start_line"] = 2, ["count"] = 1, ["new_text"] = "" },
+                    new JsonObject { ["start_line"] = 5, ["count"] = 1, ["new_text"] = "    Twice = x + x" }),
+            });
+            Assert.True(!back.IsError, back.Text);
+
             // the same file open in an IDE: the edit goes there, the disk file is untouched
             var replaced = new List<string>();
             var ideText = "Option Explicit\r\n\r\nPublic Function Twice(ByVal x As Long) As Long\r\n    Twice = x + x\r\nEnd Function";

@@ -99,7 +99,7 @@ public sealed class VbSourceFile
     /// isn't there any more the edit is refused, because the attribute would be lost or misplaced.
     /// The caller validates the new text (1252, line limits: VbCode.PrepareForInsert).
     /// </summary>
-    public byte[] ReplaceCode(int startLine, int count, string newText)
+    public byte[] ReplaceCode(int startLine, int count, string newText, bool dropVarHelpIds = false)
     {
         var text = Vb1252.Encoding.GetString(Bytes);
         bool finalBreak = text.EndsWith('\n');
@@ -117,6 +117,10 @@ public sealed class VbSourceFile
         int first = startLine - 1;
         int physStart = first < n ? codeAt[first] : lines.Count;
         int physEnd = count == 0 ? physStart : codeAt[first + count - 1] + 1;    // exclusive
+        // Hidden attribute lines right after the last replaced code line belong to it (a WithEvents variable's
+        // VB_VarHelpID, a property's VB_UserMemId): take them into the range, so they follow that line in the new text
+        // (or the edit is refused). Left outside, they ended up attached to whatever the new text's last line was.
+        if (count > 0) while (physEnd < lines.Count && IsAttribute(lines[physEnd])) physEnd++;
         // inline attributes between the first and last replaced code line
         var output = new List<string>(newLines);
         for (int i = physStart; i < physEnd; i++)
@@ -126,7 +130,11 @@ public sealed class VbSourceFile
             while (prevCode >= physStart && IsAttribute(lines[prevCode])) prevCode--;
             if (prevCode < physStart) { output.Insert(0, lines[i]); continue; }   // belongs before the range
             int at = output.IndexOf(lines[prevCode]);
-            if (at < 0) throw new ArgumentException($"the range contains the hidden line '{lines[i]}' after '{lines[prevCode].Trim()}', which the new text doesn't keep; edit it in the IDE or keep that line");
+            // A WithEvents variable's "Attribute x.VB_VarHelpID = -1" can be dropped on request: VB writes it again on save
+            // (spike 28b, verified 2026-10-17). Other hidden attributes (VB_UserMemId, ...) can't be recreated that way.
+            if (at < 0 && dropVarHelpIds && IsVarHelpId(lines[i])) continue;
+            if (at < 0) throw new ArgumentException($"the range contains the hidden line '{lines[i]}' after '{lines[prevCode].Trim()}', which the new text doesn't keep; edit it in the IDE or keep that line" +
+                (IsVarHelpId(lines[i]) ? ", or pass drop_var_help_ids=true (VB writes this WithEvents attribute again when it saves)" : ""));
             output.Insert(at + 1, lines[i]);
         }
         lines.RemoveRange(physStart, physEnd - physStart);
@@ -134,6 +142,9 @@ public sealed class VbSourceFile
         var result = string.Join("\r\n", lines) + (finalBreak || lines.Count == 0 ? "\r\n" : "");
         return Vb1252.Encoding.GetBytes(result);
     }
+
+    private static bool IsVarHelpId(string line)
+        => line.StartsWith("Attribute ", StringComparison.OrdinalIgnoreCase) && line.Contains(".VB_VarHelpID", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsAttribute(string line) => line.StartsWith("Attribute ", StringComparison.OrdinalIgnoreCase);
 

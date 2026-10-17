@@ -187,7 +187,13 @@ public sealed partial class WorkspaceTools
             {
                 if (ComRegistry.IsProjectTypeLib(t))
                     checks.Add(new(label, debugging.Contains(PathKey.Normalize(t.Win32Path!)) ? "warning" : "error", $"{t.Major}.{t.Minor} is registered to a project file ({t.Win32Path}): VB6 debugger registration" + (debugging.Contains(PathKey.Normalize(t.Win32Path!)) ? " (that project is running in an IDE now)" : ", left over; see com_orphans")));
-                else checks.Add(new(label, t.FileExists ? "ok" : "error", $"{t.Major}.{t.Minor} -> {t.Win32Path ?? "(no file)"}{(t.FileExists ? "" : " (missing)")}"));
+                else if (!t.FileExists) checks.Add(new(label, "error", $"{t.Major}.{t.Minor} -> {t.Win32Path ?? "(no file)"} (missing)"));
+                // Registered and present is not enough: the file must contain a type library. A .NET COM DLL registered
+                // without /tlb points the registration at a DLL that has none, and VB6 marks the reference MISSING
+                // (a production project, 2026-10-15: Vendor.License.COM.dll).
+                else if (TypeLibInfo.Read(t.Win32Path!) is null)
+                    checks.Add(new(label, "error", $"{t.Major}.{t.Minor} -> {t.Win32Path}: registered, but the file contains no type library, so VB6 shows the reference as MISSING (unless the .vbp hint path has one). For a .NET COM DLL: RegAsm <dll> /tlb (elevated) writes and registers one"));
+                else checks.Add(new(label, "ok", $"{t.Major}.{t.Minor} -> {t.Win32Path}"));
             }
         }
         void CheckClass(Guid clsid, string label)
@@ -364,7 +370,22 @@ public sealed partial class WorkspaceTools
     private static IEnumerable<string>? BuiltBy(ProjectMap? map, string? path)
         => map is null || path is null ? null : map.Projects.Where(p => p.OutputPath is { } o && PathKey.Same(o, path)).Select(p => p.Path);
 
-    private sealed record Registration(object? TypeLib, List<object> Classes, bool AllHere, bool AnyElsewhere, bool AnyHere, string? Note);
+    /// <summary>
+    /// Whether com_(un)register did its job. Unregister: nothing points at the file any more. Register: everything points
+    /// here, or regsvr32 succeeded, the typelib points here, no class points at another file and at least one class (if
+    /// any) is registered: classes nothing registers are listed, not failed (improvement notes 18).
+    /// </summary>
+    public static bool Verified(bool unregister, int? exit, bool allHere, bool anyHere, bool libHere, int elsewhere, int missing, int classes)
+        => unregister ? !anyHere : allHere || (exit == 0 && libHere && elsewhere == 0 && (classes == 0 || missing < classes));
+
+    private sealed record Registration(object? TypeLib, List<object> Classes, bool AllHere, bool AnyElsewhere, bool AnyHere, string? Note)
+    {
+        public bool LibHere { get; init; }
+        /// <summary>Creatable classes of the typelib that no file registers (often internal helpers the DLL never registers).</summary>
+        public List<string> Missing { get; init; } = [];
+        /// <summary>Classes registered to another file.</summary>
+        public List<string> Elsewhere { get; init; } = [];
+    }
 
     /// <summary>
     /// The registration state of a file: its typelib (read from the file) and its creatable classes, each with where
@@ -378,6 +399,7 @@ public sealed partial class WorkspaceTools
         var tl = registered.FirstOrDefault(t => t.LibId == d.Info.LibId && t.Major == d.Info.Major && t.Minor == d.Info.Minor);
         bool libHere = tl?.Win32Path is { } w && PathKey.Same(w, path);
         var classes = new List<object>();
+        var missing = new List<string>(); var elsewhereNames = new List<string>();
         bool allHere = libHere, anyElsewhere = false, anyHere = libHere;
         foreach (var t in d.Types.Where(t => t.Kind == "coclass" && (t.Creatable || t.Control)))
         {
@@ -385,6 +407,8 @@ public sealed partial class WorkspaceTools
             bool here = c?.ServerFile is { } s && PathKey.Same(s, path);
             bool elsewhere = c?.ServerFile is { } s2 && !PathKey.Same(s2, path);
             allHere &= here; anyElsewhere |= elsewhere; anyHere |= here;
+            if (c?.ServerFile is null) missing.Add(t.Name);
+            if (elsewhere) elsewhereNames.Add(t.Name);
             classes.Add(new { name = t.Name, clsid = t.Guid.ToString("B").ToUpperInvariant(), progId = c?.ProgId, registeredTo = c?.ServerFile, here });
         }
         var lib = new
@@ -392,7 +416,7 @@ public sealed partial class WorkspaceTools
             libId = d.Info.LibId.ToString("B").ToUpperInvariant(), version = $"{d.Info.Major}.{d.Info.Minor}", name = d.Info.Name,
             registeredTo = tl?.Win32Path, here = libHere,
         };
-        return new Registration(lib, classes, allHere, anyElsewhere, anyHere, null);
+        return new Registration(lib, classes, allHere, anyElsewhere, anyHere, null) { LibHere = libHere, Missing = missing, Elsewhere = elsewhereNames };
     }
 
     // ---------- compatibility ----------
@@ -462,14 +486,21 @@ public sealed partial class WorkspaceTools
             exit = await client.RegStatusAsync(child);
         }
         var after = FileRegistration(path, TypeLibRegistry.All());
-        bool verified = unregister ? !after.AnyHere : after.AllHere;
+        // Registered = regsvr32 succeeded, the typelib points here and no class points at another file. A class of the
+        // typelib that nothing registers isn't a failure (improvement notes 18: CapPRO.dll registered 5 of 6 classes;
+        // the sixth, RivetTalk, is an internal helper the DLL never registers): listed in notRegistered instead.
+        bool verified = Verified(unregister, exit, after.AllHere, after.AnyHere, after.LibHere, after.Elsewhere.Count, after.Missing.Count, after.Classes.Count);
         Audit.Write(verb, inst.Pid, $"\"{path}\" exit {exit?.ToString() ?? "timeout"} verified={verified}");
         return ToolResult.Ok(new
         {
             file = path, action = unregister ? "unregister" : "register", exitCode = exit, verified,
+            notRegistered = !unregister && after.Missing.Count > 0 ? after.Missing : null,
+            registeredElsewhere = !unregister && after.Elsewhere.Count > 0 ? after.Elsewhere : null,
             before = new { before.TypeLib, before.Classes }, after = new { after.TypeLib, after.Classes },
             note = exit is null ? "regsvr32 didn't finish within 60 s" :
+                   verified && !unregister && after.Missing.Count > 0 ? $"registered; the file doesn't register {string.Join(", ", after.Missing)} (classes in its typelib that nothing registers are usually internal helpers, not a failure)" :
                    verified ? null :
+                   !unregister && after.Elsewhere.Count > 0 ? $"regsvr32 finished, but {string.Join(", ", after.Elsewhere)} {(after.Elsewhere.Count == 1 ? "is" : "are")} registered to another file (com_where)" :
                    unregister ? "regsvr32 finished, but registry entries still point at this file" : "regsvr32 finished, but the registry doesn't point at this file for everything",
         });
     }

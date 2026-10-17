@@ -19,7 +19,8 @@ INSTALL
   4. In Claude Code, ask for example "list the open VB6 IDEs" (tool ide_list).
 
   Options: -Name <server name> (default vb6), -NoHook (don't install the Claude Code hook that stops
-  agents from editing VB6 files with the plain Edit/Write tools), -NoClaude (skip Claude Code setup).
+  agents from editing VB6 files with the plain Edit/Write tools), -NoClaude (skip Claude Code setup),
+  -EvalOpen (let debug_eval run expressions with side effects such as database writes; refused by default).
 
 UPGRADE
   Run install.ps1 from the new package. Without -Roots the existing roots are kept. Files in use are

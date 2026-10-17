@@ -51,3 +51,6 @@ tests/fixtures/**/*.oca
 
 # Packages (scripts\package.ps1)
 dist/
+
+# Benchmark runs: transcripts and raw results (the report goes to docs/benchmarks)
+bench/results/

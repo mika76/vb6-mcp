@@ -8,8 +8,9 @@ An MCP server that lets AI agents (Claude Code) work **inside the Visual Basic 6
 - **Wire protocol (server ↔ add-in ↔ watchdog):** [docs/protocol.md](docs/protocol.md)
 - **MCP tool reference:** [docs/tools.md](docs/tools.md)
 - **Experiments that back the design:** [docs/spikes/](docs/spikes/)
+- **What changed in each release:** [CHANGELOG.md](CHANGELOG.md)
 
-> Status: **Phases 1-6 built** (live code, debugging, UI automation, watchdog, builds and sync, forms, references and COM, packaging). The spike code under `spikes/` is throwaway and is never referenced by `src/`.
+> Status: **version 0.2.0. Phases 1-7 built** (live code, debugging, UI automation, watchdog, builds and sync, forms, references and COM, packaging, and the improvements from real use and benchmarks). The spike code under `spikes/` is throwaway and is never referenced by `src/`.
 
 ## Requirements
 
@@ -82,7 +83,12 @@ From an **Administrator** PowerShell (building an ActiveX DLL registers it machi
 - Unload the add-in in VB6 first (Add-Ins → Add-In Manager), or close VB6: a loaded DLL can't be overwritten.
 - The first build ever creates the binary-compatibility reference `addin\compat\VB6McpBridge.dll` (committed), so the add-in's ProgID/CLSIDs stay stable.
 - The script then registers the add-in with VB6 (`scripts\register-addin.ps1`, HKCU). It must run after the build: a VB6 that starts while the Addins key names an unregistered ProgID deletes the key.
-- It also publishes the **watchdog** (`vb6mcp.exe`) into `addin\VB6McpBridge\build\watchdog`. The add-in starts it when it loads, and it inherits elevation with no UAC prompt. It handles a stuck IDE (Ctrl+Break, dialogs, kill, screenshots) and exits 2 minutes after the last VB6 closes. A running watchdog is stopped first, because it locks its exe. Its log is `%LOCALAPPDATA%\vb6mcp\watchdog.log`.
+- It also publishes the **watchdog** (`vb6mcp.exe`) into `addin\VB6McpBridge\build\watchdog`. The add-in starts it when it loads, and it inherits elevation with no UAC prompt. It handles a stuck IDE (Ctrl+Break, dialogs, kill, screenshots) and exits 2 minutes after the last VB6 closes (30 minutes after a crash, so a relaunch through it needs no UAC prompt). A running watchdog is stopped first, because it locks its exe. Its log is `%LOCALAPPDATA%\vb6mcp\watchdog.log`.
+- **Let sessions start their own IDEs:** start the watchdog yourself with `--stay`, once, from an elevated PowerShell:
+  - development: `scripts\build-addin.ps1 -WatchdogOnly -Stay`;
+  - installed: `& "${env:ProgramFiles(x86)}\vb6mcp\vb6mcp.exe" watchdog --stay`.
+
+  It then keeps running with no VB6 open, and `ide_launch` starts elevated IDEs through it without a UAC prompt each time. Only one watchdog runs per user session: start it when none is running.
 
 **Restart VB6** (as Administrator): VB6 reads its add-in list only at startup. You should see a **"VB6 MCP" toolbar** showing `VB6 MCP <version> · built <time> · :<port> · <n> req`.
 
@@ -92,15 +98,19 @@ From an **Administrator** PowerShell (building an ActiveX DLL registers it machi
 .\scripts\install-server.ps1 -Roots 'D:\src\VB6Apps','D:\src\Shared'
 ```
 
-`-Roots` sets the **workspace roots** (`VB6MCP_ROOTS`) for the disk tools (`ws_projects`, `ws_file_projects`, `file_read`): the folders that contain your `.vbp` files and any shared source folders. Paths outside them are refused.
+`-Roots` sets the **workspace roots** (`VB6MCP_ROOTS`) for the disk tools (`ws_projects`, `ws_file_projects`, `file_read`): the folders that contain your `.vbp` files and any shared source folders. Paths outside them are refused. They are also written to `%LOCALAPPDATA%\vb6mcp\roots.txt` for the add-in. Run it again later without `-Roots` to reinstall with the roots already in that file.
 
-Publishes `vb6mcp.exe` to a new folder `build\server\<timestamp>\` (a running Claude session locks the installed exe, so each install gets its own folder; old unused ones are removed) and registers it at **local scope** for this folder (`claude mcp add --scope local vb6 …`). Restart the Claude session to load it; check with `claude mcp get vb6` (run from this folder). The server's log goes to `build\vb6mcp.log`.
+Publishes `vb6mcp.exe` to `build\server\current\` and registers it at **local scope** for this folder (`claude mcp add --scope local vb6 …`). The path stays the same on every install: files a running server holds are renamed aside (`*.old-<stamp>`, removed by a later install). To switch a running session to the new build, ask the agent to call `server_restart`; the next vb6 call starts the new build. A new session also picks it up. Check the registration with `claude mcp get vb6` (run from this folder). The server's log goes to `build\vb6mcp.log`.
 
 It also registers a **Claude Code hook** in `~/.claude/settings.json` (a backup is kept as `settings.json.vb6mcp-backup`). The hook stops agents editing VB6 source files with the generic Edit/Write tools, so they use the vb6 tools, which keep the 1252 encoding and hidden header lines and respect a running IDE. Pass `-NoHook` to skip it.
 
+**Security defaults.** `debug_eval` only reads values: expressions with side effects (database writes, `Shell` and other process starts, file, registry and network access, scripts, `SendKeys`) are refused, because the IDE runs them with its (administrator) rights. If the agent really needs one, it calls again with `allow_side_effect: true`, and **you are asked to approve it** (the Claude Code hook shows a permission prompt; without the hook installed, such calls are refused). `-EvalOpen` (both `install.ps1` and `install-server.ps1`) registers the server with `VB6MCP_EVAL=open` to allow them without asking, flagged and audited.
+
+The hook also checks the agent's own **Bash and PowerShell commands** and **asks you** before running: database writes through `sqlcmd`, `osql`, `bcp in`, `Invoke-Sqlcmd`, ADO/ODBC scripts and the like (reads are allowed); writes to VB6 source files; `regsvr32`, `RegAsm` and registry edits (they go through the audited `com_register`); and ending or building with VB6 directly. In benchmark runs agents changed a test database with `sqlcmd`, using a login they found in the project's files. In headless runs (`claude -p`) nobody can approve, so these commands don't run (spike 33). Set `VB6MCP_SHELL_GUARD=off` in Claude Code's settings `env` to turn the shell checks off.
+
 ### 3. Use it
 
-Open a project in VB6 (or let the agent call `project_open`), then ask Claude to use the `vb6` tools: `ide_list` first, then whatever the task needs: code, debugging, the running app, builds, forms, references, COM (78 tools). See [docs/tools.md](docs/tools.md).
+Open a project in VB6 (or let the agent call `project_open`), then ask Claude to use the `vb6` tools: `ide_list` first, then whatever the task needs: code, debugging, the running app, builds, forms, references, COM (94 tools). See [docs/tools.md](docs/tools.md).
 
 To see what's inside a DLL, OCX or type library (classes, methods, enums in VB syntax), without registering it:
 
@@ -122,6 +132,37 @@ Whether VB6 runs as administrator is your machine's configuration (a "Run as adm
 
 `ide_launch` takes `elevation: auto | elevated | normal`. Machine-specific values come from configuration: `VB6MCP_VB6_EXE` (VB6.EXE; otherwise found via the registry) and `VB6MCP_ROOTS` (workspace roots).
 
+## VB6 files
+
+What agents meet in a VB6 folder, and what may touch it. The server instructions carry a short version.
+
+| File | What it is | Who changes it |
+|---|---|---|
+| `.vbp` / `.vbg` | project / project group: members, references, controls, settings | the vb6 tools (`project_*`, `refs_*`), VB on save |
+| `.bas` `.cls` `.frm` `.ctl` `.pag` `.dsr` `.dob` | source: modules, classes, forms, UserControls, property pages, designers, documents (Windows-1252, CR LF, hidden header and `Attribute` lines) | the vb6 edit tools only (the hook refuses Edit/Write) |
+| `.frx` `.ctx` `.pgx` `.dsx` `.dox` | binary companions of the above: pictures, icons, list items, long text | VB alone, on save; change them through `form_set_property` (`@picture:`, `List`). The hook refuses Edit/Write |
+| `.res` | resource file (strings, bitmaps) | VB's resource editor; the hook refuses Edit/Write |
+| `.vbw` | VB's window layout for the project (which code and designer windows were open) | VB; harmless to lose, but not to edit |
+| `<form>.log` | written next to a form when a control couldn't load (missing or unlicensed OCX) | VB; read it (`build_make` and `project_open` include it) |
+| `.exp` `.lib` | export and import libraries VB writes when building an ActiveX DLL | VB's linker; by-products |
+| `.oca` | VB's cached type information for an OCX, next to the OCX | VB; can be deleted, VB recreates it |
+| `.scc` / `MSSCCPRJ.SCC` | source-control (SourceSafe) bindings | the source-control add-in |
+| `.dep` | dependency list from the Package and Deployment Wizard | the wizard |
+
+## Logs
+
+All in `%LOCALAPPDATA%\vb6mcp\` unless noted:
+
+| Log | Written by | What's in it |
+|---|---|---|
+| `server.log` (installed) / `build\vb6mcp.log` in the repo (development) | the MCP server (`VB6MCP_LOG`, set by `install.ps1` / `install-server.ps1`) | every request and answer (answers cut at 500 characters), start-up line with version and roots |
+| `addin.log` | the add-in inside VB6 | verbs, deferred operations, errors from VBIDE |
+| `watchdog.log` | the watchdog | health checks, dialogs answered, Ctrl+Break, kills, its own exe path |
+| `audit.log` | server and add-in | input sent to windows, `debug_eval` (and database writes it spotted), launches, registrations, builds, rollbacks |
+| `<form>.log` next to a form | VB6 | why a control couldn't load (missing or unlicensed OCX) |
+
+Without `VB6MCP_LOG` the server logs to stderr, which only Claude Code's MCP logs show.
+
 ## Troubleshooting
 
 | Symptom | Check |
@@ -132,8 +173,10 @@ Whether VB6 runs as administrator is your machine's configuration (a "Run as adm
 | Tools say the IDE is busy | The debugged program is running a loop, or a dialog is open: `ide_status` |
 | Build fails with "Permission denied" | The add-in DLL is loaded in VB6: unload it first |
 | `vb6` isn't in the app's Connectors list | Expected: Connectors shows claude.ai account connectors and desktop extensions. Claude Code's own MCP servers (like `vb6`) are listed under `/mcp` in the session |
-| New tools don't show up after `install-server.ps1` | The session keeps running the previously started server, even across a session restart. Quit and reopen the Claude app (the desktop app's `/mcp` list didn't offer a Reconnect button for `vb6`) |
-| Installed: tools refuse a path you expect to work | It must be under the roots in `C:Program Files (x86)vb6mcpoots.txt`; change them with `install.ps1 -Roots ...` (one UAC prompt) |
+| New tools don't show up after `install-server.ps1` | Ask the agent to call `server_restart`: the app starts the server again on the next vb6 call, from `build\server\current\` (the `/mcp` dialog has no Reconnect button for it). A session started before `install-server.ps1` used the fixed folder needs one restart first (PLAN.md E7) |
+| Installed: tools refuse a path you expect to work | It must be under the roots in `C:\Program Files (x86)\vb6mcp\roots.txt`; change them with `install.ps1 -Roots ...` (one UAC prompt) |
 | Install says "the elevated part didn't start (UAC declined?)" | The UAC prompt was declined or never seen (it can open behind other windows); run it again |
+| Build fails: "Errors during load … could not be loaded" | Read the `<form>.log` next to the form. "license not found" means a licensed control (e.g. Desaware SpyWorks) whose developer licence isn't installed on this machine: install the product, not just the OCX (spike 27) |
+| Build fails: "Can't find project or library" or "User-defined type not defined" on a reference's type | `refs_fix_broken` / `com_diagnose`. A .NET COM DLL registered without a type library needs `RegAsm <dll> /tlb` (elevated), then reload the project (spike 27) |
 | `ide_launch` with `normal` says elevation is required | VB6.EXE has a "Run as administrator"/compatibility setting on that path (spike 16); use `auto`/`elevated` or change the setting |
 | Opening a project shows "Add this project to SourceSafe?" | Your source-control add-in; `project_open` reports it and leaves the answer to you |

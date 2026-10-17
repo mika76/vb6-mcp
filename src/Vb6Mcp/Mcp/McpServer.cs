@@ -13,12 +13,38 @@ namespace Vb6Mcp.Mcp;
 public sealed class McpServer(TextReader input, TextWriter output, TextWriter log, IReadOnlyList<Tool> tools)
 {
     public const string ServerName = "vb6-mcp";
+
+    /// <summary>The client's name and version from initialize (clientInfo), e.g. "claude-code 2.1"; used to name IDE owners.</summary>
+    public static string ClientName { get; private set; } = "unknown client";
     public static readonly string ServerVersion = typeof(McpServer).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
 
     /// <summary>Protocol versions we accept, newest first. Unknown requested versions get the newest (spike 1).</summary>
     public static readonly string[] SupportedVersions = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
     public static readonly JsonSerializerOptions Json = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
+    /// <summary>
+    /// Sent in the initialize result ("instructions"); Claude Code shows it to the model up front. Without it, the
+    /// benchmark (docs/benchmarks) saw the agent try Edit on VB6 files first (blocked by the hook), then discover these
+    /// tools, which roughly doubled tokens on edit tasks. Short on purpose: it costs tokens on every request.
+    /// </summary>
+    public const string Instructions =
+        "Tools for the Visual Basic 6 IDE and VB6 projects. VB6 sources (.bas .cls .frm .ctl .vbp) are Windows-1252 with CR LF and " +
+        "hidden header/Attribute lines: change them only with these tools, never Edit, Write or shell commands. Never touch .frx .ctx " +
+        ".pgx .dsx .res (binary, VB rewrites them): read them with form_resources, res_read. Open project (ide_list): code_read, " +
+        "proc_get, code_replace_lines, code_insert, proc_replace, project_save; project_checkpoint/project_rollback around big changes. " +
+        "Forms: form_controls, form_add_control, form_set_properties; rows and columns with form_layout, not hand-computed Left/Top. " +
+        "Closed project: file_read, file_replace_lines. Build: build_make. Run: run_start, app_click, app_screenshot, run_end. " +
+        "ws_affected: what to rebuild; symbol_refs: every use of a name; com_describe: a DLL/OCX; batch_run: several steps in one call. " +
+        "Read/Grep on sources is fine. Windows only: files you write use CR LF; VB strings have no escapes (vbCrLf, not \\n; \"C:\\Temp\", not \"C:\\\\Temp\").";
+
+    private static int s_inFlight;
+
+    /// <summary>
+    /// Tool calls running now. server_restart waits for them before ending the process: a call the client sent right after
+    /// it (an ide_launch, 2026-10-17) was cut off mid-way and the client saw "Connection closed".
+    /// </summary>
+    public static int InFlight => Volatile.Read(ref s_inFlight);
 
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly Dictionary<string, Tool> _tools = tools.ToDictionary(t => t.Name);
@@ -66,11 +92,13 @@ public sealed class McpServer(TextReader input, TextWriter output, TextWriter lo
         {
             case "initialize":
                 var requested = (string?)p?["protocolVersion"];
+                if ((string?)p?["clientInfo"]?["name"] is { Length: > 0 } client) ClientName = (client + " " + ((string?)p?["clientInfo"]?["version"] ?? "")).Trim();
                 return Result(id, new JsonObject
                 {
                     ["protocolVersion"] = requested is not null && SupportedVersions.Contains(requested) ? requested : SupportedVersions[0],
                     ["capabilities"] = new JsonObject { ["tools"] = new JsonObject() },
                     ["serverInfo"] = new JsonObject { ["name"] = ServerName, ["version"] = ServerVersion },
+                    ["instructions"] = Instructions,
                 });
             case "ping":
                 return Result(id, new JsonObject());
@@ -79,10 +107,15 @@ public sealed class McpServer(TextReader input, TextWriter output, TextWriter lo
             case "tools/call":
                 var name = (string?)p?["name"] ?? "";
                 var args = p?["arguments"] as JsonObject ?? [];
-                var result = _tools.TryGetValue(name, out var tool)
-                    ? await tool.InvokeAsync(args, ct).ConfigureAwait(false)
-                    : ToolResult.Fail($"Unknown tool: {name}");
-                return Result(id, result.ToJson());
+                Interlocked.Increment(ref s_inFlight);
+                try
+                {
+                    var result = _tools.TryGetValue(name, out var tool)
+                        ? await tool.InvokeAsync(args, ct).ConfigureAwait(false)
+                        : ToolResult.Fail($"Unknown tool: {name}");
+                    return Result(id, result.ToJson());
+                }
+                finally { Interlocked.Decrement(ref s_inFlight); }
             default:
                 return null;
         }

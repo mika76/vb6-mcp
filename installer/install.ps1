@@ -22,6 +22,8 @@ param(
     [string]$Name = 'vb6',
     [switch]$NoHook,
     [switch]$NoClaude,
+    # let debug_eval run expressions with side effects, flagged and audited (VB6MCP_EVAL=open); refused by default
+    [switch]$EvalOpen,
     # internal: the elevated machine part
     [switch]$Machine,
     [string]$Log = ''
@@ -107,7 +109,7 @@ if ($key) { $vb6Dir = $key.GetValue('ProductDir') }
 if (-not $vb6Dir) { $vb6Dir = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\VB98' }
 if (-not (Test-Path (Join-Path $vb6Dir 'VB6.EXE'))) { Write-Warning "VB6.EXE not found in $vb6Dir; installing anyway (set VB6MCP_VB6_EXE if it lives elsewhere)" }
 
-# with -File, "-Roots D:,E:" arrives as one string: split it (commas or semicolons)
+# with -File, "-Roots D:\src,E:\work" arrives as one string: split it (commas or semicolons)
 $Roots = @($Roots | ForEach-Object { $_ -split '[;,]' } | Where-Object { $_.Trim() })
 $fullRoots = @()
 foreach ($r in $Roots) {
@@ -150,7 +152,10 @@ if (-not $NoClaude) {
         # 'claude mcp remove' writes to stderr when there's nothing to remove; that must not stop the script
         $ErrorActionPreference = 'Continue'
         claude mcp remove $Name -s user *> $null
-        claude mcp add --scope user $Name -- $exe
+        # The server's request log (PLAN.md C6): without VB6MCP_LOG it only reaches Claude Code's MCP logs
+        $envArgs = @('-e', "VB6MCP_LOG=$(Join-Path $env:LOCALAPPDATA 'vb6mcp\server.log')")
+        if ($EvalOpen) { $envArgs += @('-e', 'VB6MCP_EVAL=open') }
+        claude mcp add --scope user $Name @envArgs -- $exe
         $added = $LASTEXITCODE
         $ErrorActionPreference = 'Stop'
         if ($added -ne 0) { Write-Warning "claude mcp add failed ($added); register it yourself: claude mcp add --scope user $Name -- `"$exe`"" }

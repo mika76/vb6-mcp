@@ -25,8 +25,9 @@ public sealed partial class IdeTools
             Schema.Object(("pid", "integer", "Only this IDE.", false)), (a, _) => Task.FromResult(SyncStatus(a))),
         new("sync_diff",
             "Differences between a component's code in the IDE (including unsaved changes) and its file on disk, as a unified diff " +
-            "(--- ide, +++ disk).",
-            Schema.Object(("component", "string", ComponentDesc, true), ("project", "string", ProjectDesc, false), ("pid", "integer", PidDesc, false)),
+            "(--- ide, +++ disk). Without component: a summary of the whole project, each saved component same, case-only (VB re-cased " +
+            "identifiers, with the spellings) or differs (changed line count).",
+            Schema.Object(("component", "string", "Component name; leave out for the project summary.", false), ("project", "string", ProjectDesc, false), ("pid", "integer", PidDesc, false)),
             (a, _) => SyncDiffAsync(a)),
         new("sync_take_disk",
             "Resolve a conflict in favour of the file on disk: reloads the component, DISCARDING its unsaved IDE changes. A recovery " +
@@ -84,11 +85,46 @@ public sealed partial class IdeTools
 
     private async Task<ToolResult> SyncDiffAsync(JsonObject a)
     {
+        if (a.Str("component") is not { Length: > 0 }) return await SyncSummaryAsync(a);
         var (client, project, comp) = await ResolveComponentAsync(a);
         var ide = (await client.ReadAsync(project, comp.Name)).Text;
         var disk = DiskCode(comp.FileName);
         var diff = LineDiff.Unified(ide, disk, $"ide ({project}.{comp.Name}{(comp.IsDirty ? ", unsaved changes" : "")})", $"disk ({comp.FileName})");
         return ToolResult.Ok(new { project, component = comp.Name, file = comp.FileName, dirty = comp.IsDirty, same = diff.Length == 0, diff });
+    }
+
+    /// <summary>
+    /// sync_diff for a whole project (improvement notes 23): VB keeps one spelling per identifier, so new code re-cases
+    /// names in modules the agent never touched, and sync_diff per component didn't show how far it spread.
+    /// </summary>
+    private async Task<ToolResult> SyncSummaryAsync(JsonObject a)
+    {
+        var (client, project) = await ResolveProjectAsync(a);
+        var rows = new List<object>();
+        int same = 0, caseOnly = 0, differs = 0;
+        foreach (var c in await client.ComponentsAsync(project))
+        {
+            if (c.FileName.Length == 0) { rows.Add(new { component = c.Name, state = "never saved" }); continue; }
+            if (!File.Exists(c.FileName)) { rows.Add(new { component = c.Name, state = "file missing", file = c.FileName }); continue; }
+            var ide = (await client.ReadAsync(project, c.Name)).Text;
+            var disk = DiskCode(c.FileName);
+            if (ide == disk) { same++; continue; }   // only differences are listed
+            if (VbCode.CaseOnlyRespellings(disk, ide) is { } respelled)
+            {
+                caseOnly++;
+                rows.Add(new { component = c.Name, state = "case-only", dirty = c.IsDirty, respelled = respelled.Take(20), more = respelled.Count > 20 ? respelled.Count - 20 : (int?)null });
+                continue;
+            }
+            differs++;
+            var diff = LineDiff.Unified(ide, disk, "ide", "disk");
+            int changed = diff.Split('\n').Count(l => (l.StartsWith('+') || l.StartsWith('-')) && !l.StartsWith("+++") && !l.StartsWith("---"));
+            rows.Add(new { component = c.Name, state = "differs", dirty = c.IsDirty, changedLines = changed });
+        }
+        return ToolResult.Ok(new
+        {
+            project, same, caseOnly, differs, components = rows,
+            note = caseOnly > 0 ? "case-only: VB re-cased identifiers in memory (one spelling per name, project-wide); saving writes the new spelling into these files" : null,
+        });
     }
 
     private async Task<ToolResult> SyncTakeDiskAsync(JsonObject a, CancellationToken ct)

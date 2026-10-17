@@ -45,4 +45,24 @@ public static class ReplaceCodeTests
             try { f.ReplaceCode(s, c, "x"); throw new InvalidOperationException($"{s},{c} should fail"); }
             catch (ArgumentException) { }
     }
+
+    /// <summary>
+    /// A WithEvents declaration's hidden VB_VarHelpID can be dropped on request (improvement notes 12): VB writes it again
+    /// on save (spike 28b). Without the option the edit is refused, and the error names the option.
+    /// </summary>
+    [Test]
+    public static void AWithEventsAttributeCanBeDroppedOnRequest()
+    {
+        var text = "Attribute VB_Name = \"clsT\"\r\nOption Explicit\r\nPrivate WithEvents m_comm As MSCommLib.MSComm\r\nAttribute m_comm.VB_VarHelpID = -1\r\n";
+        var f = VbSourceFile.Parse("clsT.cls", Vb1252.Encoding.GetBytes(text));
+        var kept = Vb1252.Encoding.GetString(f.ReplaceCode(2, 1, "' serial port\r\nPrivate WithEvents m_comm As MSCommLib.MSComm"));
+        Assert.True(kept.Contains("MSComm\r\nAttribute m_comm.VB_VarHelpID = -1"), "an unchanged declaration keeps its attribute: " + kept);
+        // the declaration changes (indented inside #If), so the attribute has no line to follow
+        const string replacement = "#If NOTERM Then\r\n    Private m_comm As Object\r\n#Else\r\n    Private WithEvents m_comm As MSCommLib.MSComm\r\n#End If";
+        try { f.ReplaceCode(2, 1, replacement); throw new InvalidOperationException("should be refused"); }
+        catch (ArgumentException ex) { Assert.True(ex.Message.Contains("drop_var_help_ids"), ex.Message); }
+
+        var after = Vb1252.Encoding.GetString(f.ReplaceCode(2, 1, replacement, dropVarHelpIds: true));
+        Assert.True(!after.Contains("VB_VarHelpID") && after.Contains("#If NOTERM Then"), after);
+    }
 }

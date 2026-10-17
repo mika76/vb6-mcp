@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Vb6Mcp.Core;
 using Vb6Mcp.Core.Bridge;
@@ -70,8 +71,11 @@ public sealed partial class IdeTools
             Schema.Object(("pid", "integer", PidDesc, false)), (a, _) => WhereAsync(a)),
         new("debug_eval",
             "Evaluate an expression in the Immediate window ('? expr') and return the result. Break mode (current scope) or design mode " +
-            "(module-level/global only; it may run code, e.g. a function call).",
-            Schema.Object(("expression", "string", "Expression, e.g. x or m_counter.Value * 2.", true), ("pid", "integer", PidDesc, false)),
+            "(module-level/global only; it may run code, e.g. a function call). For reading values only: expressions with side effects (database writes, " +
+            "Shell or other process starts, file, registry or network access, scripts, SendKeys) are refused; test through the program's own UI.",
+            Schema.Object(("expression", "string", "Expression, e.g. x or m_counter.Value * 2.", true),
+                          ("allow_side_effect", "boolean", "Ask the user to approve an expression with a side effect (only when really needed).", false),
+                          ("pid", "integer", PidDesc, false)),
             (a, ct) => EvalAsync(a, ct)),
         new("debug_immediate",
             "Read the Immediate window (Debug.Print output and earlier evaluations), optionally only the last N lines.",
@@ -80,7 +84,7 @@ public sealed partial class IdeTools
         new("syntax_check",
             "Compile the code as it is in the IDE (unsaved edits included) via 'Start With Full Compile'. On a compile error, reports the " +
             "message and location and closes the error dialog. If it compiles, the program starts and is ended again right away " +
-            "(startup code like Form_Load runs briefly). Design mode only.",
+            "(startup code like Form_Load runs briefly). Design mode only. Other conditional compilation constants: project_settings CondComp with reopen=true.",
             Schema.Object(("pid", "integer", PidDesc, false)), (a, ct) => SyntaxCheckAsync(a, ct)),
     ];
 
@@ -88,9 +92,16 @@ public sealed partial class IdeTools
 
     private async Task<ToolResult> RunStartAsync(JsonObject a, CancellationToken ct)
     {
+        var settled = await SettleReloadsAsync(ResolveInstance(a).Pid, ct);
+        return (await RunStartCoreAsync(a, ct)).With("reloads", settled);
+    }
+
+    private async Task<ToolResult> RunStartCoreAsync(JsonObject a, CancellationToken ct)
+    {
         var inst = ResolveInstance(a);
         RequireMode(inst, IdeMode.Design);
         bool full = a["full_compile"]?.GetValue<bool>() == true;
+        await RememberDirtyBeforeRunAsync(inst);   // spike 32: a run marks forms dirty
         await _env.Client(inst).CommandAsync(full ? "fullcompile" : CmdStart);
         var w = await WaitForAsync(inst, s => s.Mode is IdeMode.Run or IdeMode.Break || s.Dialogs.Count > 0, ct);
         if (w.Mode is IdeMode.Run or IdeMode.Break) _runsWeStarted.Add(inst.Pid);
@@ -107,13 +118,14 @@ public sealed partial class IdeTools
         await _env.Client(inst).CommandAsync(CmdEnd);
         var w = await WaitForAsync(inst, s => s.Mode == IdeMode.Design, ct);
         if (w.Mode == IdeMode.Design) _runsWeStarted.Remove(inst.Pid);
-        return ToolResult.Ok(State("ended", w));
+        return ToolResult.Ok(State("ended", w)).With("markedChangedByRun", MarkedJson(await MarkedChangedByRunAsync(inst)));
     }
 
     private async Task<ToolResult> SimpleCommandAsync(JsonObject a, string cmd, IdeMode[] allowed, IdeMode[] expected, CancellationToken ct)
     {
         var inst = ResolveInstance(a);
         var before = RequireMode(inst, allowed);
+        if (before.Mode == IdeMode.Design) await RememberDirtyBeforeRunAsync(inst);   // a step from design mode starts a run
         await _env.Client(inst).CommandAsync(cmd);
         // A step stays in break mode: when the starting mode is also an expected one, the short minimum
         // wait is enough; otherwise wait for the mode to change (e.g. break -> run/design on continue)
@@ -133,6 +145,7 @@ public sealed partial class IdeTools
         var component = a.Req("component");
         int line = a.Int("line") ?? throw new ToolException("missing required argument 'line'");
         await client.SetSelectionAsync(project, component, line);
+        if (before.Mode == IdeMode.Design) await RememberDirtyBeforeRunAsync(inst);
         await client.CommandAsync(CmdRunToCursor);
         var w = await WaitForAsync(inst, s => s.Dialogs.Count > 0 || s.Mode == IdeMode.Break, ct, minWait: TimeSpan.FromMilliseconds(400));
         if (before.Mode == IdeMode.Design && w.Mode != IdeMode.Design) _runsWeStarted.Add(inst.Pid);
@@ -195,10 +208,26 @@ public sealed partial class IdeTools
         RequireMode(inst, IdeMode.Break, IdeMode.Design);
         var expr = a.Req("expression").Trim();
         if (expr.Contains('\n') || expr.Contains('\r')) throw new ToolException("the expression must be a single line");
+        // Side effects (database writes, processes, files, registry, network, scripts, keystrokes) are refused unless the
+        // owner configured VB6MCP_EVAL=open: the IDE runs elevated, so this is code execution with admin rights (PLAN.md E5)
+        var effect = EvalPolicy.SideEffect(expr);
+        // allow_side_effect is trusted only when the Claude Code hook guards debug_eval: then the user was asked (owner's choice,
+        // 2026-10-17: ask rather than refuse). Without the hook an agent could pass the flag itself, so it is refused.
+        bool approved = effect is not null && a.Bool("allow_side_effect") == true && EvalGuarded();
+        if (effect is not null && !EvalOpen && !approved)
+        {
+            Audit.Write("debug_eval", inst.Pid, $"refused ({effect}): ? {expr}");
+            throw new ToolException($"refused: this expression looks like it has a side effect ({effect}). Prefer testing through the program's own UI (app_click, app_set_text). " +
+                (EvalGuarded()
+                    ? "If it is really needed, call again with allow_side_effect=true: the user is asked to approve it."
+                    : "Side effects need the user's approval, which needs the vb6-mcp Claude Code hook (install-server.ps1 / install.ps1 install it); or the owner sets VB6MCP_EVAL=open."));
+        }
+        if (effect is not null) Audit.Write("debug_eval", inst.Pid, $"side effect {(approved ? "approved by the user (hook prompt)" : "allowed by VB6MCP_EVAL=open")} ({effect}) follows");
         var (status, result, w) = await EvaluateAsync(inst, expr, "debug_eval", ct);
+        var effectNote = effect is null ? null : $"this had a side effect ({effect}); undo it when you are done (e.g. put data back), and mention it in your report";
         return status switch
         {
-            "ok" => ToolResult.Ok(new { expression = expr, status, result }),
+            "ok" => ToolResult.Ok(new { expression = expr, status, result, sideEffect = effect, note = effectNote }),
             "dialog" => ToolResult.Ok(new { expression = expr, status, note = "evaluating showed a dialog (e.g. a runtime error); it was not answered", dialogs = Dialogs(w!) }),
             _ => ToolResult.Ok(new { expression = expr, status, note = $"no result after {CommandWait.TotalSeconds:0} s; check debug_immediate and ide_status" }),
         };
@@ -262,11 +291,44 @@ public sealed partial class IdeTools
 
     // ---------- syntax check ----------
 
+    /// <summary>How long compile/run tools wait for reloads the watchdog has pending (it polls every 2 s).</summary>
+    public TimeSpan ReloadSettle { get; init; } = TimeSpan.FromSeconds(8);
+
+    /// <summary>
+    /// A file changed on disk during a run is reloaded only in design mode, a few seconds after run_end. A syntax_check
+    /// called straight after compiled the previous text (improvement notes 27). Before compiling or running, wait for the
+    /// watchdog's pending reloads of this IDE (sync events: last event of a file is "pending"), and say what happened.
+    /// </summary>
+    public async Task<JsonNode?> SettleReloadsAsync(int pid, CancellationToken ct)
+    {
+        List<string> Pending(int pid) => Core.SyncState.Read(SyncStatePath).Events.Where(e => e.Pid == pid)
+            .GroupBy(e => e.File, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.OrderBy(e => e.Time).Last().Kind == "pending").Select(g => g.Key).ToList();
+        var pending = Pending(pid);
+        if (pending.Count == 0) return null;
+        var deadline = DateTime.UtcNow + ReloadSettle;
+        var still = pending;
+        while (still.Count > 0 && DateTime.UtcNow < deadline) { await Task.Delay(500, ct); still = Pending(pid); }
+        return JsonSerializer.SerializeToNode(new
+        {
+            applied = pending.Except(still, StringComparer.OrdinalIgnoreCase).ToList(),
+            stillPending = still.Count > 0 ? still : null,
+            note = still.Count > 0 ? "these files changed on disk and aren't reloaded yet, so the IDE still has the previous text; check sync_status" : "waited for these reloads (files changed on disk) before going on",
+        }, McpServer.Json);
+    }
+
     private async Task<ToolResult> SyntaxCheckAsync(JsonObject a, CancellationToken ct)
+    {
+        var settled = await SettleReloadsAsync(ResolveInstance(a).Pid, ct);
+        return (await SyntaxCheckCoreAsync(a, ct)).With("reloads", settled);
+    }
+
+    private async Task<ToolResult> SyntaxCheckCoreAsync(JsonObject a, CancellationToken ct)
     {
         var inst = ResolveInstance(a);
         RequireMode(inst, IdeMode.Design);
         var client = _env.Client(inst);
+        await RememberDirtyBeforeRunAsync(inst);   // a passing syntax_check runs the program briefly (spike 32)
         await client.CommandAsync("fullcompile");
         var w = await WaitForAsync(inst, s => s.Mode is IdeMode.Run or IdeMode.Break || s.Dialogs.Count > 0, ct, TimeSpan.FromSeconds(60));
 
@@ -300,7 +362,8 @@ public sealed partial class IdeTools
             await client.CommandAsync(CmdEnd);
             var after = await WaitForAsync(inst, s => s.Mode == IdeMode.Design, ct);
             if (after.Mode == IdeMode.Design) _runsWeStarted.Remove(inst.Pid);
-            return ToolResult.Ok(new { compiles = true, status = after.Mode == IdeMode.Design ? "ended" : "still-running", mode = Mode(after.Mode) });
+            return ToolResult.Ok(new { compiles = true, status = after.Mode == IdeMode.Design ? "ended" : "still-running", mode = Mode(after.Mode) })
+                .With("markedChangedByRun", MarkedJson(await MarkedChangedByRunAsync(inst)));
         }
         return ToolResult.Ok(new { compiles = (bool?)null, status = "unknown", note = "neither a compile error nor a run appeared", state = State("", w) });
     }

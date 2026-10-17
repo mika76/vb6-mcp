@@ -208,12 +208,13 @@ No user code runs, so none of these is deferred.
 
 `LISTITEMS <hwnd>` reads a list box of the IDE process (`LB_GETCOUNT`, `LB_GETTEXTLEN`, `LB_GETTEXT`). It's read-only, and it is done in-process because UIPI blocks `LB_*` messages from the non-elevated server. Payload: the items separated by RS (empty payload = no items). Errors (400): not a window of this process, not a list box. The server then closes the dialog by clicking its Close button with `CLICK`.
 
-### `MAKE <vbp>`, `MAKEIDE <project>` (deferred), `MAKESTATUS`
+### `MAKE <vbp> [<defines>]`, `MAKEIDE <project>` (deferred), `MAKESTATUS`
 
 `MAKE <vbp>` starts `"<VB6.EXE>" /make "<vbp>" /out "<log>"` as a child of the IDE with `CreateProcess`, without waiting. The child inherits VB6's elevation, so an ActiveX DLL/OCX is registered on success without a UAC prompt. The log goes to `%LOCALAPPDATA%\vb6mcp\builds\<time>-<name>.log`.
 - **For closed projects only.** VB6 `/make` refuses a project that is open in any IDE ("The file '...' is already open.", spike 21), and the add-in refuses one open in its own IDE (409).
 - **Path check:** the path must be absolute, without `..`, and under one of the roots in `%LOCALAPPDATA%\vb6mcp\roots.txt`, which `install-server.ps1` writes from `-Roots`. The token is the real boundary; this is defense in depth, because an elevated `/make` registers components machine-wide (hard rule 8).
-- Payload: `pid US logPath US vbp`. Errors: 400 bad or unlisted path; 404 file missing; 409 open in this IDE, or the process couldn't be started.
+- **`defines`** (optional, Phase 7 A4) becomes `/d <defines>`: `name=value` pairs joined by `:`, e.g. `noterm=1:debug=0`. It goes on an elevated command line, so the add-in accepts only VB identifiers as names and integers as values, at most 200 characters (400 otherwise).
+- Payload: `pid US logPath US vbp`. Errors: 400 bad or unlisted path, or bad defines; 404 file missing; 409 open in this IDE, or the process couldn't be started.
 
 `MAKEIDE <project>` queues `VBProject.MakeCompiledFile`, which compiles **from IDE memory** to the project's `BuildFileName`. It is deferred because compiling may show modal dialogs. Payload: `QUEUED US outputFile`; 409 while the program runs. It sets the outcome to `queued`.
 
@@ -331,6 +332,7 @@ A finished result is removed once read. At most 100 uncollected results are kept
 | `SET` | `project component control property value` | the property read back as `PROPS` records (all members for `Parent.Member`). The text is converted to the property's current type. Numbers must be `-12`, `3.5` or `&H8000000F&`; anything else is 400. |
 | `ADD` | `project component class name container geometry` | the new control's `CONTROLS` record. `class` as a `.frm` writes it (`VB.CommandButton`, `MSComctlLib.ListView`, not the registered ProgID). `container` is empty for the form. `geometry` is `left,top,width,height`, any part empty. |
 | `REMOVE` | `project component control` | `removed <control>` |
+| `SHOW` | `project component [max]` | the designer window's caption (`DesignerWindow.Caption`). Opens the designer window (`VBComponent.Activate`), maximized inside the IDE with `max` (`DesignerWindow.WindowState`). Deferred like the others, because a form hosting a UserControl runs its code when the designer opens. Used by `form_screenshot`. The caption has no project prefix (`frmMain (Form)`, spike 28). |
 
 - `control` is `Name` or `Name(index)`, or the component's own name for the form (`VBComponent.Properties`).
 - **Indexed properties** (List, ItemData): `PROPS` gives their items LF-separated, read with `IndexedValue(0..1999)`. Past the end VB returns ""/0, not an error, so the server trims (spike 25). `SET` takes LF- or CRLF-separated items and sets `IndexedValue(j)`.
@@ -360,6 +362,28 @@ COM (un)registration (Phase 5, spike 24).
 - **Errors:** 400 for a refused path, 404 file not found, 409 if regsvr32 couldn't start.
 - **Server side:** the server audits the call, polls `REGSTATUS`, and verifies the result in the registry.
 
+### Projects: `CLOSE`, `COMPADD`, `SAVECOMP` (deferred), `PRJGET`, `PRJSET` (Phase 7, `ProjectVerbs.bas`)
+
+All need design mode (409), except `PRJGET`.
+- **`CLOSE <project> <0|1>`** queues `VBProjects.Remove`.
+  - With `0`, a project with unsaved changes is refused (409, the changed components named).
+  - With `1` (discard; the server sends it only for an explicit `discard: true`, hard rule 9) the project is removed as it is.
+  - `VBProjects.Remove` saves changed components without asking, and setting `IsDirty` to False saves too (spike 31).
+  - So the server snapshots the affected files first and restores them after the close.
+  - The add-in logs `closed <project>` or `close failed <project>: <error>`; the server watches `PROJECTS`.
+- **`COMPADD <project> new <kind> <name>`** queues `VBComponents.Add` and sets the name. kind: `module`, `class`, `form`, `mdiform`, `usercontrol`, `propertypage`. The name must be a valid, unused VB name (400/409).
+- **`COMPADD <project> file <path>`** queues `VBComponents.AddFile`. The path must be absolute, without `..`, under the roots, and a `.bas/.cls/.frm/.ctl/.pag/.dsr`.
+  - Deferred because adding a form runs the code of UserControls on it (hard rule 14).
+  - The add-in logs `added ...` or `add component failed ...`.
+- **`SAVECOMP <project> <component> [<path>]`** queues `VBComponent.SaveAs`, which saves one component without File > Save Project, so the `.vbp` isn't rewritten (PLAN B8; quiet, verified in spike 31).
+  - Without a path it saves to the component's own file.
+  - With a path it saves to that **new** file, for a component that was never saved. The file must not exist (409); the path must be absolute, without `..`, and under the roots.
+- **`PRJGET <project>`** returns `name US description US helpFile US helpContextId US startMode US buildFileName US startup US type`. `startup` is a component name, `Sub Main` or `(None)`.
+- **`PRJSET <project> <property> <value>`** sets one of `name`, `description`, `helpfile`, `helpcontextid`, `startmode` (0/1), `buildfilename`, `startup`, and returns the `PRJGET` record.
+  - Synchronous: no user code runs.
+  - `startup` sets `VBComponents.StartUpObject`: `vbext_so_SubMain`, `vbext_so_None`, or the component (falling back to its name). Which form VB accepts is checked live.
+- **Not here: conditional compilation constants and command-line arguments.** VBIDE has no property for them; the server edits them in the `.vbp` of a closed project.
+
 ## Watchdog (`vb6mcp watchdog`)
 
 The elevated sidecar (PLAN.md §3.1, spike 12) speaks the **same protocol**: framing, `VB6MCP1` magic, a 128-bit token, `OK`/`ERR`. Its discovery file is `%LOCALAPPDATA%\vb6mcp\watchdog.json`, with the same fields as an add-in's (`addin` is `"watchdog <version>"`). It is written atomically and deleted on a clean exit.
@@ -374,6 +398,8 @@ The elevated sidecar (PLAN.md §3.1, spike 12) speaks the **same protocol**: fra
 | `BREAK` | `pid` | drops a busy loop into break mode with injected Ctrl+Break (spike 12) | `break US front` (`vb6` or `ghost`); 409 if the IDE isn't in run mode, VB6 can't be brought to the front, or no break followed within 3 s |
 | `PRESS` | `hwnd` | posts `BM_CLICK` to a dialog button | `pressed`; 409 if not a `Button` |
 | `KILL` | `pid force` | ends VB6; the literal `force` is required (hard rules 9, 12) | `killed` or `kill-sent` |
+| `QUIT` | `pid` | posts `WM_CLOSE` to the IDE's `IDEOwner` window (the main window `wndclass_desked_gsk` only if there is none), as File > Exit would. Posted to the main frame, it destroyed only the frame and the process stayed alive without UI (tested 2026-10-17); VB still asks about unsaved changes (the server only sends it when nothing is unsaved). Added 2026-10-17 (`ide_quit`, PLAN.md C7); an older watchdog answers 400 unknown verb | `close-posted`; 409 when the process has no main window |
+| `MAKE` | `vbp [defines]` | starts `VB6.EXE /make "vbp" /out "log" [/d defines]` (no window) for `build_make` when no IDE runs (PLAN.md D1). Checked like the add-in's MAKE (hard rule 8): absolute `.vbp` without `..`, under the roots of `roots.txt` next to the watchdog exe (installed, admin-only) or `%LOCALAPPDATA%\vb6mcp\roots.txt` (development), defines `name=integer` pairs joined by `:`. Log in `%LOCALAPPDATA%\vb6mcp\builds\`. Added 2026-10-17 | `pid US log US vbp`; 400 bad arguments, 409 outside the roots or not found |
 | `SNAP` | `hwnd id` | PNG to `%LOCALAPPDATA%\vb6mcp\shots\<id>.png`. `PrintWindow` with a 3 s timeout, then a copy of the screen area | `path US method` |
 | `LAUNCH` | `[project]` | starts `VB6.EXE` (path from the registry), optionally with a full `.vbp`/`.vbg` path. Elevated like the watchdog, so no UAC prompt (spike 12b) | the new pid |
 
@@ -392,4 +418,5 @@ Breaking changes bump the magic (`VB6MCP2`) and the discovery `protocol` field. 
 - v1, 2026-10-13: added `APPCLICK`, `APPTEXT`, `SNAP`, `MOUSE`, `SCROLL`, `SCROLLPOS`, `MOUSEREAL`, `MOUSERESTORE` (Phase 3), `CALLSTACK`, `LISTITEMS` (Phase 2), `LISTSTATE`, `SELECT`, `KEYS`, `KEYSREAL` (Phase 3), `MAKE`, `MAKEIDE`, `MAKESTATUS`, `WRITES`, `RELOAD` (Phase 4; `MAKE` takes a `.vbp` path, for closed projects). `MOUSEREAL` became deferred (`QUEUED`) and `MOUSERESTORE` returns the outcome. Deferred actions run one per `WM_DEFER`. New verbs only: older servers never send them, and a new server talking to an older add-in gets 400 "unknown verb".
 - v1, 2026-10-14: added `DESIGN` (deferred, with request ids) and `RESULT`, `REFS`, `REFADD`, `REFDEL`, `TOOLBOX` (Phase 5). New verbs only; against an older add-in the server says to rebuild it.
 - v1, 2026-10-15: added `REGSVR`, `REGSTATUS` (Phase 5 round 2). New verbs only.
+- v1, 2026-10-17: added `CLOSE`, `COMPADD`, `SAVECOMP`, `PRJGET`, `PRJSET`; `MAKE` takes an optional `defines` (Phase 7). New verbs and an optional argument only; against an older add-in the server says to rebuild it.
 - v1, 2026-10-15: `REFDEL` accepts `#<n>`; `DESIGN SET` accepts `@picture:<path>` and indexed properties; `DESIGN PROPS` returns indexed items (spike 25). Older servers never send these forms.

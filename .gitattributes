@@ -1,3 +1,7 @@
+# A Windows-only project: every other text file is checked out with CRLF, whatever core.autocrlf says
+# (the owner kept having to fix LF files that tools had written).
+* text=auto eol=crlf
+
 # VB6 source files are Windows-1252 + CRLF and must be stored byte-exact.
 # -text stops git from normalizing line endings (which would corrupt them for the IDE);
 # diff still works because they are plain text.

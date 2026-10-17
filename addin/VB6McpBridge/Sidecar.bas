@@ -67,13 +67,15 @@ End Sub
 ' Starts "VB6.EXE /make <vbp> /out <log>" as a child process (build_make, Phase 4) and returns its
 ' pid, without waiting (hard rule 5). The child inherits VB6's elevation, so building an ActiveX
 ' DLL/OCX can register it without a UAC prompt. /make reads the files on disk, not IDE memory.
-Public Function StartBuild(ByVal vbp As String, ByVal logPath As String) As Long
-    Dim exe As String, n As Long, si As STARTUPINFO, pi As PROCESS_INFORMATION
+Public Function StartBuild(ByVal vbp As String, ByVal logPath As String, Optional ByVal defines As String = "") As Long
+    Dim exe As String, n As Long, si As STARTUPINFO, pi As PROCESS_INFORMATION, extra As String
     exe = String$(520, vbNullChar)
     n = GetModuleFileName(0, exe, 520)                 ' this process: VB6.EXE
     exe = Left$(exe, n)
     si.cb = LenB(si)
-    If CreateProcess(vbNullString, """" & exe & """ /make """ & vbp & """ /out """ & logPath & """", 0, 0, 0, CREATE_NO_WINDOW, 0, vbNullString, si, pi) = 0 Then
+    ' /d name=value[:name=value]: conditional compilation constants, validated by Verbs.ValidDefines
+    If Len(defines) > 0 Then extra = " /d " & defines
+    If CreateProcess(vbNullString, """" & exe & """ /make """ & vbp & """ /out """ & logPath & """" & extra, 0, 0, 0, CREATE_NO_WINDOW, 0, vbNullString, si, pi) = 0 Then
         StartBuild = 0
         LogLine "build: CreateProcess failed (" & Err.LastDllError & ")"
         Exit Function

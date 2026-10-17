@@ -38,6 +38,24 @@ public static class DesignClientTests
         catch (AddinErrorException ex) { Assert.Equal("380: Invalid property value", ex.AddinMessage); }
     }
 
+    /// <summary>
+    /// A dialog holding the deferred op (a UserControl's code showing a MsgBox, spike 27) is reported after about a
+    /// second instead of after the 20 s timeout.
+    /// </summary>
+    [Test]
+    public static void ADialogBlockingTheOpIsReportedQuickly()
+    {
+        using var fake = new FakeAddin((verb, args) => verb == "DESIGN" ? ("QUEUED", args[0]) : ("OK", "pending"));
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            new AddinClient(fake.Instance).DesignAsync("SHOW", ["P", "F"], blockedBy: () => "'Login Error' is open").GetAwaiter().GetResult();
+            throw new InvalidOperationException("should throw");
+        }
+        catch (AddinErrorException ex) { Assert.Equal(409, ex.Code); Assert.Equal("'Login Error' is open", ex.AddinMessage); }
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(5), $"took {sw.Elapsed}");
+    }
+
     [Test]
     public static void OldAddinGetsAClearMessage()
     {

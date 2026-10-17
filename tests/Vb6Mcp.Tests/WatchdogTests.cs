@@ -17,6 +17,8 @@ public static class WatchdogTests
         public Task<string> BreakAsync(int pid, CancellationToken ct) { Calls.Add($"break {pid}"); throw new WatchdogRefusedException("not in run mode"); }
         public string Press(long h) { Calls.Add($"press {h:X}"); return "pressed"; }
         public string Kill(int pid) { Calls.Add($"kill {pid}"); return "killed"; }
+        public string Quit(int pid) { Calls.Add($"quit {pid}"); return "close-posted"; }
+        public string Make(string vbp, string defines) { Calls.Add($"make {vbp} {defines}"); return $"77{Wire.US}C:\\x\\b.log{Wire.US}{vbp}"; }
         public Task<string> SnapAsync(long h, string id, CancellationToken ct) { Calls.Add($"snap {h:X} {id}"); return Task.FromResult($"C:\\x\\{id}.png{Wire.US}PrintWindow"); }
         public string Launch(string? project) { Calls.Add($"launch {project}"); return "99"; }
     }
@@ -61,13 +63,15 @@ public static class WatchdogTests
             Assert.Equal(400, (await client.SendRawAsync("KILL", ["4242"])).ErrorCode, "kill without force");
             Assert.Equal(400, (await client.SendRawAsync("KILL", ["1234", "force"])).ErrorCode, "not a VB6 process");
             Assert.Equal("killed", await client.SendAsync("KILL", "4242", "force"));
+            Assert.Equal(400, (await client.SendRawAsync("QUIT", ["1234"])).ErrorCode, "quit: not a VB6 process");
+            Assert.Equal("close-posted", await client.SendAsync("QUIT", "4242"));
             Assert.Equal(400, (await client.SendRawAsync("PRESS", ["DEF"])).ErrorCode, "window of another process");
             Assert.Equal("pressed", await client.SendAsync("PRESS", "ABC"));
             Assert.Equal(400, (await client.SendRawAsync("SNAP", ["ABC", "..\\evil"])).ErrorCode, "unsafe id");
             Assert.Equal(400, (await client.SendRawAsync("LAUNCH", ["C:\\nope\\x.txt"])).ErrorCode, "not an existing .vbp");
             var refused = await client.SendRawAsync("BREAK", ["4242"]);
             Assert.True(refused.ErrorCode == 409 && refused.ErrorMessage.Contains("run mode"), refused.ErrorMessage);
-            Assert.SequenceEqual(new[] { "kill 4242", "press ABC", "break 4242" }, actions.Calls);
+            Assert.SequenceEqual(new[] { "kill 4242", "quit 4242", "press ABC", "break 4242" }, actions.Calls);
         }
     }
 }

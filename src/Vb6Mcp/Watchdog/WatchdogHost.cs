@@ -19,6 +19,10 @@ public interface IWatchdogActions
     Task<string> BreakAsync(int pid, CancellationToken ct);
     string Press(long buttonHwnd);
     string Kill(int pid);
+    /// <summary>Posts WM_CLOSE to the IDE's main window (ide_quit).</summary>
+    string Quit(int pid);
+    /// <summary>Starts VB6.EXE /make for a closed project under the roots (build_make without an IDE).</summary>
+    string Make(string vbp, string defines);
     Task<string> SnapAsync(long hwnd, string id, CancellationToken ct);
     string Launch(string? project);
 }
@@ -33,7 +37,8 @@ public sealed class WatchdogRefusedException(string message) : Exception(message
 /// </summary>
 public sealed class WatchdogHost(IWatchdogActions actions, Action<string> log, string discoveryPath)
 {
-    public const string Version = "0.1.0";
+    /// <summary>The exe's version (it was a constant that stayed 0.1.0 when the release became 0.2.0).</summary>
+    public static readonly string Version = typeof(WatchdogHost).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
     private readonly DateTime _started = DateTime.Now;
 
     public string Token { get; } = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
@@ -115,6 +120,18 @@ public sealed class WatchdogHost(IWatchdogActions actions, Action<string> log, s
                     if (a.Length < 2 || a[1] != "force") return Err(400, "KILL needs the argument 'force'");
                     log($"KILL {pid} force");
                     return Ok(actions.Kill(pid));
+                }
+                case "QUIT":
+                {
+                    int pid = Vb6Pid(a, 0);
+                    log($"QUIT {pid}");
+                    return Ok(actions.Quit(pid));
+                }
+                case "MAKE":
+                {
+                    if (a.Length < 1 || a.Length > 2) return Err(400, "MAKE takes the .vbp path and optional defines");
+                    log($"MAKE {a[0]}{(a.Length > 1 && a[1].Length > 0 ? " /d " + a[1] : "")}");
+                    return Ok(actions.Make(a[0], a.Length > 1 ? a[1] : ""));
                 }
                 case "SNAP":
                 {

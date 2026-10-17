@@ -1,3 +1,4 @@
+using System.Globalization;
 using Vb6Mcp.Core.Bridge;
 using Vb6Mcp.Mcp;
 using Vb6Mcp.UI;
@@ -23,7 +24,94 @@ public sealed partial class IdeTools(IIdeEnvironment env)
     /// <summary>The workspace project map (WorkspaceTools.CurrentMap); null when there are no roots.</summary>
     public Func<Core.Files.ProjectMap?> MapProvider { get; init; } = () => null;
 
-    public IReadOnlyList<Tool> All() => [.. ReadTools(), .. EditTools(), .. LaunchTools(), .. DebugTools(), .. InspectTools(), .. WatchdogTools(), .. RecoveryTools(), .. AppTools(), .. ExeTools(), .. BuildTools(), .. SyncTools(), .. FormTools(), .. RefTools()];
+    public IReadOnlyList<Tool> All() =>
+        [.. new IReadOnlyList<Tool>[] { ReadTools(), EditTools(), LaunchTools(), DebugTools(), InspectTools(), WatchdogTools(), RecoveryTools(), AppTools(), ExeTools(), BuildTools(), SyncTools(), FormTools(), RefTools(), ProjectTools(), CheckpointTools(), OwnershipTools() }
+            .SelectMany(x => x).Select(t => WriteTools.Contains(t.Name) ? t.Guarded(a => RequireNotOwnedByOthers(t.Name, a)) : t)
+            .Select(t => t.Around(CrashesSinceLastCall, WithCrashes))];   // crash notices ride along with the next result (D2)
+
+    // ---------- IDE ownership (PLAN Phase 7 A9) ----------
+
+    /// <summary>Where owner files live; tests use their own folder.</summary>
+    public string? OwnersFolder { get; init; }
+
+    /// <summary>
+    /// Tools that change, run or save something in an IDE. They refuse an IDE another live session owns. Reading tools
+    /// (code_read, ide_status, form_controls, screenshots of the running program, ...) work on every IDE.
+    /// </summary>
+    internal static readonly HashSet<string> WriteTools = new(StringComparer.Ordinal)
+    {
+        "code_replace_lines", "code_insert", "proc_replace", "project_save", "project_open", "project_close", "project_add_component", "project_settings", "project_rollback",
+        "ide_dialog_respond", "ide_kill", "ide_quit", "run_start", "run_break", "run_continue", "run_end", "step_into", "step_over", "step_out", "run_to_cursor",
+        "bp_toggle", "bp_clear_all", "debug_eval", "debug_immediate", "debug_locals", "syntax_check", "recovery_restore", "recovery_discard",
+        "app_click", "app_set_text", "app_mouse", "app_scroll", "app_select", "app_keys", "build_in_ide", "sync_take_disk", "sync_take_ide",
+        "form_set_property", "form_set_properties", "form_layout", "form_add_control", "form_remove_control", "form_screenshot",
+        "refs_add", "refs_remove", "refs_add_component", "refs_fix_broken",
+    };
+
+    /// <summary>VB6MCP_EVAL=open: debug_eval runs expressions with side effects (flagged, audited); by default it refuses them (PLAN.md E5).</summary>
+    public bool EvalOpen { get; init; }
+
+    /// <summary>Whether the Claude Code hook guards debug_eval, so an allow_side_effect call was approved by the user (tests replace it).</summary>
+    public Func<bool> EvalGuarded { get; init; } = () => Hook.GuardsEval();
+
+    private IdeOwner MyOwner() => IdeOwnership.Me(Mcp.McpServer.ClientName);
+
+    /// <summary>The IDE's live owner, or null.</summary>
+    private IdeOwner? OwnerOf(int pid) => IdeOwnership.Read(pid, OwnersFolder, OwnerAlive);
+
+    /// <summary>Whether an owner's server process still runs (tests replace it).</summary>
+    public Func<IdeOwner, bool>? OwnerAlive { get; init; }
+
+    private void RequireNotOwnedByOthers(string tool, System.Text.Json.Nodes.JsonObject a)
+    {
+        if (tool == "project_settings" && a["set"] is null) return;            // reading settings
+        if (tool == "project_rollback" && a["path"] is not null) return;      // checks the owner of the IDE the project is open in, if any
+        InstanceInfo inst;
+        try { inst = ResolveInstance(a); } catch (ToolException) { return; }   // the tool itself reports a missing or ambiguous IDE
+        if (OwnerOf(inst.Pid) is { } owner && !IdeOwnership.IsMe(owner))
+            throw new ToolException($"VB6 {inst.Pid} belongs to another session ({owner.Client}, server pid {owner.ServerPid}, since {owner.Since.ToLocalTime():HH:mm}), " +
+                $"so {tool} won't change it. Start your own IDE with ide_launch (through the watchdog, no UAC prompt), or pass the pid of one you own. Reading tools still work on it.");
+    }
+
+    private IReadOnlyList<Tool> OwnershipTools() =>
+    [
+        new("ide_claim",
+            "Make an IDE yours, so other sessions' write tools leave it alone (ide_launch claims the IDEs it starts). Works on an " +
+            "unowned IDE or one whose owner session has ended; an IDE another live session owns needs force=true (tell the user).",
+            Schema.Object(("pid", "integer", "The IDE to claim.", true), ("force", "boolean", "Take it from another live session.", false)),
+            (a, _) => Task.FromResult(Claim(a))),
+        new("ide_release",
+            "Give up ownership of an IDE you claimed or started, so other sessions can change it again.",
+            Schema.Object(("pid", "integer", "The IDE to release.", true)),
+            (a, _) => Task.FromResult(Release(a))),
+    ];
+
+    private ToolResult Claim(System.Text.Json.Nodes.JsonObject a)
+    {
+        int pid = a.Int("pid") ?? throw new ToolException("missing required argument 'pid'");
+        if (_env.Scan().Live.All(i => i.Pid != pid)) throw new ToolException($"no VB6 IDE with the add-in has pid {pid}");
+        if (OwnerOf(pid) is { } owner && !IdeOwnership.IsMe(owner))
+        {
+            if (a.Bool("force") != true)
+                throw new ToolException($"VB6 {pid} belongs to another live session ({owner.Client}, server pid {owner.ServerPid}); pass force=true only if the user agrees");
+            Audit.Write("ide_claim", pid, $"taken from {owner.Client} (server pid {owner.ServerPid})");
+        }
+        IdeOwnership.Claim(pid, MyOwner(), OwnersFolder);
+        return ToolResult.Ok(new { status = "claimed", pid, owner = Mcp.McpServer.ClientName });
+    }
+
+    private ToolResult Release(System.Text.Json.Nodes.JsonObject a)
+    {
+        int pid = a.Int("pid") ?? throw new ToolException("missing required argument 'pid'");
+        if (OwnerOf(pid) is not { } owner) return ToolResult.Ok(new { status = "not-owned", pid });
+        if (!IdeOwnership.IsMe(owner)) throw new ToolException($"VB6 {pid} belongs to another session ({owner.Client}); only it can release it");
+        IdeOwnership.Release(pid, OwnersFolder);
+        return ToolResult.Ok(new { status = "released", pid });
+    }
+
+    /// <summary>"you", the other session's name, or null for an unowned IDE (for ide_list).</summary>
+    private object? OwnerJson(int pid) => OwnerOf(pid) is not { } o ? null
+        : IdeOwnership.IsMe(o) ? "you" : new { client = o.Client, serverPid = o.ServerPid, since = o.Since.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) };
 
     private IReadOnlyList<Tool> ReadTools() =>
     [
@@ -40,7 +128,8 @@ public sealed partial class IdeTools(IIdeEnvironment env)
             Schema.Object(("pid", "integer", PidDesc, false), ("project", "string", ProjectDesc, false)), (a, _) => ComponentsAsync(a)),
         new("code_read",
             "Read a component's code as the IDE holds it right now, including unsaved edits. Works in design, run and break mode. " +
-            "Optional start_line/count (1-based) read part of the module.",
+            "Optional start_line/count (1-based) read part of the module. Without a range, at most 2000 lines are returned; " +
+            "nextStartLine says where to read on.",
             Schema.Object(("component", "string", ComponentDesc, true), ("project", "string", ProjectDesc, false), ("pid", "integer", PidDesc, false),
                           ("start_line", "integer", "First line to read (1-based).", false), ("count", "integer", "Number of lines.", false)),
             (a, _) => ReadAsync(a)),
@@ -59,9 +148,12 @@ public sealed partial class IdeTools(IIdeEnvironment env)
             "Open a .vbp or .vbg in a running IDE. If the IDE already has projects, pass mode 'add' (adds to a group) or " +
             "'replace' (closes them; refused while any has unsaved changes). Waits up to 20 s for the project to appear; " +
             "dialogs shown while opening (missing references, source control, ...) are reported, never answered. " +
-            "Starting VB6 itself needs the watchdog (not available yet).",
+            "Before opening, the project's controls are checked: an unregistered one would make VB6 load an empty project, so the open " +
+            "is refused (force=true opens anyway); unregistered references are warnings. After opening, status opened-incomplete " +
+            "means VB6 loaded fewer components than the .vbp lists (with the load logs). To start VB6 itself use ide_launch.",
             Schema.Object(("path", "string", "Full path of the .vbp or .vbg file.", true),
                           ("mode", "string", "add or replace; required when the IDE already has a project.", false),
+                          ("force", "boolean", "Open even though controls of the project aren't registered.", false),
                           ("pid", "integer", PidDesc, false)),
             (a, ct) => OpenAsync(a, ct)),
         new("proc_get",
@@ -88,7 +180,7 @@ public sealed partial class IdeTools(IIdeEnvironment env)
                 catch (Exception ex) { addinError = ex.Message; }
             }
             else addinError = "IDE not responding; add-in not queried";
-            ides.Add(new { pid = inst.Pid, elevated = Core.Vb6Install.IsElevated(inst.Pid), mode = Mode(w.Mode), responds = w.Responds, title = w.Title, dialogs = Dialogs(w), addin = inst.AddinVersion, projects, addinError });
+            ides.Add(new { pid = inst.Pid, owner = OwnerJson(inst.Pid), elevated = Core.Vb6Install.IsElevated(inst.Pid), mode = Mode(w.Mode), responds = w.Responds, title = w.Title, dialogs = Dialogs(w), addin = inst.AddinVersion, projects, addinError });
         }
         var crashed = scan.Stale.Select(s => new { pid = s.Pid, lastStarted = s.Started }).ToList();
         int cleaned = _env.DeleteStale(scan);
@@ -116,7 +208,7 @@ public sealed partial class IdeTools(IIdeEnvironment env)
         {
             project,
             components = comps.Select(c => new { c.Name, type = ComponentType(c.Type), dirty = c.IsDirty, lines = c.CountOfLines, file = c.FileName }),
-        });
+        }).With("markedChangedByRun", MarkedJson(await MarkedChangedByRunAsync(client.Instance)));
     }
 
     private async Task<ToolResult> ReadAsync(System.Text.Json.Nodes.JsonObject a)
@@ -125,9 +217,12 @@ public sealed partial class IdeTools(IIdeEnvironment env)
         var component = a.Req("component");
         // Always read the whole module: the hash covers the module, so write tools can detect any change
         var code = await client.ReadAsync(project, component);
-        int start = a.Int("start_line") ?? 1;
-        string text = a.Int("start_line") is null && a.Int("count") is null ? code.Text : Core.VbCode.Slice(code.Text, start, a.Int("count") ?? int.MaxValue);
-        return ToolResult.Ok(new { source = "ide", project, component, dirty = code.IsDirty, countOfLines = code.CountOfLines, hash = Core.VbCode.Hash(code.Text), startLine = start, text });
+        var page = Paging.Page(code.Text, a.Int("start_line"), a.Int("count"));   // capped without a range (improvement notes 13)
+        return ToolResult.Ok(new
+        {
+            source = "ide", project, component, dirty = code.IsDirty, countOfLines = code.CountOfLines, hash = Core.VbCode.Hash(code.Text), startLine = page.StartLine,
+            truncated = page.Truncated ? true : (bool?)null, nextStartLine = page.NextStartLine, note = Paging.Note(page, code.CountOfLines), text = page.Text,
+        });
     }
 
     private async Task<ToolResult> OutlineAsync(System.Text.Json.Nodes.JsonObject a)
@@ -196,6 +291,19 @@ public sealed partial class IdeTools(IIdeEnvironment env)
         if (replace && before.FirstOrDefault(p => p.IsDirty) is { } dirty)
             throw new ToolException($"project {dirty.Name} has unsaved changes; replace would make VB6 ask to save. Save or discard it first");
 
+        // Preflight (improvement notes 8, 17): an unregistered control makes VB6 load an empty project without a word
+        // (AddFromFile answers its "Continue Loading Project?" with No). Refuse that unless forced; warn about references.
+        Core.Files.VbpFile? vbp = ext == ".vbp" ? Core.Files.VbpFile.Load(path) : null;
+        var missing = vbp is null ? [] : Core.Files.ProjectPreflight.Missing(vbp, Core.Files.TypeLibRegistry.All());
+        var missingControls = missing.Where(m => m.Kind == "control").ToList();
+        if (missingControls.Count > 0 && a.Bool("force") != true)
+            throw new ToolException($"{missingControls.Count} control(s) of this project aren't registered on this machine: " +
+                string.Join("; ", missingControls.Select(m => Describe(m) + Hints(m, vbp!))) + ". VB6 would load the project without its components (the " +
+                "\"Continue Loading Project?\" prompt resolves as No). Register them (com_search, com_register; com_diagnose project=... " +
+                "checks everything), or pass force=true to open anyway.");
+        var warnings = missing.Where(m => m.Kind == "reference").Select(m => $"reference {Describe(m)}: VB6 will show it as MISSING{Hints(m, vbp!)}").ToList();
+        var started = DateTime.Now;
+
         await client.OpenAsync(path, replace);
 
         // The open runs deferred in the IDE; watch for the project or a dialog.
@@ -205,14 +313,103 @@ public sealed partial class IdeTools(IIdeEnvironment env)
             await Task.Delay(300, ct);
             var w = _env.ReadWindows(inst.Pid);
             if (w.Dialogs.Count > 0)
-                return ToolResult.Ok(new { status = "dialog", path, note = "VB6 is showing a dialog while opening; it was not answered", dialogs = Dialogs(w) });
+                return ToolResult.Ok(new { status = "dialog", path, note = "VB6 is showing a dialog while opening; it was not answered. Load errors come once per form: ide_dialog_respond repeat=true clicks through them and says what is missing", dialogs = Dialogs(w) });
             IReadOnlyList<ProjectInfo> now;
             try { now = await client.ProjectsAsync(); }
             catch (AddinBusyException) { continue; }        // IDE busy loading
             if (now.FirstOrDefault(p => SamePath(p.FileName, path)) is { } opened)
-                return ToolResult.Ok(new { status = "opened", path, project = opened.Name, type = ProjectType(opened.Type), projects = now.Select(p => p.Name) });
+            {
+                // "Opened" isn't "loaded": compare with the .vbp's members (a production project loaded 0 of 172 and said nothing)
+                object? incomplete = null;
+                if (vbp is not null)
+                {
+                    IReadOnlyList<ComponentInfo>? comps = null;   // best effort: the open itself succeeded
+                    try { comps = await client.ComponentsAsync(opened.Name); } catch (Exception ex) when (ex is AddinBusyException or AddinErrorException) { }
+                    int expected = Core.Files.ProjectPreflight.ComponentCount(vbp);
+                    if (comps is not null && comps.Count < expected)
+                    {
+                        var loadedFiles = comps.Select(c => c.FileName).Where(n => n.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                        incomplete = new
+                        {
+                            loaded = comps.Count, expected,
+                            notLoaded = vbp.Members.Where(m => !m.Kind.Equals("RelatedDoc", StringComparison.OrdinalIgnoreCase) && !loadedFiles.Contains(m.FullPath))
+                                                   .Select(m => m.FullPath).Take(20),
+                            loadLogs = LoadLogsSince(vbp, started),
+                        };
+                    }
+                }
+                return ToolResult.Ok(new
+                {
+                    status = incomplete is null ? "opened" : "opened-incomplete", path, project = opened.Name, type = ProjectType(opened.Type), projects = now.Select(p => p.Name),
+                    incomplete, warnings = warnings.Count > 0 ? warnings : null,
+                    note = incomplete is null ? null : "VB6 loaded only part of the project; see loadLogs. Don't save it: the .vbp would lose the missing members. Close it and fix the cause first.",
+                });
+            }
         }
-        return ToolResult.Ok(new { status = "pending", path, note = $"not visible after {OpenWait.TotalSeconds:0} s; check ide_status" });
+        // The add-in logs why a deferred open failed (e.g. 60082 "A project with the name 'AppA' is already loaded")
+        var why = AddinLogSince(inst.Pid, started, "open failed");
+        return ToolResult.Ok(new { status = why is null ? "pending" : "failed", path, error = why, note = why is null ? $"not visible after {OpenWait.TotalSeconds:0} s; check ide_status" : null });
+    }
+
+    /// <summary>
+    /// Where the missing library might be (PLAN.md C3, improvement notes 19): files on disk that carry its LIBID (searched
+    /// by the file name the .vbp gives, in the project folder, SysWOW64 and the roots) and registered libraries with a
+    /// similar name, which are other libraries (another version or edition), not substitutes.
+    /// </summary>
+    private string Hints(Core.Files.MissingDependency m, Core.Files.VbpFile vbp)
+    {
+        var parts = m.Raw.Split('#');
+        string fileName = m.Kind == "control" ? m.Name : parts.Length >= 4 ? Path.GetFileName(parts[3]) : "";
+        var folders = new List<(string, bool)> { (Path.GetDirectoryName(vbp.Path)!, true), (Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "SysWOW64"), false) };
+        if (m.Kind == "reference" && parts.Length >= 4 && Path.GetDirectoryName(parts[3]) is { Length: > 0 } hintDir) folders.Add((hintDir, false));
+        folders.AddRange(Roots.Select(r => (r, true)));
+        var files = Core.Files.LibraryLookup.FilesWithLib(m.LibId, [fileName], folders);
+        var similar = Core.Files.LibraryLookup.Similar(files.Select(x => x.Name).Append(fileName).Append(m.Name), Core.Files.TypeLibRegistry.All(), m.LibId);
+        var text = "";
+        if (files.Count > 0) text += $" [on disk with this library, not registered: {string.Join(", ", files.Take(3).Select(x => $"{x.Path} (v{x.Major}.{x.Minor})"))}: com_register it]";
+        if (similar.Count > 0) text += $" [registered libraries with a similar name, but a different library: {string.Join(", ", similar.Take(3).Select(t => $"{t.Description} v{t.Major}.{t.Minor} ({Path.GetFileName(t.Win32Path ?? "")})"))}]";
+        return text;
+    }
+
+    private static string Describe(Core.Files.MissingDependency m)
+        => $"{m.Name} ({m.LibId.ToString("B").ToUpperInvariant()} v{m.Major}" + (m.OtherVersions.Count > 0 ? $"; registered: v{string.Join(", v", m.OtherVersions)}" : "") + ")";
+
+    /// <summary>The .log files VB6 wrote next to the project's forms while loading (e.g. "Cannot load control ...; license not found").</summary>
+    private static object[] LoadLogsSince(Core.Files.VbpFile vbp, DateTime since)
+    {
+        var dirs = vbp.Members.Select(m => Path.GetDirectoryName(m.FullPath)).OfType<string>().Append(Path.GetDirectoryName(vbp.Path)!).Distinct(StringComparer.OrdinalIgnoreCase);
+        var logs = new List<object>();
+        foreach (var d in dirs)
+        {
+            try
+            {
+                foreach (var log in Directory.EnumerateFiles(d, "*.log").Where(l => File.GetLastWriteTime(l) >= since.AddSeconds(-2)).Take(10))
+                    logs.Add(new { file = log, lines = Core.Vb1252.Encoding.GetString(File.ReadAllBytes(log)).Replace("\r\n", "\n").Split('\n').Where(l => l.Trim().Length > 0).Take(20) });
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+        return logs.ToArray();
+    }
+
+    /// <summary>The newest add-in log line of this IDE since <paramref name="since"/> containing <paramref name="marker"/>, or null.</summary>
+    private static string? AddinLogSince(int pid, DateTime since, string marker)
+    {
+        var file = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "vb6mcp", "addin.log");
+        try
+        {
+            using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            if (fs.Length > 256 * 1024) fs.Seek(-256 * 1024, SeekOrigin.End);
+            var tail = new StreamReader(fs).ReadToEnd().Split('\n');
+            string tag = $"[{pid}] ";
+            foreach (var line in tail.Reverse())
+            {
+                if (!line.Contains(tag) || !line.Contains(marker, StringComparison.OrdinalIgnoreCase)) continue;
+                if (line.Length >= 19 && DateTime.TryParse(line[..19], System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var t) && t < since.AddSeconds(-2)) return null;
+                return line[(line.IndexOf(tag, StringComparison.Ordinal) + tag.Length)..].Trim();
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        return null;
     }
 
     private static bool SamePath(string a, string b)
@@ -270,6 +467,8 @@ public sealed partial class IdeTools(IIdeEnvironment env)
         var live = _env.Scan().Live;
         if (a.Int("pid") is int pid)
             return live.FirstOrDefault(i => i.Pid == pid) ?? throw new ToolException($"no VB6 IDE with the add-in has pid {pid}. Running: {Pids(live)}");
+        if (live.Count > 1 && live.Where(i => OwnerOf(i.Pid) is { } o && IdeOwnership.IsMe(o)).ToList() is { Count: 1 } mine)
+            return mine[0];   // several IDEs, exactly one of them this session's: that one (A9)
         return live.Count switch
         {
             0 => throw new ToolException("no VB6 IDE with the vb6-mcp add-in is running (start VB6 and check Add-Ins > Add-In Manager)"),

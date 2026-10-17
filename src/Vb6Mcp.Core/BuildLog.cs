@@ -7,7 +7,8 @@ namespace Vb6Mcp.Core;
 /// An error from a VB6 /make log. <see cref="Line"/> is 1-based in the code as the IDE shows it
 /// (without the hidden header and Attribute lines), like code_read; null when the error has no location.
 /// <see cref="Kind"/>: "compile", "compatibility" (binary compatibility break, with <see cref="Class"/>
-/// and <see cref="Member"/>), or "other".
+/// and <see cref="Member"/>), "load" (VB couldn't load a form or control: <see cref="File"/> is the <c>.log</c> VB wrote
+/// next to it, whose lines the build tool adds), or "other".
 /// </summary>
 public sealed record BuildError(string Kind, string? File, int? Line, string Message, string? Class = null, string? Member = null);
 
@@ -46,6 +47,9 @@ public static partial class BuildLog
                 errors.Add(new BuildError("compile", m.Groups["file"].Value, zeroBased + 1, m.Groups["msg"].Value.Trim()));
                 continue;
             }
+            // "Errors during load. Refer to 'D:\x\frmMain.log' for details" (spike 27: a licensed control missing)
+            var load = LoadLog().Match(line);
+            if (load.Success) { errors.Add(new BuildError("load", load.Groups["file"].Value, null, line)); continue; }
             var c = Compat().Match(line);
             if (c.Success) { errors.Add(new BuildError("compatibility", null, null, line, c.Groups["cls"].Value, c.Groups["member"].Value)); continue; }
             if (!errors.Any(e => e.Message == line)) errors.Add(new BuildError("other", null, null, line));
@@ -58,6 +62,9 @@ public static partial class BuildLog
 
     [GeneratedRegex(@"in File '(?<file>[^']+)', Line (?<line>\d+)\s*:\s*(?<msg>.*)$", RegexOptions.IgnoreCase)]
     private static partial Regex ErrorAt();
+
+    [GeneratedRegex(@"Refer to '(?<file>[^']+\.log)'", RegexOptions.IgnoreCase)]
+    private static partial Regex LoadLog();
 
     [GeneratedRegex(@"compatibility error.*?'(?<member>[^']+)' in the '(?<cls>[^']+)' (class|form|user control|module)", RegexOptions.IgnoreCase)]
     private static partial Regex Compat();

@@ -41,7 +41,7 @@ Public Function Dispatch(ByVal verb As String, args() As String) As String
     Case "CALLSTACK":  NeedArgs args, 0, 0: Dispatch = QueueCallStack(): Exit Function
     Case "LISTITEMS":  NeedArgs args, 1, 1: payload = ListItems(args(0))
     Case "LISTSTATE":  NeedArgs args, 1, 1: payload = AppListState(args(0))
-    Case "MAKE":       NeedArgs args, 1, 1: payload = MakeProject(args(0))
+    Case "MAKE":       NeedArgs args, 1, 2: payload = MakeProject(args(0), IIf(UBound(args) >= 1, args(UBound(args)), ""))
     Case "MAKESTATUS": NeedArgs args, 0, 0: payload = MakeStatus()
     Case "WRITES":     NeedArgs args, 1, 1: payload = WritesSince(CLng(Val(args(0))))
     Case "RELOAD":     NeedArgs args, 3, 3: Dispatch = QueueReload(args(0), args(1), args(2)): Exit Function
@@ -59,6 +59,11 @@ Public Function Dispatch(ByVal verb As String, args() As String) As String
     Case "TOOLBOX":    NeedArgs args, 2, 3: payload = AddToolbox(args)
     Case "REGSVR":     NeedArgs args, 2, 2: payload = RegisterFile(args(0), LCase$(args(1)))
     Case "REGSTATUS":  NeedArgs args, 1, 1: payload = RegsvrStatus(CLng(Val(args(0))))
+    Case "CLOSE":      NeedArgs args, 2, 2: Dispatch = QueueClose(args(0), args(1)): Exit Function
+    Case "COMPADD":    NeedArgs args, 3, 4: Dispatch = QueueAddComponent(args): Exit Function
+    Case "PRJGET":     NeedArgs args, 1, 1: payload = GetProjectProps(args(0))
+    Case "PRJSET":     NeedArgs args, 3, 3: payload = SetProjectProp(args(0), args(1), args(2))
+    Case "SAVECOMP":   NeedArgs args, 2, 3: Dispatch = QueueSaveComponent(args): Exit Function
     Case Else:         Err.Raise E_BADREQUEST, , "unknown verb " & verb
     End Select
     Dispatch = "OK" & US() & payload
@@ -563,9 +568,10 @@ End Function
 ' %LOCALAPPDATA%\vb6mcp\roots.txt (written by install-server.ps1) and contain no "..". The token is the
 ' real boundary (anything that can read it can already drive this IDE); the roots check is defense
 ' in depth, because an elevated /make registers components machine-wide (hard rule 8).
-Private Function MakeProject(ByVal vbp As String) As String
+Private Function MakeProject(ByVal vbp As String, ByVal defines As String) As String
     Dim logPath As String, pid As Long, p As Long, name As String
     If LCase$(Right$(vbp, 4)) <> ".vbp" Then Err.Raise E_BADREQUEST, , "not a .vbp: " & vbp
+    If Not ValidDefines(defines) Then Err.Raise E_BADREQUEST, , "defines must be name=number pairs separated by ':' (e.g. noterm=1:debug=0)"
     If InStr(vbp, "..") > 0 Or Mid$(vbp, 2, 2) <> ":\" Then Err.Raise E_BADREQUEST, , "the path must be absolute, without '..'"
     If Not UnderRoots(vbp) Then Err.Raise E_BADREQUEST, , vbp & " isn't under the workspace roots (" & RootsFile() & ")"
     If Len(Dir$(vbp)) = 0 Then Err.Raise E_NOTFOUND, , "project file not found: " & vbp
@@ -576,9 +582,33 @@ Private Function MakeProject(ByVal vbp As String) As String
     name = Left$(name, Len(name) - 4)
     EnsureDir BaseDir() & "\builds"
     logPath = BaseDir() & "\builds\" & Format$(Now, "yyyymmdd-hhnnss") & "-" & name & ".log"
-    pid = StartBuild(vbp, logPath)
+    pid = StartBuild(vbp, logPath, defines)
     If pid = 0 Then Err.Raise E_CONFLICT, , "VB6.EXE /make couldn't be started"
     MakeProject = pid & US() & logPath & US() & vbp
+End Function
+
+' Conditional compilation constants for /make /d (PLAN Phase 7 A4). They go on an elevated command line, so only
+' name=number pairs are accepted (letters, digits and _ in names; an optional minus and digits as values), joined by ':'.
+Private Function ValidDefines(ByVal defines As String) As Boolean
+    Dim parts() As String, i As Long, kv() As String, j As Long, ch As String
+    If Len(defines) = 0 Then ValidDefines = True: Exit Function
+    If Len(defines) > 200 Then Exit Function
+    parts = Split(defines, ":")
+    For i = 0 To UBound(parts)
+        kv = Split(parts(i), "=")
+        If UBound(kv) <> 1 Then Exit Function
+        If Len(kv(0)) = 0 Or Len(kv(1)) = 0 Then Exit Function
+        If Not (Left$(kv(0), 1) Like "[A-Za-z]") Then Exit Function
+        For j = 1 To Len(kv(0))
+            ch = Mid$(kv(0), j, 1)
+            If Not (ch Like "[A-Za-z0-9_]") Then Exit Function
+        Next
+        For j = 1 To Len(kv(1))
+            ch = Mid$(kv(1), j, 1)
+            If Not (ch Like "[0-9]" Or (j = 1 And ch = "-" And Len(kv(1)) > 1)) Then Exit Function
+        Next
+    Next
+    ValidDefines = True
 End Function
 
 ' args: path, r|u -> pid. Starts the 32-bit regsvr32 elevated (com_register / com_unregister, hard rule 13).

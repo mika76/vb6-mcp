@@ -12,27 +12,93 @@ namespace Vb6Mcp;
 /// </summary>
 public static class Hook
 {
-    /// <summary>Extensions of VB6 source and project files.</summary>
-    public static readonly string[] Extensions = [".bas", ".cls", ".frm", ".ctl", ".pag", ".dsr", ".dob", ".vbp", ".vbg"];
+    /// <summary>
+    /// Extensions of VB6 source and project files, plus the binary companions VB writes itself (.frx/.ctx/.pgx/.dsx/.dox:
+    /// a form's, control's, property page's, designer's or document's pictures and lists; .res: the resource file; .vbw: the
+    /// window layout). Editing a companion corrupts it; there is no tool for that on purpose (hard rule 2).
+    /// </summary>
+    public static readonly string[] Extensions = [".bas", ".cls", ".frm", ".ctl", ".pag", ".dsr", ".dob", ".vbp", ".vbg",
+                                                  ".frx", ".ctx", ".pgx", ".dsx", ".dox", ".res", ".vbw"];
+
+    /// <summary>Why a companion file is refused (it isn't source: the tools change it through VB).</summary>
+    public const string CompanionReason =
+        "This is a binary file VB6 writes itself (.frx/.ctx/.pgx/.dsx/.dox: a form's or control's pictures and lists; .res: resources; .vbw: window layout). " +
+        "Don't edit or replace it: change the form through the vb6 tools (form_set_property with @picture:<file> for pictures, List/ItemData for lists), and VB rewrites it on save.";
 
     public const string Reason =
         "This is a VB6 source file (Windows-1252, hidden header and Attribute lines, possibly open in the VB6 IDE). " +
         "Don't use Edit/Write on it: use the vb6 MCP tools. Project open in the IDE: code_replace_lines, code_insert, proc_replace " +
         "(then project_save when the user agrees). Closed project: file_read + file_replace_lines (it edits the IDE instead if the file is open there).";
 
-    /// <summary>Reads the hook input (JSON on stdin); returns 2 to block, 0 to allow. Malformed input is allowed (a hook must not break other work).</summary>
-    public static int Run(TextReader stdin, TextWriter stderr)
+    /// <summary>The MCP tool name of debug_eval as Claude Code passes it to hooks (server registered as "vb6").</summary>
+    public const string EvalTool = "mcp__vb6__debug_eval";
+
+    /// <summary>The tools the hook is registered for: file edits, shell commands (ShellPolicy) and debug_eval (EvalPolicy).</summary>
+    public const string Matcher = "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell|" + EvalTool;
+
+    /// <summary>
+    /// Reads the hook input (JSON on stdin); returns 2 to block, 0 otherwise. Malformed input is allowed (a hook must not break
+    /// other work).
+    /// - Edit/Write on VB6 source files: blocked (there is always a right tool for it).
+    /// - Bash/PowerShell commands ShellPolicy flags, and debug_eval with a side effect and allow_side_effect=true: the user is
+    ///   asked (owner, 2026-10-17: ask rather than refuse), by writing permissionDecision "ask" to stdout. Without a person to
+    ///   answer (headless runs) Claude Code doesn't run the tool. VB6MCP_SHELL_GUARD=off skips the shell checks.
+    /// </summary>
+    public static int Run(TextReader stdin, TextWriter stderr, Func<string, string?>? env = null, TextWriter? stdout = null)
     {
-        string? path;
+        env ??= Environment.GetEnvironmentVariable;
+        stdout ??= Console.Out;
+        string? path, tool, command, expression; bool allow;
         try
         {
             var input = JsonNode.Parse(stdin.ReadToEnd());
+            tool = input?["tool_name"]?.GetValue<string>();
             path = input?["tool_input"]?["file_path"]?.GetValue<string>();
+            command = input?["tool_input"]?["command"]?.GetValue<string>();
+            expression = input?["tool_input"]?["expression"]?.GetValue<string>();
+            allow = input?["tool_input"]?["allow_side_effect"] is JsonValue v && v.TryGetValue(out bool b) && b;
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException) { return 0; }
+        if (tool is "Bash" or "PowerShell")
+        {
+            if (string.Equals(env("VB6MCP_SHELL_GUARD"), "off", StringComparison.OrdinalIgnoreCase) || command is null) return 0;
+            if (ShellPolicy.Check(command) is not { } why) return 0;
+            return Ask(stdout, "vb6-mcp security policy: " + why + " Allow it only if you asked for this.");
+        }
+        if (tool == EvalTool)
+        {
+            // without allow_side_effect the server refuses on its own and says how to ask; nothing to decide here
+            if (!allow || expression is null || Tools.EvalPolicy.SideEffect(expression) is not { } effect) return 0;
+            return Ask(stdout, $"vb6-mcp: the agent wants to run an expression with a side effect in the VB6 IDE (with its administrator rights): {effect}. Expression: ? {expression}");
+        }
         if (path is null || !Blocks(path)) return 0;
-        stderr.WriteLine(Reason);
+        stderr.WriteLine(Path.GetExtension(path).ToLowerInvariant() is ".frx" or ".ctx" or ".pgx" or ".dsx" or ".dox" or ".res" or ".vbw" ? CompanionReason : Reason);
         return 2;
+    }
+
+    /// <summary>Claude Code's PreToolUse "ask" answer: the user sees the reason and approves or declines.</summary>
+    private static int Ask(TextWriter stdout, string reason)
+    {
+        stdout.WriteLine(new JsonObject
+        {
+            ["hookSpecificOutput"] = new JsonObject { ["hookEventName"] = "PreToolUse", ["permissionDecision"] = "ask", ["permissionDecisionReason"] = reason },
+        }.ToJsonString());
+        return 0;
+    }
+
+    /// <summary>
+    /// Whether the hook is installed in the user's settings and covers debug_eval: only then can an approved
+    /// allow_side_effect be trusted, because the user was asked (an agent could pass the flag itself otherwise).
+    /// </summary>
+    public static bool GuardsEval(string? settingsPath = null)
+    {
+        try
+        {
+            var path = settingsPath ?? UserSettingsPath;
+            if (!File.Exists(path) || JsonNode.Parse(File.ReadAllText(path))?["hooks"]?["PreToolUse"] is not JsonArray pre) return false;
+            return pre.OfType<JsonObject>().Any(e => IsOurs(e) && (e["matcher"]?.GetValue<string>() ?? "").Split('|').Contains(EvalTool));
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException or InvalidOperationException) { return false; }
     }
 
     public static bool Blocks(string path) => Extensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
@@ -41,7 +107,7 @@ public static class Hook
 
     /// <summary>
     /// Adds (or updates) the hook in a Claude Code settings file: hooks.PreToolUse gets one entry with the
-    /// matcher "Edit|Write|MultiEdit" running "&lt;exe&gt; hook". Other settings and other hooks are kept; a
+    /// matcher <see cref="Matcher"/> running "&lt;exe&gt; hook". Other settings and other hooks are kept; a
     /// previous vb6mcp entry is replaced. A backup of the file is written first.
     /// </summary>
     public static int Install(string settingsPath, string exe, TextWriter output)
@@ -61,7 +127,7 @@ public static class Hook
         foreach (var entry in pre.OfType<JsonObject>().Where(IsOurs).ToList()) pre.Remove(entry);
         pre.Add(new JsonObject
         {
-            ["matcher"] = "Edit|Write|MultiEdit",
+            ["matcher"] = Matcher,
             ["hooks"] = new JsonArray(new JsonObject { ["type"] = "command", ["command"] = $"\"{exe}\" hook" }),
         });
         Directory.CreateDirectory(Path.GetDirectoryName(settingsPath)!);

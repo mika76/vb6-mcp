@@ -23,6 +23,7 @@ Public Function QueueDesign(args() As String) As String
     Case "SET":      If n <> 7 Then Err.Raise vbObjectError + 400, , "SET takes project, component, control, property, value"
     Case "ADD":      If n <> 8 Then Err.Raise vbObjectError + 400, , "ADD takes project, component, progId, name, container, geometry"
     Case "REMOVE":   If n <> 5 Then Err.Raise vbObjectError + 400, , "REMOVE takes project, component, control"
+    Case "SHOW":     If n < 4 Or n > 5 Then Err.Raise vbObjectError + 400, , "SHOW takes project, component [, max]"
     Case Else:       Err.Raise vbObjectError + 400, , "unknown designer operation " & args(1)
     End Select
     If Not InDesignMode() Then Err.Raise vbObjectError + 409, , "the IDE isn't in design mode; the designer can only be used in design mode"
@@ -83,6 +84,7 @@ Public Sub RunDesign(f() As String)
     Case "SET":      payload = SetProp(Target(cmp, frm, f(5)), f(6), f(7))
     Case "ADD":      payload = AddControl(frm, f(5), f(6), f(7), f(8))
     Case "REMOVE":   payload = RemoveControl(frm, f(5))
+    Case "SHOW":     payload = ShowDesigner(cmp, UBound(f) >= 5)
     End Select
     SetResult f(1), "ok" & US() & IIf(cmp.IsDirty, "1", "0") & US() & payload
     LogLine "designer " & f(2) & " " & f(3) & "." & f(4) & " done"
@@ -96,6 +98,15 @@ End Sub
 ' properties are VBComponent.Properties, Phase 5 live test).
 Private Function Target(ByVal cmp As VBIDE.VBComponent, ByVal frm As Object, ByVal spec As String) As Object
     If StrComp(spec, cmp.Name, vbTextCompare) = 0 Then Set Target = cmp Else Set Target = FindCtl(frm, spec)
+End Function
+
+' Opens (or brings forward) a component's designer window, for form_screenshot. With maximize, the designer fills the
+' IDE's MDI area (vbext_ws_Maximize), so as much of a large form as possible is visible for the capture. Returns the
+' designer window's own caption, so the server finds exactly this window (a name alone is ambiguous across projects).
+Private Function ShowDesigner(ByVal cmp As VBIDE.VBComponent, ByVal maximize As Boolean) As String
+    cmp.Activate
+    If maximize Then cmp.DesignerWindow.WindowState = vbext_ws_Maximize
+    ShowDesigner = cmp.DesignerWindow.Caption
 End Function
 
 ' The designer object (VBForm) of a form, UserControl or property page.

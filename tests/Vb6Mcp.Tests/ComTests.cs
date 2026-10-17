@@ -1,3 +1,4 @@
+using Vb6Mcp.Tools;
 using Vb6Mcp.Core;
 using Vb6Mcp.Core.Files;
 
@@ -21,6 +22,34 @@ public static class ComTests
         Assert.True(d.Info.LibId == c.TypeLib && d.Types.Any(t => t.Kind == "coclass" && t.Guid == clsid), "coclass in the file's typelib");
         Assert.True(ComRegistry.FindProgIds("Scripting.Dict").Any(p => p.Clsid == clsid), "found by search");
         Assert.True(ComRegistry.ClsidOf("No.Such.ProgId.vb6mcp") is null, "unknown ProgID");
+    }
+
+    /// <summary>com_register's verdict (improvement notes 18): a class nothing registers doesn't fail it; one registered elsewhere does.</summary>
+    [Test]
+    public static void RegistrationVerdict()
+    {
+        Assert.True(WorkspaceTools.Verified(false, 0, allHere: false, anyHere: true, libHere: true, elsewhere: 0, missing: 1, classes: 6), "CapPRO: 5 of 6, the sixth unregistered anywhere");
+        Assert.True(!WorkspaceTools.Verified(false, 0, false, true, true, elsewhere: 1, missing: 0, classes: 6), "a class pointing at another file");
+        Assert.True(!WorkspaceTools.Verified(false, 0, false, false, libHere: false, 0, 0, 2), "typelib not registered here");
+        Assert.True(!WorkspaceTools.Verified(false, 5, false, true, true, 0, 1, 6), "regsvr32 failed");
+        Assert.True(!WorkspaceTools.Verified(false, 0, false, true, true, 0, missing: 3, classes: 3), "no class registered at all");
+        Assert.True(WorkspaceTools.Verified(true, 0, false, anyHere: false, false, 0, 0, 3) && !WorkspaceTools.Verified(true, 0, false, anyHere: true, false, 0, 0, 3), "unregister");
+    }
+
+    /// <summary>
+    /// Default members (improvement notes 14): Dictionary's is Item; MSComm makes the hidden alias _CommPort the default,
+    /// which is reported as the visible CommPort.
+    /// </summary>
+    [Test]
+    public static void DefaultMembersAreMarked()
+    {
+        var win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        var text = TypeLibDescriber.Render(TypeLibDescriber.Describe(Path.Combine(win, "SysWOW64", "scrrun.dll")), "Dictionary");
+        Assert.True(text.Split('\n').Any(l => l.StartsWith("Class Dictionary") && l.Contains("default member: Item")), text);
+        Assert.True(text.Split('\n').Any(l => l.Contains("Property Get Item(") && l.Contains("' default member")), "the member itself is marked: " + text);
+        var comm = Path.Combine(win, "SysWOW64", "MSCOMM32.OCX");
+        if (File.Exists(comm))
+            Assert.True(TypeLibDescriber.Render(TypeLibDescriber.Describe(comm)).Contains("default member: CommPort (as hidden _CommPort)"), "MSComm");
     }
 
     /// <summary>

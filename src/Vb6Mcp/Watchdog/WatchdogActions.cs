@@ -144,6 +144,25 @@ public sealed class WatchdogActions(Action<string> log, string shotsDir) : IWatc
         return "pressed";
     }
 
+    /// <summary>
+    /// Asks a VB6 IDE to close, as File > Exit or the window's close box would (ide_quit, PLAN.md C7): WM_CLOSE to its main
+    /// window. Posting needs elevation (spike 10), which is why this is a watchdog verb. VB still asks about unsaved changes;
+    /// the server only sends it when nothing is unsaved, and reports any dialog that appears.
+    /// </summary>
+    public string Quit(int pid)
+    {
+        // VB6 has two top-level windows: the MDI frame (wndclass_desked_gsk) and IDEOwner, which owns it and carries the
+        // caption. WM_CLOSE to the frame destroyed only the frame; the process stayed alive under IDEOwner, with no UI
+        // (tested 2026-10-17). So the close goes to IDEOwner, the frame only if there is none.
+        long owner = IdeWindows.FindTopLevelWindow(pid, "IDEOwner"), target = owner != 0 ? owner : IdeWindows.MainWindow(pid);
+        if (target == 0) throw new WatchdogRefusedException($"VB6 {pid} has no IDE window");
+        PostMessage(new IntPtr(target), WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+        log($"WM_CLOSE posted to {target:X} ({(owner != 0 ? "IDEOwner" : "main window")}) of VB6 {pid}");
+        return "close-posted";
+    }
+
+    private const uint WM_CLOSE = 0x0010;
+
     /// <summary>Ends a VB6 process. Last resort; the server only asks with force (hard rule 12).</summary>
     public string Kill(int pid)
     {
@@ -191,6 +210,55 @@ public sealed class WatchdogActions(Action<string> log, string shotsDir) : IWatc
         }
         catch (Win32Exception ex) { throw new WatchdogRefusedException("VB6 didn't start: " + ex.Message); }
     }
+
+    /// <summary>
+    /// Starts VB6.EXE /make for a closed project (build_make with no IDE running, PLAN.md D1). An elevated build is a
+    /// security boundary (it registers what it builds), so the same checks as the add-in's MAKE apply (hard rule 8): an
+    /// absolute .vbp without "..", under the roots in the admin-controlled roots.txt next to this exe (installed) or the
+    /// development roots file, and /d constants as name=integer pairs only. Returns pid, log path and project.
+    /// </summary>
+    public string Make(string vbp, string defines)
+    {
+        if (!Path.IsPathFullyQualified(vbp) || vbp.Contains("..", StringComparison.Ordinal) || !vbp.EndsWith(".vbp", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("the project must be the absolute path of a .vbp, without '..'");
+        if (!ValidDefines(defines)) throw new ArgumentException("defines must be name=integer pairs separated by ':' (e.g. noterm=1:debug=0)");
+        var roots = Roots();
+        var full = Path.GetFullPath(vbp);
+        if (!roots.Any(r => full.StartsWith(r.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)))
+            throw new WatchdogRefusedException($"{full} isn't under the workspace roots ({RootsFile()})");
+        if (!File.Exists(full)) throw new WatchdogRefusedException("project file not found: " + full);
+        var exe = Vb6Install.FindExe() ?? throw new WatchdogRefusedException("VB6.EXE not found");
+        var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "vb6mcp", "builds");
+        Directory.CreateDirectory(dir);
+        var logPath = Path.Combine(dir, $"{DateTime.Now:yyyyMMdd-HHmmss}-{Path.GetFileNameWithoutExtension(full)}.log");
+        var psi = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = Path.GetDirectoryName(full)! };
+        psi.Arguments = $"/make \"{full}\" /out \"{logPath}\"" + (defines.Length > 0 ? " /d " + defines : "");
+        try
+        {
+            using var p = Process.Start(psi) ?? throw new WatchdogRefusedException("VB6.EXE /make didn't start");
+            log($"build started, pid {p.Id}: {full}{(defines.Length > 0 ? " /d " + defines : "")}");
+            return string.Join(Wire.US, p.Id.ToString(CultureInfo.InvariantCulture), logPath, full);
+        }
+        catch (Win32Exception ex) { throw new WatchdogRefusedException("VB6.EXE /make didn't start: " + ex.Message); }
+    }
+
+    /// <summary>The roots file the add-in reads too: next to this exe when installed (Program Files, admin-only), else the development one.</summary>
+    internal static string RootsFile()
+    {
+        var local = Path.Combine(AppContext.BaseDirectory, "roots.txt");
+        return File.Exists(local) ? local : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "vb6mcp", "roots.txt");
+    }
+
+    private static IReadOnlyList<string> Roots()
+    {
+        var file = RootsFile();
+        if (!File.Exists(file)) return [];
+        return File.ReadAllLines(file, Core.Vb1252.Encoding).Select(l => l.Trim()).Where(l => l.Length > 2 && Path.IsPathFullyQualified(l)).Select(l => Path.GetFullPath(l)).ToList();
+    }
+
+    /// <summary>name=integer pairs joined by ':', as the add-in's ValidDefines (they go on an elevated command line).</summary>
+    public static bool ValidDefines(string defines)
+        => defines.Length == 0 || (defines.Length <= 200 && defines.Split(':').All(p => System.Text.RegularExpressions.Regex.IsMatch(p, @"^[A-Za-z][A-Za-z0-9_]*=-?[0-9]+$")));
 
     private static int GetParentPid()
     {

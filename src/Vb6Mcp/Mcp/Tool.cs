@@ -15,6 +15,16 @@ public sealed class Tool(string name, string description, JsonObject inputSchema
         ["inputSchema"] = inputSchema.DeepClone(),
     };
 
+    /// <summary>The same tool with <paramref name="check"/> run before the handler (it throws ToolException to refuse).</summary>
+    public Tool Guarded(Action<JsonObject> check) => new(Name, description, inputSchema, (a, ct) => { check(a); return handler(a, ct); });
+
+    /// <summary>
+    /// The same tool with <paramref name="before"/> run first (it can't refuse) and its value handed to <paramref name="after"/>
+    /// together with the result, also for failed calls (ide crash notices ride along with whatever the agent called next).
+    /// </summary>
+    public Tool Around<T>(Func<T> before, Func<T, ToolResult, ToolResult> after)
+        => new(Name, description, inputSchema, async (a, ct) => { var state = before(); return after(state, await InvokeAsync(a, ct).ConfigureAwait(false)); });
+
     /// <summary>Runs the handler. Expected failures (<see cref="ToolException"/>) and unexpected ones become isError results.</summary>
     public async Task<ToolResult> InvokeAsync(JsonObject args, CancellationToken ct)
     {
@@ -51,6 +61,57 @@ public sealed class ToolResult
         r._content.Add(new JsonObject { ["type"] = "text", ["text"] = JsonSerializer.Serialize(info, McpServer.Json) });
         return r;
     }
+
+    /// <summary>
+    /// This result with one more field: added to the JSON object of the last text item, or (for an error or plain text)
+    /// appended as a line. Used for cross-cutting notes such as reloads applied before a compile.
+    /// </summary>
+    public ToolResult With(string key, JsonNode? value)
+    {
+        if (value is null || _content.Count == 0 || _content[^1] is not JsonObject last || (string?)last["type"] != "text") return this;
+        string text = (string?)last["text"] ?? "";
+        if (!IsError && text.StartsWith('{') && JsonNode.Parse(text) is JsonObject obj)
+        {
+            obj[key] = value;
+            last["text"] = obj.ToJsonString(McpServer.Json);
+        }
+        else last["text"] = text + "\n" + key + ": " + value.ToJsonString();
+        return this;
+    }
+
+    /// <summary>
+    /// batch_run's result: each call's content in order, its text items prefixed with a label ("[2] app_click: ...") and
+    /// errors marked, images kept as they are, then a JSON summary. isError when any call failed.
+    /// </summary>
+    public static ToolResult Batch(IEnumerable<(string Label, ToolResult Result)> items, object summary, int? clip = null)
+    {
+        var r = new ToolResult();
+        bool anyError = false;
+        var list = items.ToList();
+        for (int i = 0; i < list.Count; i++)
+        {
+            var (label, item) = list[i];
+            anyError |= item.IsError;
+            // clip: successful calls other than the last one keep only the start of their text (batch_run compact)
+            bool cut = clip is int max && !item.IsError && i < list.Count - 1;
+            foreach (var c in item._content)
+            {
+                var copy = c!.DeepClone().AsObject();
+                if ((string?)copy["type"] == "text")
+                {
+                    var text = (string?)copy["text"] ?? "";
+                    if (cut && text.Length > clip!.Value) text = text[..clip.Value] + $"... ({text.Length} chars, cut by compact)";
+                    copy["text"] = $"{label}{(item.IsError ? " (error)" : "")}: {text}";
+                }
+                r._content.Add(copy);
+            }
+        }
+        r._content.Add(new JsonObject { ["type"] = "text", ["text"] = JsonSerializer.Serialize(summary, McpServer.Json) });
+        return anyError ? new ToolResult(r._content, true) : r;
+    }
+
+    private ToolResult() { }
+    private ToolResult(JsonArray content, bool isError) { _content = content; IsError = isError; }
 
     public static ToolResult Fail(string message)
     {

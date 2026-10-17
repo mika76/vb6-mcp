@@ -10,7 +10,9 @@
 #
 # -WatchdogOnly: only republish the watchdog and start it (elevated, like this shell). For when the
 # add-in can't be reloaded, e.g. while an IDE is stuck: the add-in starts the watchdog only when it loads.
-param([switch]$WatchdogOnly)
+# -Stay (with -WatchdogOnly): keep the watchdog running with no VB6 open, so Claude sessions can start their own IDEs
+# through it (ide_launch) without a UAC prompt each time.
+param([switch]$WatchdogOnly, [switch]$Stay)
 $ErrorActionPreference = 'Stop'
 $root   = Split-Path -Parent $PSScriptRoot
 $proj   = Join-Path $root 'addin\VB6McpBridge\VB6McpBridge.vbp'
@@ -44,8 +46,8 @@ function Publish-Watchdog {
 
 if ($WatchdogOnly) {
     $exe = Publish-Watchdog
-    Start-Process -FilePath $exe -ArgumentList 'watchdog' -WindowStyle Hidden
-    Write-Host 'Watchdog started (log: %LOCALAPPDATA%\vb6mcp\watchdog.log)'
+    Start-Process -FilePath $exe -ArgumentList $(if ($Stay) { 'watchdog', '--stay' } else { 'watchdog' }) -WindowStyle Hidden
+    Write-Host "Watchdog started$(if ($Stay) { ' (stays running without VB6)' }) (log: %LOCALAPPDATA%\vb6mcp\watchdog.log)"
     return
 }
 

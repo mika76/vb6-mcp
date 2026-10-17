@@ -73,7 +73,7 @@ installer/              install.ps1 / uninstall.ps1 / INSTALL.txt, shipped in th
 5. **Never block the IDE's UI thread.** Add-in methods are short: no `DoEvents` loops, no sleeps, no modal UI, no blocking socket calls (use `WSAAsyncSelect` only). Builds, scanning, diffing and merging belong in the MCP server or in child processes.
 6. **Every bridge call has a timeout.** On timeout, return a structured "IDE busy" error with the reason (run mode, modal dialog). Never hang an MCP request.
 7. **Add-in code: `On Error` in every public method.** Return structured errors. An add-in crash kills the user's IDE and loses their unsaved work.
-8. **The add-in is an elevated TCP endpoint, so treat it as a security boundary.** Bind `127.0.0.1` only (never `0.0.0.0`), random port, a 128-bit random token per instance, and the discovery file in `%LOCALAPPDATA%\vb6mcp\instances\` with a user-only ACL. Reject any request without the token. Verbs are a fixed list, with no generic "run command" or "run process". Every path is checked against the configured workspace roots. Registration, builds, process launches and **all synthetic UI input** (`app_*` actions, `ui_*`, `debug_eval`) go to the audit log. UI input goes only to windows of the IDE's own process, of processes the add-in launched, or of compiled programs the server started with `exe_run` (those run at the server's own integrity, so no boundary is crossed), unless a tool explicitly says otherwise. Don't add verbs that weaken this without saying so in the change.
+8. **The add-in is an elevated TCP endpoint, so treat it as a security boundary.** Bind `127.0.0.1` only (never `0.0.0.0`), random port, a 128-bit random token per instance, and the discovery file in `%LOCALAPPDATA%\vb6mcp\instances\` with a user-only ACL. Reject any request without the token. Verbs are a fixed list, with no generic "run command" or "run process". Every path is checked against the configured workspace roots. Registration, builds, process launches and **all synthetic UI input** (`app_*` actions, `ui_*`, `debug_eval`) go to the audit log. UI input goes only to windows of the IDE's own process, of processes the add-in launched, or of compiled programs the server started with `exe_run` (those run at the server's own integrity, so no boundary is crossed), unless a tool explicitly says otherwise. Don't add verbs that weaken this without saying so in the change. `debug_eval` refuses expressions with side effects unless `VB6MCP_EVAL=open` (PLAN.md E5), and the Claude Code hook refuses the agent's shell commands that would get around the tools: database writes, VB6 source writes, registration, ending VB6 (E5b).
 9. **Destructive actions need explicit parameters**, never defaults. That covers dismissing or answering dialogs, `com_register`, removing components, `sync_take_*`, project reloads and `run_end` while the user is debugging.
 10. **Line limits**: at most 1023 chars per line, at most 24 `_` continuations. Validate before inserting code.
 11. **Don't hijack the user's session.** Debug and UI tools act on what the user already has open; they don't silently start, stop or reset a session the user is in. Report the current mode before acting, and require `force` to end a run the agent didn't start.
@@ -97,7 +97,7 @@ installer/              install.ps1 / uninstall.ps1 / INSTALL.txt, shipped in th
 ```powershell
 dotnet build src/Vb6Mcp -c Debug
 dotnet run --project tests/Vb6Mcp.Tests              # unit tests
-dotnet run --project tests/Vb6Mcp.Tests -- --cat Build,IDE
+dotnet run --project tests/Vb6Mcp.Tests -- --cat Build,IDE,Launch
 ```
 
 - **Running in development**: the MCP server runs **non-elevated** (`dotnet run --project src/Vb6Mcp`, or registered in Claude Code). VB6 runs elevated with the add-in loaded. They find each other through the discovery files.
@@ -107,6 +107,7 @@ dotnet run --project tests/Vb6Mcp.Tests -- --cat Build,IDE
   - Unit tests (no category) need neither VB6 nor elevation.
   - `Build` tests shell out to `VB6.EXE`.
   - `IDE` tests need a running elevated IDE with the fixture loaded and the add-in connected.
+  - `Launch` tests need the elevated watchdog running (`scripts\build-addin.ps1 -WatchdogOnly -Stay`): they start their own IDE through it (no UAC prompt), and quit it.
   - The last two run only when requested.
 - **Prefer outcome tests**: build a fixture and check the binary and log; edit through the bridge and check the IDE's text and the bytes on disk. Don't assert on internals.
 
@@ -130,6 +131,7 @@ dotnet run --project tests/Vb6Mcp.Tests -- --cat Build,IDE
   - `Add` takes the **`.frm` class name** (`MSComctlLib.ListView`) and returns **Nothing** (no error) for anything else, including the registered ProgID. `AddToolboxProgID` wants the registered ProgID (`MSComctlLib.ListViewCtrl.2`). VBIDE can't list or remove toolbox components.
   - A form isn't a `VBControl`: its properties are `VBComponent.Properties`.
   - Designer access is deferred, because a UserControl's own code runs when its properties are read or set (hard rule 14).
+- **Designer windows** (spike 28): an open designer is `MDIClient` > `DesignerWindow "frmMain (Form)"` (no project prefix, unlike code windows) > `ThunderForm`. Take the caption from `DesignerWindow.Caption`; don't build it (it also changes with the window state: maximized drops the project prefix). A form bigger than the designer: post `WM_VSCROLL`/`WM_HSCROLL` to the `DesignerWindow` and stitch captures; `PrintWindow` of the `ThunderForm` alone is misaligned. Opening a designer the first time runs its UserControls' code, which can show a modal box (a production project: "Login Error") that holds the deferred op until answered.
 - **`References.AddFromFile` on an unregistered DLL** adds it (empty `FullPath`/`Description`) without registering it. The saved line carries the file's typelib LIBID and a path relative to the `.vbp` (spike 23).
 - **COM** (spike 24):
   - OLE caches loaded typelibs, so concurrent reads share one COM object. Serialize typelib reads (`TypeLibInfo.ComLock`) and never `Marshal.ReleaseComObject` them, or another thread's read fails ("separated from its underlying RCW").
@@ -148,6 +150,10 @@ dotnet run --project tests/Vb6Mcp.Tests -- --cat Build,IDE
   - A killed IDE leaves them until VB6.EXE next starts.
   - A reference to an **unregistered** typelib still works if the `.vbp` hint path exists: the hint is a fallback.
   - A broken reference has no readable `Name`, though Guid and version are readable. `References.Remove` on it fails ("Object library not registered") until its typelib is registered. Registering a file carrying it heals the reference by itself.
+- **Designer changes VB doesn't count** (spike 29): setting only an object member (`Font.Bold`) through VBIDE leaves `IsDirty` False, and Save Project skips the form: the change is lost. Setting a scalar (the form's `Tag` to itself) makes VB count it. A form's `Font` doesn't change existing controls (through VBIDE). A CommandButton shows `BackColor` only with `Style = 1` and has no `ForeColor` (438).
+- **`IsDirty = False` saves** (spike 31): setting `VBComponent.IsDirty` (or `VBProject.IsDirty`) to False writes the component to disk; it is not a way to drop changes. `VBProjects.Remove` also saves changed components, silently: VBIDE can't close without saving. Discard = snapshot the files, close, restore them. `VBComponent.SaveAs <own path>` saves one component without the `.vbp`. A component that was never saved makes File > Save Project stop at a Save File As dialog.
+- **A run marks forms dirty** (spike 32): starting and ending the program in the IDE left the forms it loaded `IsDirty = True` with nothing changed; saving them wrote byte-identical files. A build from disk then refuses ("unsaved changes"). The server reports them as `markedChangedByRun`; it doesn't save them itself.
+- **`WithEvents` attributes** (spike 30): VB writes `Attribute x.VB_VarHelpID = -1` itself when it saves a `WithEvents` declaration, so a disk edit may drop it. Other hidden attributes (`VB_UserMemId`, `VB_Description`) can't be recreated and must stay after their line.
 - **Designer lists and pictures** (spike 25):
   - `Property.IndexedValue(j)` past the end returns ""/0, no error. The end of a List is its last non-empty item.
   - `Set Property.Object = LoadPicture(file)` sets Picture/Icon; VB writes the `.frx`.
@@ -155,6 +161,7 @@ dotnet run --project tests/Vb6Mcp.Tests -- --cat Build,IDE
 - `VBE.Windows(i).HWnd` is always 0. Find IDE windows by enumerating child windows of the main window (e.g. Immediate = `VbaWindow` captioned "Immediate").
 - Debug command Ids: Start/Continue 186, Break 189, End 228, Restart 515, Step Into/Over/Out 188/194/2559, Run To Cursor 1811, Toggle Breakpoint 51, Clear All Breakpoints 579, Copy 19, Paste 22, Select All 756, Undo 128. Many controls share the generic Id 746: find those by menu path + caption.
 - Immediate evaluation: WM_CHAR the text + VK_RETURN to the Immediate `VbaWindow`, then Select All + Copy, then read the clipboard (save and restore the user's clipboard). `Debug.Print` output is read the same way.
+- **Closing VB6** (2026-10-17, `ide_quit`): VB6 has two top-level windows, the MDI frame `wndclass_desked_gsk` and `IDEOwner`, which owns it and has the same caption. `WM_CLOSE` to the frame destroys only the frame; the process lives on without UI. Close `IDEOwner`.
 - **Mode = IDE window title** (spike 2): class `wndclass_desked_gsk`, caption ends in `[design]`, `[run]` or `[break]`. The non-elevated server can read it, no add-in needed.
 - **Starting `VB6.EXE` from the non-elevated side triggers a UAC prompt** (spike 2). Never build from the MCP server; builds go through the elevated add-in.
 - Modal dialogs don't stop the add-in from answering. The MCP server's dialog watchdog (`EnumWindows` on the VB6 PID) sees dialogs regardless, because reads cross the elevation boundary.
@@ -171,6 +178,11 @@ dotnet run --project tests/Vb6Mcp.Tests -- --cat Build,IDE
 - **Event signatures: dump the coclass's source interface** (spike 22). `FileControlEvents` sources `_dispVBFileControlEvents` (`AfterWriteFile` has 4 parameters); the similarly named `_FileControlEvents` has 2 and VB rejects a handler written to it.
 - OCX references live in two places: `Object=` in the `.vbp` **and** `Object = "{GUID}#ver#lcid"; "X.OCX"` in every `.frm`/`.ctl` header. Keep them consistent.
 - `.vbp` reference paths are hints: VB resolves `{GUID}#maj.min` through `HKCR\TypeLib` (32-bit view) first, and falls back to the hint path when it isn't registered (spike 25). Resolve the same way.
+- **Real-project setup** (spike 27):
+  - A registered type library whose file contains **no** type library (a .NET COM DLL registered without `/tlb`) beats the hint path. VB binds to it, finds no types, and the code fails with "Can't find project or library" or "User-defined type not defined". `RegAsm <dll> /tlb` fixes it.
+  - VB binds references when it **loads** a project: after a registration change, reload the project.
+  - `.vbp` versions are **hex** (`1.a` = 1.10).
+  - Licensed controls (Desaware SpyWorks) need the **developer licence** (`HKCR\Licenses`) to load in the IDE or compile; the registered OCX is only the runtime part. VB writes the reason to `<form>.log`.
 - `MISSING:` references show as `IsBroken = True`. Command-line build errors for them don't name the reference.
 - `.vbp` paths are relative to the `.vbp` folder, may climb out of it (`..\..\Shared\x.bas`), and may use either slash. Typelib refs look like `*\G{GUID}#maj.min#lcid#path#desc`.
 - **Mode tag isn't always last in the IDE title** (spike 12): a maximized MDI child appends ` - [Form1 (Code)]`. Match `\[(design|run|break)\]`. The title stays readable while the IDE is busy (cached caption).
@@ -181,6 +193,10 @@ dotnet run --project tests/Vb6Mcp.Tests -- --cat Build,IDE
 - **Drag-and-drop** (spike 20): VB's classic drag needs real input (`SendInput`); posted drags do nothing. OLE drag didn't start from any synthetic input on the test machine (a VM used over RDP: the RDP client keeps resetting the cursor), only by hand.
 - **Other add-ins can block VB6 startup** with a dialog before ours loads (spike 19: Visual Component Manager, "Method '~' of object '~' failed"). `ide_launch` reports it; the watchdog clicks it.
 - The watchdog is a child of whichever VB6 started it. Don't put it in a job object that kills children; it has to survive VB6 crashing.
+- **Restarting the server inside a session** (PLAN.md E7): after `server_restart` ends the process, the desktop app starts it again on the next tool call, from the command it read at session start (a new registration is ignored; the MCP dialog shows no Reconnect for it). That's why `install-server.ps1` installs into the fixed `build\server\current\` and renames files in use aside. The tool **list** isn't fetched again: changed tools work at once, new tools only appear after a session restart.
+- **Claude Code loads MCP tools lazily** (`ToolSearch`), so an agent doesn't know the vb6 tools until it looks for them. The server's `instructions` (initialize result) tell it up front.
+  - Without them, the benchmark agent tried Edit on VB6 files first (hook-blocked) and once rewrote a `.frm` through Python in Bash.
+  - Keep the instructions short: they cost tokens on every request (docs/benchmarks).
 - MCP (spike 1): answer unknown methods with -32601. The desktop client first probes `server/discover` and falls back to `initialize` only on that error. Negotiate the protocol version from our supported list. Register servers with `claude mcp add --scope local <name> -e K=V -- <exe>` (name before `-e`, since `-e` is variadic). A project `.mcp.json` didn't load in the desktop app. Local-scope servers are per project folder and don't show in the Connectors UI; check with `claude mcp get <name>`. They load on the next session restart.
 - If the MCP server can't find an IDE: check that the add-in is loaded, that a discovery file exists for that PID, and that the token matches. Loopback TCP itself crosses elevation fine (spike 11).
 
@@ -189,7 +205,7 @@ dotnet run --project tests/Vb6Mcp.Tests -- --cat Build,IDE
 - **Keep everything documented in detail.** Documentation is part of every change, never a follow-up. In the same commit as the code:
   - **`docs/architecture.md`**: components, processes, data flow, and *why* (link the spike that proved it).
   - **`docs/protocol.md`**: the exact wire format between the MCP server, the add-in and the watchdog. Every verb, its arguments, results and errors.
-  - **`docs/tools.md`**: every MCP tool. Purpose, parameters, result shape, errors, which channel/process serves it, and an example.
+  - **`docs/tools.md`**: every MCP tool. Purpose, parameters, result shape, errors, which channel/process serves it, and an example. Sections are by topic; its Tool index is generated (`node scripts/tool-index.js <vb6mcp.exe> <out.md>`), and a unit test fails when it misses a tool.
   - **`README.md`**: setup, build, registration, running, troubleshooting.
   - **`docs/spikes/NN-*.md`**: every experiment, including failures and surprises.
   - **Code comments explain *why***, especially VB6/Win32 quirks and the spike that found them. Public types and members in C# get XML doc comments.

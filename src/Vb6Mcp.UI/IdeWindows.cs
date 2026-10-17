@@ -85,6 +85,9 @@ public static partial class IdeWindows
     /// <summary>Handle of the IDE main window, 0 if not found.</summary>
     public static long MainWindow(int pid) => FindTopLevel((uint)pid, MainWindowClass).ToInt64();
 
+    /// <summary>A top-level window of the process with this class (e.g. "IDEOwner", which owns VB6's main frame), 0 if none.</summary>
+    public static long FindTopLevelWindow(int pid, string className) => FindTopLevel((uint)pid, className).ToInt64();
+
     /// <summary>
     /// The Immediate window: a custom-drawn "VbaWindow" captioned "Immediate" under the IDE main window
     /// (spike 5; VBE.Windows(i).HWnd is always 0, so it has to be found by enumeration). 0 if not found.
@@ -101,6 +104,63 @@ public static partial class IdeWindows
         }, IntPtr.Zero);
         return found;
     }
+
+    /// <summary>A window inside the IDE main window: class, caption, screen rectangle, visibility, parent.</summary>
+    public sealed record ChildWindow(long Hwnd, long Parent, string Class, string Caption, int Left, int Top, int Right, int Bottom, bool Visible)
+    {
+        public int Width => Right - Left;
+        public int Height => Bottom - Top;
+    }
+
+    /// <summary>The IDE main window's screen rectangle (Left, Top, Right, Bottom), or null.</summary>
+    public static (int Left, int Top, int Right, int Bottom)? MainRect(int pid)
+    {
+        var main = FindTopLevel((uint)pid, MainWindowClass);
+        return main != IntPtr.Zero && GetWindowRect(main, out var r) ? (r.Left, r.Top, r.Right, r.Bottom) : null;
+    }
+
+    /// <summary>
+    /// Every window under the IDE main window (MDI children such as code panes and form designers, and their
+    /// children). Reading works across elevation (spike 10), so the server can locate a designer to crop a
+    /// screenshot to it (form_screenshot), and `vb6mcp windows &lt;pid&gt;` dumps it for diagnosis.
+    /// </summary>
+    public static IReadOnlyList<ChildWindow> Descendants(int pid)
+    {
+        var main = FindTopLevel((uint)pid, MainWindowClass);
+        var list = new List<ChildWindow>();
+        if (main == IntPtr.Zero) return list;
+        EnumChildWindows(main, (c, _) =>
+        {
+            GetWindowRect(c, out var r);
+            list.Add(new ChildWindow(c.ToInt64(), GetParent(c).ToInt64(), ClassName(c), Caption(c), r.Left, r.Top, r.Right, r.Bottom, IsWindowVisible(c)));
+            return true;
+        }, IntPtr.Zero);
+        return list;
+    }
+
+    /// <summary>A window's current screen rectangle, or null if it's gone.</summary>
+    public static (int Left, int Top, int Right, int Bottom)? WindowRect(long hwnd)
+        => GetWindowRect(new IntPtr(hwnd), out var r) ? (r.Left, r.Top, r.Right, r.Bottom) : null;
+
+    /// <summary>
+    /// A window's client area in screen coordinates: without title bar, borders and its own scroll bars. form_screenshot
+    /// crops to this; the window rectangle of a designer includes its scroll bars (spike 28).
+    /// </summary>
+    public static (int Left, int Top, int Right, int Bottom)? ClientRect(long hwnd)
+    {
+        var h = new IntPtr(hwnd);
+        if (!GetClientRect(h, out var c)) return null;
+        var p = new POINT();
+        if (!ClientToScreen(h, ref p)) return null;
+        return (p.X, p.Y, p.X + c.Right, p.Y + c.Bottom);
+    }
+
+    [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X, Y; }
+    [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
+    [DllImport("user32.dll")] private static extern bool ClientToScreen(IntPtr hwnd, ref POINT p);
+    [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+    [DllImport("user32.dll")] private static extern IntPtr GetParent(IntPtr hwnd);
 
     private static IntPtr FindTopLevel(uint pid, string cls)
     {

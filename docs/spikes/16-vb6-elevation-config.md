@@ -34,3 +34,8 @@ Starting `VB6.EXE` from a non-elevated process always triggered UAC (spike 2). I
   - `normal`: `RunAsInvoker`; if the machine forces elevation (as here), fail with this explanation.
   - With a project path, VB6 skips the New Project chooser; without one, the chooser is reported.
 - README gets an "Elevated or not?" section: what works in each mode (non-elevated: builds of ActiveX projects can't register; elevated: input only through the add-in, Claude's computer use can't drive VB6).
+
+## Addendum (2026-10-17, from real use: improvement notes 15, 16)
+
+- **A copy of the whole VB98 folder doesn't give a usable non-elevated VB6 either.** The copy starts non-elevated (the path-specific setting doesn't apply to it), but stops at startup with "Missing or not registered VB6TMPL.TLB": VB6's registration points at the installed folder. So "run a non-elevated copy" isn't a way out without registry changes, which this project doesn't make.
+- **A UAC prompt nobody answers times out**, and `ide_launch` couldn't say why it took so long. The result now has `startSeconds` (how long the start took, including the time the prompt was up) and `seconds` (until the add-in answered); a declined or timed-out prompt names how long it waited and points at the user-started watchdog (`vb6mcp watchdog --stay`, PLAN.md D6), which launches VB6 without prompts.

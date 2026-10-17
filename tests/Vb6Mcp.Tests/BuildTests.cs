@@ -23,6 +23,24 @@ public static class BuildTests
         var open = BuildLog.Parse("The file 'D:\\x\\Basic.vbp' is already open.\r\nThe file 'D:\\x\\Basic.vbp' is already open.");
         Assert.True(!open.Succeeded && open.Errors.Count == 1 && open.Errors[0].Kind == "other", "repeated line kept once");
     }
+
+    /// <summary>build_in_ide when the code compiles but the make fails (improvement notes 20): what can be seen from here.</summary>
+    [Test]
+    public static void MakeFailureCausesNameTheOutputInUseOrMissingFolder()
+    {
+        var dir = Directory.CreateTempSubdirectory("vb6mcp-make-").FullName;
+        try
+        {
+            var exe = Path.Combine(dir, "App.exe");
+            Assert.True(IdeTools.MakeFailureCauses(Path.Combine(dir, "nope", "App.exe"))[0].Contains("doesn't exist"), "missing folder");
+            Assert.True(IdeTools.MakeFailureCauses(exe)[0].StartsWith("no cause visible"), "nothing wrong");
+            File.WriteAllBytes(exe, [0x4D, 0x5A]);
+            using (new FileStream(exe, FileMode.Open, FileAccess.Read, FileShare.Read))   // a running program holds its exe like this
+                Assert.True(IdeTools.MakeFailureCauses(exe).Any(c => c.Contains("in use")), "held open");
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
     [Test]
     public static void OutputFileDefaultsByProjectType()
     {
@@ -30,5 +48,16 @@ public static class BuildTests
         Assert.Equal(@"D:\p\ComFixture.dll", IdeTools.OutputFileOf(dll));
         var named = VbpFile.Parse(@"D:\p\App.vbp", "Type=Exe\r\nName=\"App\"\r\nExeName32=\"Out.exe\"\r\nPath32=\"..\\bin\"\r\n");
         Assert.Equal(@"D:\bin\Out.exe", IdeTools.OutputFileOf(named));
+    }
+
+    /// <summary>A form VB couldn't load: the build log only points at frmX.log; the error carries that path (B2).</summary>
+    [Test]
+    public static void LoadErrorsPointAtTheFormLog()
+    {
+        var r = BuildLog.Parse("Errors during load. Refer to 'D:\\x\\frmTransferHistory.log' for details\r\n" +
+                               "'D:\\x\\frmTransferHistory.frm' could not be loaded\r\nBuild of 'App.exe' failed.\r\n");
+        Assert.True(!r.Succeeded, "failed");
+        var load = r.Errors.Single(e => e.Kind == "load");
+        Assert.Equal("D:\\x\\frmTransferHistory.log", load.File);
     }
 }

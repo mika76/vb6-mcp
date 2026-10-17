@@ -4,6 +4,112 @@ Tools exposed by `vb6mcp` to Claude Code. Every result is a single JSON text ite
 
 **Implementation:** `src/Vb6Mcp/Tools/IdeTools.cs`. **Wire verbs used:** [protocol.md](protocol.md).
 
+**Server instructions:** the `initialize` answer carries a short `instructions` text (`McpServer.Instructions`), which Claude Code shows the model up front. It says VB6 files must not be changed with Edit/Write or the shell, and which tools to use for what.
+- Without it, Claude Code's lazily loaded tools meant the agent tried Edit first and found these tools only after the hook blocked it.
+- In a benchmark on a private project (report not published) the instructions took hook blocks from 12 to 0 and shell writes of VB6 files from 1 to 0.
+- They also cut the edit tasks' tokens by up to a third.
+
+## Tool index
+
+All 94 tools, generated from the server's tool list (`node scripts/tool-index.js`). Details below, by topic.
+
+| Area | Tool | What it does |
+|---|---|---|
+| IDEs | `ide_claim` | Make an IDE yours, so other sessions' write tools leave it alone (ide_launch claims the IDEs it starts) |
+| IDEs | `ide_dialog_respond` | Click a button in a dialog the IDE is showing (see ide_status) |
+| IDEs | `ide_kill` | Last resort: end a VB6 process that is hung or stuck (needs force=true; never done automatically) |
+| IDEs | `ide_launch` | Start a new VB6 IDE, optionally opening a .vbp/.vbg (which skips VB6's New Project chooser) |
+| IDEs | `ide_list` | List running VB6 IDEs that have the vb6-mcp add-in: pid, mode (design/run/break), responsiveness, open dialogs, projects |
+| IDEs | `ide_quit` | Close a VB6 IDE normally (File > Exit), e.g. one this session started with ide_launch and no longer needs |
+| IDEs | `ide_release` | Give up ownership of an IDE you claimed or started, so other sessions can change it again |
+| IDEs | `ide_status` | State of one IDE without needing its UI thread: title, mode, responds, hung flag, open dialogs (text and buttons), and whether the add-in answers |
+| IDEs | `server_restart` | End this vb6 MCP server process (after answering), e.g. after scripts\install-server.ps1 installed a newer build |
+| Projects | `project_add_component` | Add a component to a project open in the IDE: a new one (kind: module, class, form, mdiform, usercontrol, propertypage, with a name) or an existing… |
+| Projects | `project_checkpoint` | Save a copy of a project's files (the .vbp, every component, .frx and resource files) as they are on disk, to go back to with project_rollback if a… |
+| Projects | `project_close` | Close a project in the IDE. Refused while it has unsaved changes, unless discard=true, which throws those changes away (recovery copies the watchdo… |
+| Projects | `project_components` | Components of a project in the IDE: name, type, unsaved (dirty) flag, line count, file name |
+| Projects | `project_open` | Open a .vbp or .vbg in a running IDE. If the IDE already has projects, pass mode 'add' (adds to a group) or 'replace' (closes them; refused while a… |
+| Projects | `project_rollback` | Put a project's files back as they were at a checkpoint (project_checkpoint) |
+| Projects | `project_save` | Save a project like File > Save Project (all unsaved components and the .vbp) |
+| Projects | `project_settings` | Read or change project settings |
+| Code | `code_insert` | Insert lines into a component before line `line` (use line = countOfLines + 1 to append) |
+| Code | `code_read` | Read a component's code as the IDE holds it right now, including unsaved edits |
+| Code | `code_replace_lines` | Replace lines of a component's code in the IDE (unsaved, undoable in VB6) |
+| Code | `proc_get` | Read one procedure or property (with the comment lines above it) from the IDE, including unsaved edits |
+| Code | `proc_replace` | Replace a whole procedure or property (from its first comment line to End Sub/Function/Property) with new_text, exactly the range proc_get returns |
+| Code | `symbol_find` | Find where a name is declared in the projects open in running IDEs (procedures, properties, variables, constants, events), from the IDE's own parser |
+| Code | `symbol_outline` | Outline of a component from the IDE's own parser (CodeModule.Members): procedures, properties, events, variables, constants with scope and line spans |
+| Code | `symbol_refs` | Every statement that uses a name (a procedure, variable, constant...) across the projects under the workspace roots: file, line, the full statement… |
+| Run and debug | `bp_clear_all` | Clear all breakpoints (Ctrl+Shift+F9), including ones the user set |
+| Run and debug | `bp_toggle` | Toggle a breakpoint on a line (F9) |
+| Run and debug | `debug_callstack` | The call stack in break mode, most recent call first (from View > Call Stack, which is opened, read and closed again) |
+| Run and debug | `debug_error` | The runtime error dialog ('Run-time error 11: Division by zero'), if one is open: error number and message |
+| Run and debug | `debug_eval` | Evaluate an expression in the Immediate window ('? expr') and return the result |
+| Run and debug | `debug_immediate` | Read the Immediate window (Debug.Print output and earlier evaluations), optionally only the last N lines |
+| Run and debug | `debug_locals` | Variables in scope at the current statement (break mode): the procedure's parameters, return value and Dim/Static variables, plus the module's vari… |
+| Run and debug | `debug_output` | OutputDebugString output of the programs being worked on (compiled VB6 programs have no Debug.Print; programs that log usually call OutputDebugString) |
+| Run and debug | `debug_where` | Where the IDE is: the active code pane's component, line and procedure (in break mode, the current statement), plus that line's text |
+| Run and debug | `run_break` | Break into the running program |
+| Run and debug | `run_continue` | Continue the program from break mode (F5) |
+| Run and debug | `run_end` | End the running program and return to design mode |
+| Run and debug | `run_start` | Start the program in the IDE (F5), or with full_compile=true as 'Start With Full Compile' (Ctrl+F5, compiles everything first) |
+| Run and debug | `run_to_cursor` | Run until the given line (Ctrl+F8) |
+| Run and debug | `step_into` | Step into the next statement (F8) |
+| Run and debug | `step_out` | Step out of the current procedure (Ctrl+Shift+F8) |
+| Run and debug | `step_over` | Step over the next statement (Shift+F8) |
+| Run and debug | `syntax_check` | Compile the code as it is in the IDE (unsaved edits included) via 'Start With Full Compile' |
+| Running program | `app_click` | Click a command button, check box or option button of the running program |
+| Running program | `app_keys` | Type text or press keys in the running program |
+| Running program | `app_mouse` | Mouse input at a position in a form of the running program: click, double_click, right_click, or drag (from x,y to to_x,to_y) |
+| Running program | `app_screenshot` | Screenshot of a window as an image: a form or dialog of the running program (default), or the whole IDE (target 'ide') |
+| Running program | `app_scroll` | Scroll a control of the running program (list box, multi-line text box, grid, scroll bar control, or a scrollable form) |
+| Running program | `app_select` | Select an item in a list box or combo box of the running program, by text (exact, case-insensitive) or index (0-based) |
+| Running program | `app_set_text` | Set the text of a text box in the running program (fires its Change event) |
+| Running program | `app_tree` | Controls of a form of the running program: window handle, kind (CommandButton, TextBox, ...), text, position (relative to the form's client area), … |
+| Running program | `app_wait` | Wait until something happens in the running program or the IDE, up to timeout seconds: a window with a caption appears (window) or disappears (wind… |
+| Running program | `app_windows` | List the windows (forms, dialogs) of the running program (in the IDE, or a compiled EXE with exe), with caption, class, position and size |
+| Running program | `exe_end` | Close a program started with exe_run: asks its windows to close (WM_CLOSE), waits 5 s; with force=true ends it if it is still running |
+| Running program | `exe_run` | Start a compiled program (.exe under the workspace roots) so the app_* tools can drive it: pass its pid as exe |
+| Forms | `form_add_control` | Add a control to a form/UserControl in the designer |
+| Forms | `form_controls` | List the controls of a form, UserControl or property page as the designer holds them now (unsaved changes included): name, index (control arrays), … |
+| Forms | `form_layout` | Arrange controls of one container (the form, or a Frame/PictureBox) as a grid, instead of working out Left/Top by hand |
+| Forms | `form_properties` | All design-time properties of one control (or of the form itself: pass the form's name) with their current values |
+| Forms | `form_remove_control` | Remove a control (and any controls inside it) from the designer |
+| Forms | `form_resources` | What a form, UserControl or property page keeps in its binary companion file (.frx/.ctx/.pgx): pictures, list items, long or multi-line texts, font… |
+| Forms | `form_screenshot` | Screenshot of a form, UserControl or property page as it looks in the designer now (unsaved changes included): layout, fonts, colours, without runn… |
+| Forms | `form_set_properties` | Set several design-time properties in one call, on one form/UserControl: changes is a list of {control, property, value}, values as for form_set_pr… |
+| Forms | `form_set_property` | Set a design-time property of a control (or of the form: pass its name) |
+| References | `refs_add` | Add a reference to a project in the IDE, given exactly one of: name (part of a registered typelib's description, e.g. 'ActiveX Data Objects 2.8'; s… |
+| References | `refs_add_component` | Add an ActiveX control's component (OCX) to a project's toolbox, so form_add_control can place it: give the ProgID of one of its controls (e.g. MSC… |
+| References | `refs_fix_broken` | Broken (MISSING:) references of a project open in the IDE, each with what the .vbp asked for (LIBID, version, file hint), what is registered for th… |
+| References | `refs_list` | A project's references as the IDE has them now (name, LIBID, version, file, broken?), plus its ActiveX control components (Object= lines; read from… |
+| References | `refs_remove` | Remove a reference (by its name as refs_list shows it) from a project in the IDE. Or name=#<position> (1-based, in refs_list order) for a broken re… |
+| COM | `com_describe` | What a COM component offers: the classes, interfaces, methods, properties, events and enums in its type library, as VB declarations (read from the … |
+| COM | `com_diagnose` | Checks behind a COM runtime error (429 can't create object, 430 class doesn't support the expected interface, 48 error loading DLL, or any other) f… |
+| COM | `com_orphans` | Broken COM registrations, report only (nothing is changed): classes whose server file is missing, typelibs whose file is missing, and VB6 debugger … |
+| COM | `com_register` | Register a DLL/OCX under the workspace roots (regsvr32, elevated through the VB6 add-in, audited) |
+| COM | `com_search` | Find registered COM components: type libraries whose description or name contains the text, and ProgIDs containing it (32-bit registry, as VB6 sees… |
+| COM | `com_unregister` | Unregister a DLL/OCX under the workspace roots (regsvr32 /u, elevated through the VB6 add-in, audited), then check the registry |
+| COM | `com_where` | Where a component is registered: give one of prog_id, clsid, libid or file |
+| COM | `compat_status` | Binary compatibility state of ActiveX projects under the roots: mode, compatibility file, the typelib IDs of the compatibility file and the build o… |
+| Builds | `build_in_ide` | Compile an open project from the IDE's memory (unsaved edits included) with File > Make, to its output file |
+| Builds | `build_make` | Build a project the way the command line does |
+| Sync | `sync_diff` | Differences between a component's code in the IDE (including unsaved changes) and its file on disk, as a unified diff (--- ide, +++ disk) |
+| Sync | `sync_status` | Files changed outside the IDE: conflicts (a component's file changed on disk while it has unsaved changes in the IDE; nothing was touched) and rece… |
+| Sync | `sync_take_disk` | Resolve a conflict in favour of the file on disk: reloads the component, DISCARDING its unsaved IDE changes |
+| Sync | `sync_take_ide` | Resolve a conflict in favour of the IDE: saves the project (File > Save Project), writing the IDE's version over the changed file |
+| Workspace (disk) | `file_read` | Read a VB6 source file from disk the way the IDE shows it (code only: no designer block, no hidden Attribute lines) |
+| Workspace (disk) | `file_replace_lines` | Edit a VB6 source file of a closed project on disk: replace count lines from start_line (1-based, the code as the IDE shows it, as file_read return… |
+| Workspace (disk) | `res_read` | A VB6 resource file (.res; or pass the .vbp and its ResFile32 is used), read-only: every resource (type, name or id, language, size), the string ta… |
+| Workspace (disk) | `ws_affected` | Which projects a change to (shared) source files affects, in rebuild order: the projects that include the files, then every project that references… |
+| Workspace (disk) | `ws_file_projects` | Which projects include a source file (.bas/.cls/.frm/...)? Paths are compared normalized (relative paths, drive mappings, case), so shared files re… |
+| Workspace (disk) | `ws_projects` | List the VB6 projects (.vbp) under the workspace roots (VB6MCP_ROOTS): name, type, path, member count, output file, binary compatibility |
+| Recovery | `recovery_discard` | Delete the recovery copies of one session (e.g. after restoring them) |
+| Recovery | `recovery_list` | Recovery copies of unsaved IDE code, taken by the watchdog while the user is idle: per VB6 session (pid) whether it is still running or crashed/was… |
+| Recovery | `recovery_read` | The text of one recovery copy, and whether it differs from the file on disk |
+| Recovery | `recovery_restore` | Put a recovery copy back into a running IDE: replaces the code of the component with the same file in an open project (design mode) |
+| Other | `batch_run` | Run several vb6 tool calls in one call, in order, e.g. app_click then app_wait then app_screenshot, or run_start, clicks and run_end |
+
 ## Common arguments
 
 | Argument | Type | Meaning |
@@ -18,7 +124,11 @@ Tools exposed by `vb6mcp` to Claude Code. Every result is a single JSON text ite
 
 ---
 
-## `ide_list`
+## IDEs and sessions
+
+Finding, starting, owning and recovering VB6 IDEs. `ide_quit` and `ide_kill` are under [Watchdog and recovery](#watchdog-and-recovery).
+
+### `ide_list`
 
 List running IDEs that have the add-in, and clean up after crashed ones.
 
@@ -43,7 +153,7 @@ List running IDEs that have the add-in, and clean up after crashed ones.
 - `crashed`: discovery files whose process is gone or isn't VB6 (left by a killed or crashed IDE; a clean close deletes its file). They're deleted after being reported.
 - `projects` is null and `addinError` explains why when the IDE doesn't respond.
 
-## `ide_status`
+### `ide_status`
 
 State of one IDE, readable even when its UI thread is busy.
 
@@ -62,78 +172,7 @@ State of one IDE, readable even when its UI thread is busy.
 - `addin`: `answers (…)`, `busy: …` (timeout) or `unreachable: …`.
 - A dialog-open IDE still *responds* (modal loops pump messages), so check `dialogs`.
 
-## `project_components`
-
-**Arguments:** `pid?`, `project?`.
-
-**Served by:** add-in `COMPONENTS`.
-
-**Result:**
-```json
-{ "project": "Project1",
-  "components": [ { "Name": "Form1", "type": "Form", "dirty": true, "lines": 5, "file": "D:\\...\\Form1.frm" } ] }
-```
-- `type`: `StdModule`, `ClassModule`, `Form`, `MDIForm`, `UserControl`, `PropertyPage`, `ResFile`, … (VBIDE `vbext_ComponentType`).
-- `lines` is `-1` for components without a code module; `file` is empty if never saved.
-
-## `code_read`
-
-Read code as the IDE holds it right now, including unsaved edits.
-
-**Arguments:** `component`, `project?`, `pid?`, `start_line?`, `count?` (1-based; both or neither).
-
-**Served by:** add-in `READ`.
-
-**Result:**
-```json
-{ "source": "ide", "project": "Project1", "component": "Form1", "dirty": true,
-  "countOfLines": 5, "hash": "3f2a9c0d1e4b5a67", "startLine": 1,
-  "text": "Option Explicit\r\n\r\nPrivate Sub Form_Load()\r\n    MsgBox \"hi\"\r\nEnd Sub" }
-```
-- Lines are CR LF separated. The hidden `Attribute` lines and the `.frm` designer block aren't part of the code module, so they're not included.
-
-## `symbol_outline`
-
-Outline from the IDE's own parser (`CodeModule.Members`): a cheap way to navigate large modules.
-
-**Arguments:** `component`, `project?`, `pid?`.
-
-**Served by:** add-in `MEMBERS`.
-
-**Result:**
-```json
-{ "source": "ide", "project": "Project1", "component": "Form1",
-  "members": [
-    { "Name": "Form_Load", "kind": "method", "procKind": "proc", "scope": "private", "static": false,
-      "line": 3, "startLine": 2, "lines": 3 },
-    { "Name": "m_count", "kind": "variable", "procKind": null, "scope": "private", "static": false,
-      "line": 1, "startLine": null, "lines": null }
-  ] }
-```
-- `kind`: `method`, `property`, `variable`, `event`, `const`. `procKind`: `proc`, `get`, `let`, `set` (methods/properties only).
-- `line` = the `Sub`/`Function`/`Property` line (or the declaration line); `startLine`/`lines` follow VB6's definition and include the blank and comment lines above the procedure.
-- A property appears once **per kind** (`get`, `let`, `set`), even though VBIDE's `Members` lists it only once.
-
-## `symbol_find`
-
-Find where a name is declared in the projects open in running IDEs.
-
-**Arguments:** `name`, `contains?` (substring match instead of exact), `project?`, `pid?` (narrow the search).
-
-**Served by:** add-in `PROJECTS` + `COMPONENTS` + `MEMBERS` for every component with a code module, i.e. the IDE's own parser (principle 3: no parser of ours). Matching is case-insensitive.
-
-**Result:**
-```json
-{ "name": "AddNumbers", "contains": false, "truncated": false,
-  "matches": [ { "pid": 10856, "project": "Basic", "component": "modMath", "componentType": "StdModule",
-                 "Name": "AddNumbers", "kind": "method", "procKind": "proc", "scope": "public", "line": 7 } ],
-  "skipped": [] }
-```
-- Stops after 200 matches (`truncated`). IDEs that don't answer (busy, unreachable) are listed in `skipped`.
-- Finds declarations only, not usages; text search over the files covers usages (principle 3).
-- Projects that aren't open in an IDE aren't searched; use `ws_projects` / `file_read` for those.
-
-## `ide_launch`
+### `ide_launch`
 
 Start a new VB6 IDE.
 
@@ -161,7 +200,74 @@ Start a new VB6 IDE.
 ```
 `status: "no-addin"` means VB6 started but the add-in didn't connect (not loaded on startup).
 
-## `project_open`
+`startSeconds` is how long the shell start took: with a UAC prompt it returns only once the prompt is answered, so a large value means someone had to approve it (null when the watchdog started VB6). `seconds` is the time until the add-in answered. A declined or timed-out prompt fails with how long it waited (improvement notes 16).
+
+### IDE ownership between sessions
+
+Several IDEs always worked (a discovery file per pid, `pid` on every tool), but nothing said whose an IDE was. On 2026-10-17 a test script of one Claude session saved another session's project, because the tools default to the only running IDE.
+
+- **Ownership:** an IDE belongs to the MCP server session that started it (`ide_launch`) or claimed it (`ide_claim`).
+  - The owner is recorded in `%LOCALAPPDATA%\vb6mcp\owners\<pid>.json`: the server's pid and start time (so a reused pid doesn't count), the client's name, and when.
+  - An owner whose server process has ended owns nothing, and its file is removed.
+- **Write tools refuse another session's IDE:** editing, saving, opening and closing projects, run and debug commands, Immediate input, input into the running program, designer changes, references, builds in the IDE, dialog answers, `ide_kill`, `ide_quit`, `form_screenshot` (it opens and scrolls a designer).
+  - The error names the owner and points to `ide_launch`.
+  - Reading tools work on every IDE.
+  - An unowned IDE (one the user opened) is usable by all sessions, as before.
+- **Defaulting:** with several IDEs running and no `pid`, a session that owns exactly one of them gets that one.
+- **`ide_list`** shows `owner`: `"you"`, `{client, serverPid, since}`, or null.
+- **One IDE per session:** with the watchdog started by the user (`watchdog --stay`), `ide_launch` starts elevated IDEs with no UAC prompt.
+- **Not a security boundary:** all sessions run as the same user. It keeps the user's own sessions from stepping on each other.
+
+#### `ide_claim`
+
+**Arguments:** `pid`, `force?`. Makes an unowned IDE (or one whose owner has ended) yours. An IDE another live session owns needs `force: true`: ask the user (audited).
+
+#### `ide_release`
+
+**Arguments:** `pid`. Gives up an IDE you own.
+
+### `server_restart` (PLAN.md E7)
+
+**Arguments:** `confirm` (must be true).
+
+Answers, then ends the server process a second later (exit code 3), so a newly installed build can take over without restarting the Claude session. Calls still running then are finished first (at most 2 minutes): an `ide_launch` the client sent right after it was once cut off ("Connection closed") while VB6 had already started. IDEs, the watchdog and unsaved code are not touched. Not allowed in `batch_run`. Served by the server itself (`Program.cs`).
+
+What the desktop app does (tested 2026-10-17):
+- The MCP servers dialog never showed Reconnect: it kept saying "Connected · 90 tools" after the process ended.
+- On the **next vb6 tool call** the app started the server again, by itself, **from the command it read at session start**. A re-registration to a new path during the session is ignored.
+- So `scripts\install-server.ps1` now installs into one fixed folder, `build\server\current\`, moving files in use aside (`*.old-<stamp>`, spike 26: renamed, not overwritten). After an install: `server_restart`, then any vb6 call runs the new build. The first session after switching to the fixed folder still needs one restart, to pick up the new path.
+- The app keeps the **tool list** it fetched at session start (seen 2026-10-17: after `server_restart`, the changed tools ran the new code, but two tools added in that build weren't offered). New tools need a session restart.
+
+### Crash notices (`ideCrashed`, PLAN.md D2)
+
+When an IDE this server saw running has crashed (its discovery file is left behind and the process is gone, spike 12b), the **next result of any IDE tool** gets `ideCrashed`, once per IDE (improvement notes 25: the agent only found out when its next call failed):
+- `pid`, `projects` (from the recovery store), `recovery` (the copies the watchdog kept, with their age);
+- `applicationLog`: the Windows "Application Error" event of that process (`time`, `faultingModule`, `exceptionCode`, `faultOffset`, `modulePath`), read with `wevtutil` (matched by "Faulting process ID"); null when there is none, e.g. it was killed;
+- `next`: relaunch with `ide_launch reopen: true` (the watchdog stays up 30 minutes after a crash, so no UAC prompt while it runs), then `recovery_restore`.
+
+`ide_kill` and `ide_quit` end IDEs on purpose and aren't reported. An IDE that closed normally removes its discovery file and isn't reported either. On a failed result the notice is appended to the error text.
+
+`ide_launch reopen: true` (instead of `project`) opens the first project of the IDE that crashed last; any others are listed in `alsoOpen` (open them with `project_open`).
+
+## Projects
+
+### `project_components`
+
+**Arguments:** `pid?`, `project?`.
+
+**Served by:** add-in `COMPONENTS`.
+
+**`markedChangedByRun`** (spike 32): running the program in the IDE marks the forms it loaded as changed, though nothing changed (saving writes identical bytes). When a run was started through this server (`run_start`, a step or run-to-cursor from design mode, `syntax_check`) and the IDE is back in design mode, `project_components`, `run_end` and `syntax_check` list the components that became dirty only during that run and whose code equals the file: `{components: ["P.frmMain", ...], note}` with the `project_save components=[...]` call that clears them (only those files, not the `.vbp`). Never saved automatically (hard rule 4). `build_make`'s "unsaved changes" refusal names them too. Both T12 rerun agents saved, tested the running program and left exactly such forms behind, so the build from disk refused.
+
+**Result:**
+```json
+{ "project": "Project1",
+  "components": [ { "Name": "Form1", "type": "Form", "dirty": true, "lines": 5, "file": "D:\\...\\Form1.frm" } ] }
+```
+- `type`: `StdModule`, `ClassModule`, `Form`, `MDIForm`, `UserControl`, `PropertyPage`, `ResFile`, … (VBIDE `vbext_ComponentType`).
+- `lines` is `-1` for components without a code module; `file` is empty if never saved.
+
+### `project_open`
 
 Open a `.vbp` or `.vbg` in a **running** IDE.
 
@@ -187,7 +293,176 @@ Open a `.vbp` or `.vbg` in a **running** IDE.
 { "status": "pending", "path": "...", "note": "not visible after 20 s; check ide_status" }
 ```
 
-## `proc_get`
+
+**Preflight and load check** (improvement notes 8 and 17: a production project loaded 0 of 172 components without a word, because two OCXs weren't registered):
+- **Before opening a `.vbp`**, every `Object=` control and `Reference=` is resolved like VB does (typelib GUID + major version, 32-bit registry).
+  - An unregistered control **refuses the open**. VB6 would load the project without its components: through `AddFromFile` its "Continue Loading Project?" prompt resolves as No. The error names each control and any other registered versions. `force: true` opens anyway.
+  - Unregistered references only produce `warnings`: VB6 loads the project and shows them as MISSING.
+  - **Hints** (PLAN.md C3, improvement notes 19), in brackets after each missing item:
+    - files **on disk** that carry the wanted library but aren't registered: searched by the file name the `.vbp` gives (the `Object=` file, or the reference's hint path) in the project folder (recursively), `SysWOW64`, the hint folder and the roots (recursively), confirmed by reading their typelib (LIBID); capped at 8 s. `com_register` them.
+    - **registered libraries with a similar name** (description or file name, ignoring versions and words like Lib/Control): another version or edition, a *different* library (`CapturePRO 3.0` for a project that wants `CAPTUREPROLib` 2.0). They say what's installed; they don't replace the wanted one (hard rule 13).
+- **After opening**, the loaded components are compared with the `.vbp`'s members. Fewer gives `status: "opened-incomplete"` with `incomplete: {loaded, expected, notLoaded, loadLogs}`. `loadLogs` holds the `.log` files VB wrote next to the forms during the load. Don't save such a project: the `.vbp` would lose the missing members.
+- **On a failed open**, the add-in's error is returned (`status: "failed"`, e.g. `60082: A project with the name 'AppA' is already loaded`) instead of a bare `pending`.
+
+### `project_save`
+
+**Arguments:** `project?`, `pid?`.
+
+**Served by:** `SAVE` (deferred File > Save Project), then polling `COMPONENTS` and dialogs for up to 20 s.
+
+**Result** (`status`): `saved` (with the components that were unsaved), `nothing-to-save`, `dialog` (reported, not answered, e.g. a source-control checkout prompt) or `pending`. Refused for a never-saved project (Save would open a Save As dialog).
+
+
+**`components: [...]`** saves only those components (`SAVECOMP`), and the `.vbp` isn't written. Components that were never saved are refused, since they have no file yet.
+
+**The `.vbp`:** saving a project VB counts as changed also rewrites the `.vbp`. In a production project (2026-10-17) that rewrote 17 `Reference=`/`Object=` lines: hint paths made absolute, OCX names re-cased, and two control versions bumped to the ones registered (mscomctl 2.1 to 2.2, comctl32 1.4 to 1.5).
+- The result's `vbp` lists the lines removed and added, and `versionChanges`: `{kind, guid, name, oldVersion, newVersion}` for references and controls.
+- A version change also gets a `note`, because committing it changes what the project needs on other machines.
+- `vbp` is absent when the `.vbp` didn't change.
+
+### Closing, adding, settings, checkpoints
+
+#### `project_close`
+
+**Arguments:** `project?`, `discard?`, `pid?`. Design mode. Served by `CLOSE`.
+
+Closes a project in the IDE.
+- A project with unsaved changes is refused, with the changed components named, unless `discard: true`. That throws the changes away (audited); the watchdog's recovery copies stay.
+  - VBIDE can't close without saving: `VBProjects.Remove` saves changed components silently, and so does setting `IsDirty = False` (spike 31).
+  - So a discard snapshots the `.vbp` and each changed component's files first, lets VB close, writes the snapshots back, and deletes source files VB created for never-saved components.
+  - The result's `restored` lists `files`, `deleted` and any `failed`.
+  - Refused if another IDE has one of those files loaded (hard rule 4) or the project was never saved.
+- Result: `status: "closed"`, `discarded` (the components whose changes were thrown away), `projects` (still open). A dialog is reported, not answered.
+
+#### `project_add_component`
+
+**Arguments:** `kind` + `name` (new: `module`, `class`, `form`, `mdiform`, `usercontrol`, `propertypage`), or `file` (an existing source file under the roots), `project?`, `pid?`. Design mode. Served by `COMPADD`.
+
+Adds the component in the IDE. This replaces writing files and `.vbp` lines by script (improvement notes 1).
+- A **new** component is saved straight away to `<project folder>\<name>.<ext>` (`SAVECOMP` with a path). The file must not exist yet: nothing is overwritten. Otherwise File > Save Project would stop at a Save File As dialog for it (spike 31).
+- `project_save` then adds it to the `.vbp`.
+- Result: `status: "added"`, `component`, `type`, `file`, `dirty`.
+- A name collision or a bad kind is refused before anything happens.
+
+#### `project_settings`
+
+**Arguments:** `set?` (object), `reopen?`, `path?` (a closed project's `.vbp`), `project?`, `pid?`.
+
+Reads and changes project settings (improvement notes 2, 7, 22).
+- **Open project, IDE settings:** `name`, `description`, `helpfile`, `helpcontextid`, `startmode` (0 standalone, 1 ActiveX component), `buildfilename` and `startup` (a form, `Sub Main` or `(None)`) change live through `PRJSET`, unsaved until `project_save`.
+- **Open project, `.vbp`-only settings:** `CondComp` (conditional compilation constants), `Command32` (command-line arguments) and other project-section keys exist only in the `.vbp`. VB rewrites the `.vbp` from memory when it saves. They need `reopen: true`: the project must have no unsaved changes, it is closed, the `.vbp` is edited byte-exactly, and it is opened again. Without `reopen` the call is refused before anything changes.
+- **Closed project (`path`):** keys are `.vbp` names (`CondComp`, `Command32`, `Startup`, `Title`, ...), edited byte-exactly (`VbpKeys`). Refused while any IDE has the project open (hard rule 4).
+- **Never changed here:** members, `Reference=`, `Object=`, `ResFile32`, `Type` and binary compatibility (`CompatibleMode`, `CompatibleEXE32`, `VersionCompatible32`). Those have their own tools, or carry GUIDs (hard rules 2 and 13).
+- **Result:** `settings` (from `PRJGET`), `vbp` (the `.vbp`'s project-section keys), `reopened` when the project was closed and opened.
+
+#### `project_checkpoint`
+
+**Arguments:** `label?`, `list?`, `path?` (a `.vbp`, e.g. of a closed project), `project?`, `pid?`.
+
+Copies a project's files as they are on disk: the `.vbp`, every member (`Form=`, `Module=`, `Class=`, `UserControl=`, `PropertyPage=`, `Designer=`, `UserDocument=`, `RelatedDoc=`), their `.frx`/`.ctx`/`.pgx`/`.dsx`/`.dox` and the `ResFile32` file, byte-exact, to `%LOCALAPPDATA%\vb6mcp\checkpoints\<project>-<path hash>\<id>\` with a `manifest.json` (path, copy, SHA-256 per file).
+- **Why:** the T9–T12 redesigns changed hundreds of lines across many forms with no way back but the owner restoring files (PLAN.md E2).
+- **Open project:** refused while it has unsaved changes. Unsaved IDE changes can't be copied without saving them (VBIDE only saves, spike 31), so save first.
+- **`list: true`:** the checkpoints, newest first: `id`, `label`, `created`, `files`, `changedSince` (files that differ now).
+- **Kept:** the last 20 per project. Nothing under the project folder is written.
+- **Result:** `id`, `label`, `files` (count), `missing` (members named in the `.vbp` that weren't on disk), and how to roll back.
+
+#### `project_rollback`
+
+**Arguments:** `checkpoint` (id, label or `latest`), `confirm` (must be true), `discard_unsaved?`, `path?`, `project?`, `pid?`.
+
+Writes a checkpoint's files back where they differ (temp file, then move).
+- **Closed project:** written directly. Refused if any IDE has one of the files loaded (hard rule 4), including a shared module loaded by another project.
+- **Open project:** design mode, and not in an IDE another session owns. Unsaved changes need `discard_unsaved: true` (hard rule 9). The project is closed (the files VB writes on close are snapshotted and put back, and source files it creates for never-saved components are deleted, as in `project_close discard`), the checkpoint is restored, and the project is opened again in the same IDE.
+- **Paths** must all be under the workspace roots (hard rule 8). Audited.
+- **Files added since** the checkpoint (new members, or files that didn't exist then) are left on disk and listed in `addedSince`; the restored `.vbp` doesn't name them.
+- **Result:** `status` (`restored` or `partly restored`), `restored` (paths written), `unchanged` (count), `failed`, `addedSince`, `reopened` (`{pid, project}`, or `{pid, error}`).
+
+Verified live on a copy of the Basic fixture: a saved edit plus the `.vbp` rewrite VB made on save were rolled back and the project reopened with the original hash; with an unsaved edit the call was refused until `discard_unsaved: true`. The files ended byte-identical to the originals.
+
+## Reading code
+
+### `code_read`
+
+Read code as the IDE holds it right now, including unsaved edits.
+
+**Arguments:** `component`, `project?`, `pid?`, `start_line?`, `count?` (1-based; both or neither).
+
+**Served by:** add-in `READ`.
+
+**Result:**
+```json
+{ "source": "ide", "project": "Project1", "component": "Form1", "dirty": true,
+  "countOfLines": 5, "hash": "3f2a9c0d1e4b5a67", "startLine": 1,
+  "text": "Option Explicit\r\n\r\nPrivate Sub Form_Load()\r\n    MsgBox \"hi\"\r\nEnd Sub" }
+```
+- Lines are CR LF separated. The hidden `Attribute` lines and the `.frm` designer block aren't part of the code module, so they're not included.
+
+
+**Large modules:** without `start_line`/`count`, at most 2,000 lines and 100,000 characters come back (a 185 KB class overflowed the client, improvement notes item 13).
+- A cut result has `truncated: true`, `nextStartLine` and a `note`. Read on with `start_line`.
+- `hash` always covers the whole text, so edits need no full read.
+- An explicit range is returned as asked, up to the character cap.
+
+### `symbol_outline`
+
+Outline from the IDE's own parser (`CodeModule.Members`): a cheap way to navigate large modules.
+
+**Arguments:** `component`, `project?`, `pid?`.
+
+**Served by:** add-in `MEMBERS`.
+
+**Result:**
+```json
+{ "source": "ide", "project": "Project1", "component": "Form1",
+  "members": [
+    { "Name": "Form_Load", "kind": "method", "procKind": "proc", "scope": "private", "static": false,
+      "line": 3, "startLine": 2, "lines": 3 },
+    { "Name": "m_count", "kind": "variable", "procKind": null, "scope": "private", "static": false,
+      "line": 1, "startLine": null, "lines": null }
+  ] }
+```
+- `kind`: `method`, `property`, `variable`, `event`, `const`. `procKind`: `proc`, `get`, `let`, `set` (methods/properties only).
+- `line` = the `Sub`/`Function`/`Property` line (or the declaration line); `startLine`/`lines` follow VB6's definition and include the blank and comment lines above the procedure.
+- A property appears once **per kind** (`get`, `let`, `set`), even though VBIDE's `Members` lists it only once.
+
+### `symbol_find`
+
+Find where a name is declared in the projects open in running IDEs.
+
+**Arguments:** `name`, `contains?` (substring match instead of exact), `project?`, `pid?` (narrow the search).
+
+**Served by:** add-in `PROJECTS` + `COMPONENTS` + `MEMBERS` for every component with a code module, i.e. the IDE's own parser (principle 3: no parser of ours). Matching is case-insensitive.
+
+**Result:**
+```json
+{ "name": "AddNumbers", "contains": false, "truncated": false,
+  "matches": [ { "pid": 10856, "project": "Basic", "component": "modMath", "componentType": "StdModule",
+                 "Name": "AddNumbers", "kind": "method", "procKind": "proc", "scope": "public", "line": 7 } ],
+  "skipped": [] }
+```
+- Stops after 200 matches (`truncated`). IDEs that don't answer (busy, unreachable) are listed in `skipped`.
+- Finds declarations only, not usages; text search over the files covers usages (principle 3).
+- Projects that aren't open in an IDE aren't searched; use `ws_projects` / `file_read` for those.
+
+### `symbol_refs`
+
+Every statement that uses a name, across the projects under the workspace roots (PLAN.md C5, improvement notes 4: the agent needed every caller of `Add_To_Audit` in six projects and which optional arguments they pass; grep missed the calls continued over several lines).
+
+**Arguments:** `name` (one identifier), `project?` (projects whose name contains it, or one `.vbp` path), `declarations?` (default true), `refresh?`.
+
+- **Served by** the server (`VbRefs`, `WorkspaceTools`): the code part of every member of the selected projects (`VbSourceFile`, IDE line numbering), each shared file once. A component that is **dirty in a running IDE** is read from the IDE instead (hard rule 4); `source` says which.
+- **Matching:** whole word, case-insensitive (VB names aren't case-sensitive), also when qualified (`modAudit.Add_To_Audit`). Statements are joined across ` _` continuations first. String literals and comments (`'`, `Rem`) don't count. No parser beyond that (principle 3): a local variable with the same name in another module is listed too.
+- **Declarations** (`Sub`/`Function`/`Property`/`Declare`/`Event` of that name) are marked `declaration: true`; `declarations: false` leaves them out.
+- **Limit:** 300 statements (`truncated`, narrow with `project`).
+- **Result:** `count`, `filesScanned`, `files: [{path, source, projects, refs: [{line, endLine?, declaration?, statement}]}]`, `warnings` (an IDE that didn't answer: its unsaved changes aren't included).
+
+```json
+{ "name": "Add_To_Audit", "projects": 61, "filesScanned": 1830, "count": 2,
+  "files": [ { "path": "D:\\src\\Shared\\modAudit.bas", "source": "disk", "projects": ["AppA", "AppB"],
+               "refs": [ { "line": 4, "endLine": 6, "statement": "Add_To_Audit \"Pay\", \"amount \" & CStr(x)" } ] } ] }
+```
+
+### `proc_get`
 
 Read one procedure or property, with the comment lines above it.
 
@@ -203,6 +478,25 @@ Read one procedure or property, with the comment lines above it.
 
 ---
 
+## Dialogs
+
+### `ide_dialog_respond`
+
+**Arguments:** `button` (caption, e.g. `OK`, `No`), `dialog?` (caption; needed when several dialogs are open), `repeat?`, `pid?`.
+
+**Served by:** window reads (finds the dialog and the button's window handle) + add-in `CLICK`, then a re-read to verify.
+
+**`repeat: true`** (the owner: a missing reference or control makes VB "ask the same message many many times" in a project with many forms; "click OK until it stops", spike 36): after the first click, keeps pressing the same button while the next dialog is the same kind of message (its text with quoted paths blanked out), waiting up to 5 s for each next form; at most 500 clicks. Then it reads the `.log` files the messages named and sums them up. Result: `repeated` (clicks), `stoppedBecause` (`no more dialogs`, `a different dialog`, the limit), `distinctMessages`, `missing` (per class or licence: `class`, `reason`, `controls`, `forms`, `formNames`), `dialogsNow`. Verified on a 12-form fixture: 12 clicks, stopped at the SourceSafe question, `MSComctlLib.ProgressBar` on 12 forms. Saving such a project would drop the controls that didn't load; fix the component and reopen instead.
+
+**Result:**
+```json
+{ "clicked": "No", "dialog": "Source Code Control", "text": "Add this project to SourceSafe?",
+  "dialogClosed": true, "dialogsNow": [] }
+```
+The button must always be named explicitly (hard rule 9). An unknown button lists the available ones.
+
+---
+
 ## Editing
 
 Rules for all editing tools:
@@ -214,9 +508,24 @@ Rules for all editing tools:
 
 ### `code_replace_lines`
 
-**Arguments:** `component`, `start_line`, `count` (0 = insert), `new_text` (empty = delete), `expected_hash`, `project?`, `pid?`.
+**Arguments:** `component`, `start_line`, `count` (0 = insert), `new_text` (empty = delete), or `edits`, plus `expected_hash`, `project?`, `pid?`.
 
-**Served by:** `READ` (hash check) + `REPLACE` + `READ`.
+**Several ranges in one call:** `edits: [{start_line, count, new_text}, …]`, at most 500 (improvement notes item 5: a 50-line rename took 50 calls, each needing the previous hash).
+- All ranges are numbered against the text `expected_hash` covers, and must not overlap or share a start line. They are checked before anything is sent.
+- They are applied bottom-up, so line numbers above each edit stay valid.
+- Each is a separate VBIDE edit with its old text as guard. If one fails, the error says how many later edits were already applied (undo in VB6).
+- The result lists them as `edits` (in file order) instead of `replaced`.
+
+**Find/replace** (PLAN.md A6), instead of ranges: `find`, `replace`, `whole_word?` (default true), `match_case?` (default false, as VB names ignore case), `in_strings?`, `in_comments?` (default false: only code changes, so a rename doesn't touch messages or comments), `apply?`.
+- Without `apply: true` it is a **preview**: `preview: {lines, changes: [{line, old, new}] (at most 200), note}` and the unchanged `hash`. Nothing changes.
+- With `apply: true` the changed lines become an `edits` list against `expected_hash` (at most 500 lines), applied as above. No matches: an error, nothing changed.
+- Within a line only (find and replace can't contain line breaks). Also on `file_replace_lines` (disk, or routed to the IDE that has the file loaded).
+
+**Line breaks and escapes** (owner, 2026-10-17: CR LF and backslashes had to be fixed by hand): any mix of CR, LF and CR LF in the submitted text becomes CR LF. The code parameters' descriptions and the server instructions say VB6 is Windows-only and that VB strings have no escapes. When a string literal in the submitted code contains `\n`, `\r`, `\t` or a doubled backslash (not a leading `\\` of a UNC path), the result has `codeHints` explaining it (`vbCrLf` / single backslashes). Applies to `code_replace_lines`, `code_insert`, `proc_replace` and `file_replace_lines`.
+
+**Served by:** `READ` (hash check) + one `REPLACE` per range + `READ`.
+
+**Re-cased names:** VB keeps one spelling per name for the whole project and re-cases new text to it. Retyping `Err.number` as `Err.Number` can therefore leave the module, and its hash, unchanged (improvement notes item 24). The result's `vbKeptSpelling` lists each typed name VB spells differently (`"Number -> number"`), and the note says when the module didn't change at all. Strings and comments are ignored. Applies to `code_replace_lines`, `code_insert` and `proc_replace`.
 
 **Result:**
 ```json
@@ -234,29 +543,6 @@ Rules for all editing tools:
 **Arguments:** `component`, `name`, `new_text`, `expected_hash`, `kind?` (`proc`, `get`, `let`, `set`), `project?`, `pid?`.
 
 Replaces exactly the range `proc_get` returns: from the first comment line above the declaration to `End Sub`/`Function`/`Property` (VB6's own procedure start includes the blank lines above it; those are left alone). `new_text` is the complete new procedure including its comments.
-
-### `project_save`
-
-**Arguments:** `project?`, `pid?`.
-
-**Served by:** `SAVE` (deferred File > Save Project), then polling `COMPONENTS` and dialogs for up to 20 s.
-
-**Result** (`status`): `saved` (with the components that were unsaved), `nothing-to-save`, `dialog` (reported, not answered, e.g. a source-control checkout prompt) or `pending`. Refused for a never-saved project (Save would open a Save As dialog).
-
-### `ide_dialog_respond`
-
-**Arguments:** `button` (caption, e.g. `OK`, `No`), `dialog?` (caption; needed when several dialogs are open), `pid?`.
-
-**Served by:** window reads (finds the dialog and the button's window handle) + add-in `CLICK`, then a re-read to verify.
-
-**Result:**
-```json
-{ "clicked": "No", "dialog": "Source Code Control", "text": "Add this project to SourceSafe?",
-  "dialogClosed": true, "dialogsNow": [] }
-```
-The button must always be named explicitly (hard rule 9). An unknown button lists the available ones.
-
----
 
 ## Run and debug
 
@@ -279,7 +565,18 @@ VB6 has no debugger API. These tools run IDE commands (deferred in the add-in, p
 
 **Verified live** (Basic fixture, 2026-10-13): `syntax_check` (compiles, start + end), `bp_toggle` in `AddNumbers`, `run_start`, the user clicked Add, the IDE stopped at the breakpoint, `debug_where` (line 8, the current statement), `debug_eval` `a` = 1, `b` = 0, `g_callCount` = 0, `step_over` (line 9), `bp_clear_all`, `run_continue`, `run_end`; in design mode `debug_eval` of `PI_APPROX * 2` (6.28318) and `AddNumbers(40, 2)` (42), with the Immediate window's existing content and the user's clipboard text preserved.
 
-**`debug_eval`** result: `{ "expression": "x", "status": "ok", "result": "42" }`. In design mode only module-level and global names are in scope, and calling a function runs it. A dialog that appears while evaluating (e.g. a runtime error) is reported (`status: "dialog"`), not answered. Reading the Immediate window uses the clipboard; the user's clipboard **text** is restored.
+**`debug_eval`** result: `{ "expression": "x", "status": "ok", "result": "42" }`. In design mode only module-level and global names are in scope, and calling a function runs it. A dialog that appears while evaluating (e.g. a runtime error) is reported (`status: "dialog"`), not answered.
+
+**Side effects are refused** (PLAN.md E5). The Immediate window runs with the IDE's rights (usually an administrator's), so an expression is code execution. Both T12 batch runs changed rows of the owner's test database from it (`SqlCon.Execute("update orders set ...")`), and the owner asked for every kind of side effect to be covered. `EvalPolicy` refuses, before anything is typed:
+- **database writes:** SQL that changes data, schema or rights (`INSERT INTO`, `UPDATE x SET`, `DELETE FROM`, `DROP`/`ALTER`/`CREATE`/`TRUNCATE`, `MERGE`, `EXEC`, `GRANT`/`REVOKE`/`DENY`, `xp_cmdshell`, `BULK INSERT`, `BACKUP`/`RESTORE`, `SHUTDOWN`) and recordset/connection calls (`.AddNew`, `.Update`, `.Delete`, `.Edit`, `.BeginTrans`, `.CommitTrans`);
+- **process starts:** `Shell`, `ShellExecute`, `CreateProcess`, `WinExec`, `WScript.Shell` `.Run`/`.Exec`, `Shell.Application`, WMI (`winmgmts`, `Win32_Process`);
+- **file changes:** `Kill`, `FileCopy`, `Name … As`, `MkDir`, `RmDir`, `SetAttr`, `Open … For Output/Append/Binary/Random`, `SavePicture`, `FileSystemObject` and `ADODB.Stream` writers, the Win32 file APIs;
+- **registry:** `SaveSetting`, `DeleteSetting`, `.RegWrite`, `.RegDelete`, `Reg*` APIs, `StdRegProv`;
+- **network:** XMLHTTP, WinHttp, Inet, Winsock, `URLDownloadToFile`, WinInet;
+- **scripts and code:** `ScriptControl`, `.AddCode`/`.ExecuteStatement`, `CallByName`, the VBIDE object model;
+- **keystrokes and system:** `SendKeys`, `AppActivate`, `keybd_event`, `SendInput`, shutdown and privilege APIs.
+
+The refusal is audited and tells the agent to test through the program's UI. **Asking the user** (spike 33): with the vb6-mcp Claude Code hook installed (its matcher includes `mcp__vb6__debug_eval`), the agent can call again with `allow_side_effect: true`; the hook shows the user a permission prompt with the expression and what it does, and only an approved call reaches the server, which then runs it (audited as approved). Without the hook the flag is refused, since an agent could pass it itself; in headless runs nobody can approve, so it doesn't run. **`VB6MCP_EVAL=open`** (installers: `-EvalOpen`) lets such expressions run; the result then has `sideEffect` and a note to undo it, and `audit.log` gets a line before it. A guard rail, not a sandbox: a procedure of the project that writes (`UpdateCard(184)`) isn't recognised, since only the expression's text is checked. The agent's own shell commands are covered by the Claude Code hook (`ShellPolicy`, README). Reading the Immediate window uses the clipboard; the user's clipboard **text** is restored.
 
 **`syntax_check`** results:
 ```json
@@ -347,7 +644,13 @@ No user code runs. Example (DebugFixture, stopped in `Inner`):
 
 ---
 
-## The running program (Phase 3)
+### Pending reloads before compiling or running
+
+`syntax_check`, `build_in_ide` and `run_start` first wait (up to 8 s) for reloads the watchdog has pending for that IDE: files changed on disk during a run are reloaded only in design mode, a few seconds after `run_end` (improvement notes 27).
+- When there were any, the result has `reloads: {applied, stillPending?, note}`.
+- `stillPending` means the IDE still has the previous text of those files.
+
+## The running program
 
 Drive the program being debugged, the way a user would. The program runs **inside `VB6.EXE`**, so its windows belong to the IDE process.
 
@@ -358,7 +661,7 @@ Drive the program being debugged, the way a user would. The program runs **insid
 | Tool | Arguments | Needs mode | What it does |
 |------|-----------|------------|--------------|
 | `app_windows` | `pid?` | any | the program's top-level windows: `hwnd` (hex), `kind` (Form, MDIForm, Dialog), caption, class, position, size, enabled |
-| `app_tree` | `window?`, `pid?` | run, break | the controls of a form: `hwnd`, `kind` (CommandButton, TextBox, CheckBox, ...), text, position relative to the form's client area, visible, enabled, depth |
+| `app_tree` | `window?`, `pid?` | run, break | the controls of a form: `hwnd`, `kind` (CommandButton, TextBox, CheckBox, ...), text, position relative to the form's client area; `depth`, `hidden`, `disabled` only when they apply (compact, see the token breakdown) |
 | `app_click` | `control?` or `text?`, `window?`, `pid?` | run | clicks a command button, check box or option button. `text` matches the caption without `&`, case-insensitive |
 | `app_set_text` | `text`, `control?` or `index?`, `window?`, `pid?` | run, no dialog | sets a text box's text (fires `Change`); returns `textNow` and `applied` |
 | `app_mouse` | `action` (click, double_click, right_click, drag), `x`, `y`, `to_x?`, `to_y?`, `real_input?`, `window?`, `pid?` | run, no dialog | mouse input at a point relative to the form's client area. By default it posts messages to the deepest window under the point without touching the user's mouse, and a drag goes entirely to the window it starts in. **Labels and Images need `real_input: true`** (spike 17) |
@@ -451,88 +754,7 @@ Errors: `the IDE is in design mode; the program must be running` (input tools), 
 
 ---
 
-## Watchdog and recovery (Phase 2b)
-
-The elevated watchdog (`vb6mcp watchdog`, started by the add-in; PLAN.md §3.1) covers the times when an IDE's add-in can't answer, because the debugged program loops or the IDE hangs. It is a sidecar. Without it everything else still works, and the tools below say when they need it. `ide_list` and `ide_status` report it as `watchdog: { pid, version, elevated }`, or `null` when it isn't running.
-
-**Fallbacks in existing tools:**
-- **`run_break`:** uses the IDE's Break command when the IDE responds. When the program keeps the IDE busy, the watchdog injects Ctrl+Break (spike 12) instead. It does that only with VB6, or Windows' stand-in for its unresponsive window, in front, and puts the previous window back afterwards. `method` says which was used.
-- **`ide_dialog_respond`:** if the add-in doesn't answer, the watchdog clicks the button (`via: "watchdog"`).
-- **`app_screenshot`:** if an elevated IDE can't run the add-in's capture (busy or hung), the watchdog captures it. `PrintWindow` gets a 3 s timeout, then falls back to a copy of the screen area, which shows only what is visible.
-- **`ide_launch`:** with an elevated watchdog running, VB6 is started by the watchdog: elevated, with **no UAC prompt** (`via: "watchdog (no UAC prompt)"`, spike 12b). If the new VB6 shows a dialog before our add-in has loaded (another add-in's error at startup, e.g. Visual Component Manager), the result is `status: "dialog-before-addin"` with the new `pid` and the dialog.
-- **`ide_dialog_respond` with the pid of a VB6 that has no add-in yet** (still starting) clicks through the watchdog (`via: "watchdog (no add-in yet)"`).
-
-| Tool | Arguments | What it does |
-|------|-----------|--------------|
-| `ide_kill` | `force` (required true), `pid?` | ends a hung VB6 through the watchdog. The result lists the recovery copies of that IDE with their age. Killed in run or break mode, it also lists `comLeftovers`: `.vbp` files whose classes stay registered to the VB6 debugger until VB6 next starts (spike 25; repair with `com_orphans`) |
-| `recovery_list` | `from_pid?` | recovery sessions: pid, `running`, `crashed`, projects, and per component when it was copied |
-| `recovery_read` | `from_pid`, `component`, `project?` | the copied text, and whether it differs from the file on disk |
-| `recovery_restore` | `from_pid`, `component`, `project?`, `pid?` (target) | replaces the code of the component **with the same file** in an open project of a running IDE (design mode). The component is left unsaved |
-| `recovery_discard` | `from_pid`, `confirm` (required true) | deletes a finished session's copies (refused while that VB6 is still running) |
-
-**How recovery copies are taken:**
-- Every 10 s the watchdog asks each IDE's add-in for its projects and components. It reads the code of the **unsaved** ones and writes copies to `%LOCALAPPDATA%\vb6mcp\recovery\<pid>\` when the text changed.
-- It does this only while the user has been idle for 5 s (`GetLastInputInfo`) and the IDE is in design or break mode, so it never interrupts typing or a running program (hard rule 12).
-- Copies of components that were saved are removed. A cleanly closed IDE's folder is removed.
-- An IDE whose discovery file stayed behind (crash, kill) is marked `crashed`, and its copies are kept for 7 days.
-- Only the code is copied, not designer properties: a form's layout comes from its file on disk.
-
-After a crash: `ide_launch` the project, then `recovery_list`, `recovery_read` and `recovery_restore`. The user reviews the result and saves (`project_save`).
-
-**Verified live** (spike 19), with no help from the user:
-1. A busy loop was broken with `run_break` through the watchdog while Claude was in front: VB6 came forward, stopped at the `Loop` line, and Claude was restored.
-2. An unsaved edit was copied about 10 s after it was made.
-3. `ide_kill` listed the copy.
-4. `ide_launch` started VB6 elevated without a UAC prompt. A Visual Component Manager startup box was answered through the watchdog.
-5. `recovery_restore` brought back the identical module (same hash), unsaved.
-
----
-
-## Builds (Phase 4)
-
-VB6 `/make` refuses a project that is open in any IDE (spike 21). So the tools split by whether the project is open:
-
-| Tool | Arguments | What it does |
-|------|-----------|--------------|
-| `build_make` | `path?` (`.vbp`), `project?`, `pid?` | **Closed project** (`path` under `VB6MCP_ROOTS`): `VB6.EXE /make` from the files on disk, started elevated by an add-in, so an ActiveX DLL/OCX is registered on success. Returns `status` (`succeeded`, `failed`, `dialog`, `timeout`), `errors` (file, line, message), the raw `log`, and the output file before/after. **Open project:** if saved, built in its IDE (File > Make; `via` says so); with unsaved changes, refused |
-| `build_in_ide` | `project?`, `pid?` | File > Make from IDE memory (`MakeCompiledFile`), unsaved edits included; design mode. `status`: `succeeded`, `failed` (with `compileCheck`: message and location from a full compile, because `MakeCompiledFile` itself only fails generically), `dialog`, `timeout`. An existing output file is replaced without a prompt |
-
-Notes from spike 21:
-- **Error lines:** `/make` counts the IDE's code lines from 0. `errors[].line` is the 1-based IDE line (as in `code_read`) and `fileLine` the line in the file on disk.
-- **Binary compatibility break:** `/make` fails with a `kind: "compatibility"` error naming the class and member. Nothing is written or registered.
-- **In the IDE:** the same break is a decision dialog. `build_in_ide` returns `status: "compatibility-decision"` and leaves it for the user (hard rule 13).
-
-**Verified live** (2026-10-14): closed EXE and ActiveX DLL builds (the DLL registered and callable), compile errors from `/make` and from memory with location, and a binary compatibility break both ways.
-
----
-## Sync: files changed outside the IDE (Phase 4)
-
-The watchdog's sync engine checks the files of every loaded project every 2 seconds (PLAN.md §8):
-- **How it knows:** a file whose time stamp or size changed without the IDE writing it (the add-in records the IDE's own saves) was changed outside: git, another editor, or another IDE that has the same shared file. The change must look the same on the next check before anything happens, so half-written files are left alone.
-- **Clean component, design mode:** reloaded automatically (the add-in checks again right before).
-- **Run or break mode:** reloaded once the IDE is back in design mode.
-- **Component with unsaved IDE changes:** a **conflict**. Nothing is touched; it is resolved with the tools below.
-- **`.vbp` changed, file deleted:** reported only. Reloading a project is disruptive and left to the user.
-
-| Tool | Arguments | What it does |
-|------|-----------|--------------|
-| `sync_status` | `pid?` | conflicts (`pid`, `project`, `component`, `file`, `detected`) and the last 30 events (`reloaded`, `pending`, `conflict`, `resolved`, `not-reloaded`, `project-changed`, `deleted`) |
-| `sync_diff` | `component`, `project?`, `pid?` | unified diff of the IDE text (unsaved changes included) against the file on disk (`--- ide`, `+++ disk`); `same` when equal |
-| `sync_take_disk` | `component`, `confirm` (required true), `project?`, `pid?` | keeps a recovery copy of the IDE text (if unsaved) in its own recovery session (`kept`; listed by `recovery_list` with a note, kept 7 days), then reloads the component from disk, **discarding the IDE changes**; design mode. Verifies the IDE text equals the file afterwards |
-| `sync_take_ide` | `component`, `confirm` (required true), `project?`, `pid?` | saves the project, writing the IDE version over the changed file. **All** unsaved components of the project are saved (`alsoSaved` lists them) |
-
-A conflict ends by itself when the component has no unsaved changes any more: after either tool, or after the user saves or reloads in VB6.
-
-**Verified live** (2026-10-14, scratch copy of Basic):
-- An outside change to an unmodified module was reloaded 4 s later, also while the "Add to SourceSafe?" prompt was open.
-- An outside change to a module with an unsaved edit became a conflict, the edit untouched; `sync_diff` showed both sides.
-- `sync_take_disk` reloaded from disk, and the conflict resolved itself on the next poll.
-- **Found in that test:** the recovery poller deleted the kept copy, because the component was no longer unsaved. Kept copies now live in their own session; verified in the second round.
-- `sync_take_ide` saved without a group dialog, and the conflict resolved as "the IDE saved its version". The save was recognised as the IDE's own, with no reload (spike 22).
-
----
-
-## Form designer (Phase 5)
+## Form designer
 
 The designer of a form, UserControl or property page as the IDE holds it now, unsaved changes included.
 
@@ -564,7 +786,9 @@ Every control, walking containers from the form down. Each has:
 
 ### `form_properties`
 
-**Arguments:** `component`, `control`, `project?`, `pid?`.
+**Arguments:** `component`, `control`, `names?`, `project?`, `pid?`.
+
+`names` limits the list to those properties: exact names, or prefixes ending in `.` (`["Caption", "Left", "Font."]`). A control has 50–100 properties, and full lists were about 5% of a redesign run's re-read tokens.
 
 All design-time properties as `{ name, type, value }`:
 - `type` is `string`, `number`, `boolean`, `object`, `indexed` or `error`.
@@ -592,9 +816,59 @@ Renaming (`Name`) doesn't rename the control's event procedures, just as in the 
 
 Result: `now`, the value read back. For `Font.Bold` that's all the `Font.*` members.
 
+### `form_set_properties`
+
+**Arguments:** `component`, `changes` (list of `{control, property, value}`, at most 500), `verbose?`, `project?`, `pid?`. Design mode.
+
+Several `form_set_property` changes on one form or UserControl in a single call. Values and rules are the same: text converted to the property's type, `Font.*` members, `@picture:<path>` under the workspace roots, lists one item per line.
+- **Why:** restyling six real forms took 107–160 separate `form_set_property` calls (benchmark T8 on a private project, report not published), and each MCP round trip costs the agent tokens. The server runs the same deferred `DESIGN SET` per change, so there's no new add-in verb.
+- **Checked first:** a malformed item (missing control, property or value) fails the call before anything changes.
+- **In order, no rollback:** a value VB refuses (`not a number: x`, error 380) is reported on its item and the rest still run.
+- **Stops early** when the IDE gets busy or a dialog opens (a UserControl's code, spike 28). The items after it are counted in `notAttempted`.
+- **Fonts:** setting the form's `Font` doesn't restyle the controls already on it (T8); set each control's `Font.*` too.
+
+Result: `applied`, `failed`, `notAttempted`, `dirty`, `stopped` (the reason, or null) and `results`: by default only the **failed** changes, `{control, property, ok: false, error}`. Echoing every change was about 15% of a redesign run's re-read tokens ([token breakdown](benchmarks/2026-10-17-token-breakdown.md)). With `verbose: true`, one per change in order: `{control, property, ok, now}` (the value read back); for a list property, or when VB returns more than the one property, `nowAll` has every record.
+
+Example:
+
+```json
+{"component": "frmAddCards", "changes": [
+  {"control": "frmAddCards", "property": "BackColor", "value": "&H00FAF7F5&"},
+  {"control": "Label1", "property": "Font.Name", "value": "Segoe UI"},
+  {"control": "cmdWrite", "property": "Caption", "value": "Write orders"}]}
+```
+
+### `form_layout`
+
+**Arguments:** `component`, `rows`, `container?`, `left?`, `top?`, `gap_x?` (120), `gap_y?` (90), `margin?` (120), `column_widths?`, `row_heights?`, `fill?` (true), `valign?` (`center`), `align?` (`left`), `anchor?` (`top`), `size_container?`, `dry_run?`, `project?`, `pid?`. Design mode.
+
+Arranges the controls of one container (the form, a Frame or a PictureBox) as a grid. The agent names the arrangement; the server works out Left/Top/Width/Height and sets them through the same `DESIGN SET` loop as `form_set_properties` (no add-in verb).
+- **Why:** the T9–T12 redesigns placed 39–60 controls one at a time with twips worked out by hand, which is where overlapping controls came from (PLAN.md E1).
+- **`rows`:** a list of rows, each a list of control names (`Name` or `Name(index)`). `""` is an empty cell. The same name in adjacent cells of a row spans those columns. One row is a row of buttons; one name per row is a column.
+- **Sizes:** a column is as wide as its widest single-column control, a row as high as its tallest control, unless `column_widths`/`row_heights` give a number (`null` = automatic). With `fill` every control takes its cell's width (all text boxes of a column the same width); heights are kept. Controls are centred vertically in their row, so a label sits level with the text box beside it.
+- **Placement:** from `left`/`top` if given; otherwise `margin` from the container's left (`align: left`), centred, or `margin` from the right (`align: right`), and `margin` from the top or bottom (`anchor`). A Frame's caption takes 180 twips at the top (an 8 pt caption), so its first row starts at 300 by default.
+- **Container size:** the form's and a PictureBox's inside size is `ScaleWidth` x `ScaleHeight`; a Frame's is its `Width` x `Height` (its children are placed from its outer corner). `size_container: true` sets the container's `Width`/`Height` so the block plus `margin` fits; for a form or PictureBox the border and title bar (`Width - ScaleWidth`) are added. It needs a block placed from the top-left. A container whose `ScaleMode` isn't twips gets a warning, and isn't resized.
+- **Checked first:** names not in the container (with the container they are in), a name used twice, an empty grid, bad options: nothing changes.
+- **Only what changed** is set (positions already right are skipped). The result lists `positions`, the `block` rectangle, `containerSize`, `applied`/`failed`/`notAttempted`, `warnings` (the block runs past the container's edge) and the usual `overlaps` with controls outside the grid.
+- **`dry_run: true`** returns the positions and how many properties would be set, without changing anything.
+
+Verified live on a production project's `frmFixAccount` (a frame of label pairs fitted with `size_container`, two buttons with `align: right, anchor: bottom`), checked with `form_screenshot`.
+
+Example:
+
+```json
+{"component": "frmCustomer", "container": "fraDetails", "size_container": true,
+ "rows": [["lblName", "txtName"], ["lblCity", "txtCity"], ["txtNotes", "txtNotes"]]}
+{"component": "frmCustomer", "rows": [["cmdOK", "cmdCancel"]], "align": "right", "anchor": "bottom"}
+```
+
 ### `form_add_control`
 
-**Arguments:** `component`, `prog_id`, `name?`, `container?`, `left?`, `top?`, `width?`, `height?`, `project?`, `pid?`.
+**Arguments:** `component`, `prog_id`, `name?`, `container?`, `left?`, `top?`, `width?`, `height?`, `properties?`, `project?`, `pid?`.
+
+`properties` sets properties on the new control in the same call: `{"Caption": "OK", "Font.Bold": "True"}` (values as text, numbers or true/false), with the same conversion, checks and hints as `form_set_properties`.
+- A malformed `properties` argument adds nothing.
+- A value VB refuses is reported in `properties` (`{property, ok, error}`), and the control stays.
 
 `prog_id` is the class name **as a `.frm` writes it**: `VB.CommandButton`, `VB.Frame`, `MSComctlLib.ListView`.
 - It is not the registered ProgID (`MSComctlLib.ListViewCtrl.2`): with that, VB's `Add` returns nothing (spike 23).
@@ -602,6 +876,40 @@ Result: `now`, the value read back. For `Font.Bold` that's all the `Font.*` memb
 - `container` puts it inside a Frame or PictureBox.
 
 Result: `added`, the new control as in `form_controls`. When saved, VB writes the OCX's `Object =` line into the `.frm` header and the `.vbp` itself, consistently (verified).
+
+### Designer rules, hints and overlaps (`form_set_property`, `form_set_properties`, `form_layout`, `form_add_control`)
+
+Verified on this machine (spike [29](spikes/29-designer-rules.md)). The tools act on them or say them in the result:
+- **Controls placed by hand** (benchmark T12 round 6: agents computed twips in Python although `form_layout` was loaded): when one call moved at least 4 controls of the same container (`Left`/`Top`), a hint gives the `form_layout` call that arranges them, rows taken from where they ended up (controls within 120 twips of a row's top form a row, left to right), e.g. `form_layout component=frmX container=fraInfo rows=[["lblName","txtName"],["lblCity","txtCity"]]`. The server instructions and `form_add_control` point at `form_layout` too.
+- **Changes only to `Font.*` members aren't counted by VB.** `IsDirty` stays False and Save Project skips the form, so the change would be lost. When that happens, the tool sets the form's `Tag` to its own value so VB counts it. If it can't, a hint says so.
+- **A form's `Font` doesn't change the controls already on it.** Hint after a form `Font.*` change.
+- **A CommandButton shows `BackColor` only with `Style = 1` (Graphical).** Hint when a button's `Style` isn't 1 and the same call doesn't set it.
+- **A CommandButton has no `ForeColor`.** VB's error 438 comes back with an explanation.
+- **Overlaps:** after a change to `Left`, `Top`, `Width`, `Height`, `Visible` or `Container`, or an added control, `overlaps` lists sibling controls (same container) that overlap a changed control: `{controls: [a, b], container, overlap: {width, height}, sameRectangle}`.
+  - A Label overlapping a windowed control (frame, button, text box) is reported, with a note: VB draws labels behind windowed controls, so the overlapped part is hidden. A Label that wholly contains the other control is a background (a coloured header band or status strip with buttons on it) and isn't reported.
+  - Not checked: label on label; Images, Shapes, Lines and Timers; members of one control array (often stacked on purpose); overlaps under 30 twips (2 pixels).
+  - Controls that are never visible at the same time may overlap on purpose. The hint says so.
+  - This costs one extra `CONTROLS` read, only after such changes.
+- After any move or added control, a hint says to check the layout with `form_screenshot`.
+- `hints` and `overlaps` are left out when empty. A check that couldn't run (a dialog, a busy IDE) is reported in `hints`.
+
+### `form_screenshot`
+
+**Arguments:** `component`, `maximize?` (default true), `max_width?` (default 1024), `project?`, `pid?`. Design mode.
+
+An image of a form, UserControl or property page as the designer shows it now, unsaved changes included. Use it to check layout, fonts and colours without running the program (many real forms need a database or login to run at all).
+- The add-in opens the designer (`DESIGN SHOW`, deferred) and maximizes it inside the IDE.
+- The server finds the designer's MDI child by the exact caption the add-in reports (VBIDE `DesignerWindow.Caption`, e.g. `frmMain (Form)`, with no project prefix; spike [28](spikes/28-designer-screenshot.md)). If two loaded projects have a component of that name, the designer just activated is on top of the MDI z-order and is the one taken. Inside it, the form surface is the largest visible child window that isn't a scroll bar (`ThunderForm` for a form).
+- It captures the whole IDE window, through the add-in when the IDE is elevated (spike 15: child panes captured on their own come out misaligned), and crops it to the form inside the designer's client area.
+- **A form bigger than the designer** is scrolled through a page at a time (`WM_VSCROLL`/`WM_HSCROLL` to the designer through the add-in, audited) and the pieces are stitched into one image; then the designer is scrolled back to the top left.
+
+Result: the PNG image plus `component`, `designer` (caption), `formSize`, `stitched` (number of captures, when more than one), `clipped` and `dirty`. `dirty: true` can come from opening the designer itself: UserControls on the form run their code then, and in a production project that marked `frmMain` changed (spike 28), just as opening it by hand does. `clipped: true` means part of the form couldn't be captured (the designer didn't scroll that far); those parts are blank.
+
+The designer stays open afterwards, as if the user had opened it.
+
+**Dialogs:** opening a designer the first time runs the code of UserControls on it. In a production project that showed a database "Login Error" box. This tool and the other designer tools then fail after about a second with the dialog's caption, text and buttons. Answer it with `ide_dialog_respond`; the request finishes by itself, so call the tool again.
+
+**Verified live** (2026-10-15, a production project, spike 28): six forms captured exactly; two larger than the IDE's 763x436 MDI area reported `clipped` (first version). With stitching (T9 round): `frmMain` 688x548 and `frmFixAccount` complete from 2 captures each.
 
 ### `form_remove_control`
 
@@ -620,7 +928,21 @@ Removes the control and any controls inside it. Its event procedures stay in the
 
 ---
 
-## References and components (Phase 5)
+### `form_resources`
+
+What a form, UserControl or property page keeps in its binary companion file (`.frx`/`.ctx`/`.pgx`), read from disk (spike 34). The owner's case: taking an image out of a form; VBIDE's `SavePicture` would turn it into a BMP, while the `.frx` keeps the original (a GIF stays a GIF), and it works for closed projects.
+
+**Arguments:** `path` (the `.frm`/`.ctl`/`.pag`/`.dsr`/`.dob` under the roots), `extract?` (`["imgLogo.Picture", "ImageList1.Images.ListImage3.Picture"]` or `["all"]` for every picture), `out_dir?` (a folder under the roots).
+
+- **Listing** (no `extract`): every property stored in the companion file: `name` (`Control.Property`, with its property group, e.g. an ImageList image `ImageList1.Images.ListImage1.Picture`), `kind` (`picture`, `empty picture`, `list`, `text`, `font`, `binary`), `imageType` (`gif`, `jpg`, `bmp`, `ico`, `cur`, `wmf`, `emf`, `png`), `bytes`, `key` (an ImageList image's Key), `items` (List/ItemData), `text` (long and multi-line texts, the font's face name).
+- **Extracting:** with `out_dir`, pictures are written in their original format and other blocks (an ActiveX control's saved state, a font) as `.bin`, named `<form>_<control>_<property>.<ext>`; existing files are never overwritten (`-2`, `-3`… are added). Without `out_dir`, the first requested picture is shown as an image (PNG).
+- **Secrets:** `Password=`/`Pwd=` values in texts (connection strings in `DesignConnection` and the like) are masked.
+- **Disk only:** an open project's unsaved designer changes aren't in the `.frx` until VB saves; `warning` says when a running IDE has the form dirty.
+- **Read-only** (hard rule 2): change pictures and lists with `form_set_property` (`@picture:`, `List`); VB rewrites the `.frx` on save. Audited.
+
+Verified on a production project's `frmMain` (an ICO, a GIF89a, ICOs and a BMP extracted byte-exact; two masked connection strings; SpyWorks state as binary) and another production project's `frmMain` (4 ImageList GIFs, SSTab empty pictures).
+
+## References and components
 
 Live from the IDE (VBIDE `References`).
 
@@ -692,7 +1014,7 @@ VB's own errors pass through, e.g. "Name conflicts with existing module, project
 
 ---
 
-## COM components (Phase 5)
+## COM components
 
 What components offer, what's registered where, binary compatibility, and (un)registration.
 
@@ -711,6 +1033,7 @@ The type library as VB-like declarations:
 - Interfaces with `Sub`/`Function`/`Property Get|Let|Set` and parameters: `ByVal`, `Optional`, defaults, `ParamArray`, VB types.
 - `Enum`s with values, and `Type`s.
 - Help strings as comments.
+- **Default members** (improvement notes 14, PLAN.md C1): the member with `DISPID_VALUE` (memid 0) is marked `' default member`, and listed even when hidden. A class line names its default interface's default member: `Class MSComm ' control ... ' default member: CommPort (as hidden _CommPort)`. That's what VB uses when code names the object itself (`x = MSComm1`, `If MSComm1 Then`). A hidden `_X` alias of a visible `X` is reported as `X`.
 
 Without a filter, a listing over 60,000 characters returns the type list (name, kind, member count) instead, so the agent can then ask for one type.
 
@@ -776,7 +1099,9 @@ It only reports; it never changes compatibility settings (hard rule 13).
 **Result:**
 - `exitCode`.
 - `before` and `after`: the file's typelib and classes, with where the registry points.
-- `verified`: after registering, everything points at this file; after unregistering, nothing does.
+- `verified`: after unregistering, nothing points at this file. After registering: regsvr32 exited 0, the typelib points here and no class points at another file (or simply everything points here).
+  - Creatable classes of the typelib that **nothing** registers are listed in `notRegistered` with a note, not counted as a failure (improvement notes 18: `CapPRO.dll` registers 5 of its 6 classes; the sixth, `RivetTalk`, is an internal helper). If no class at all got registered, it isn't verified.
+  - Classes registered to **another** file are in `registeredElsewhere` and fail the check (`com_where` shows which file).
 
 `com_unregister` is refused when some of the file's classes are registered to another file, because VB's unregistration removes the class keys whoever they point at. Pass `force: true` if that's intended.
 
@@ -817,6 +1142,52 @@ The scan covers ~9,100 classes and ~800 typelibs and takes a few seconds.
 - **When a workspace project builds the file:** its `compat_status` findings, which matter for 430.
 
 **Verified live:** 429 on `ComFixture.clsGreeter` after an IDE kill reported "registered to the VB6 debugger" and "typelib registered to a project file, left over". On Form1x it found its unregistered ComFixture reference.
+
+---
+
+## Builds
+
+VB6 `/make` refuses a project that is open in any IDE (spike 21). So the tools split by whether the project is open:
+
+| Tool | Arguments | What it does |
+|------|-----------|--------------|
+| `build_make` | `path?` (`.vbp`), `project?`, `pid?` | **Closed project** (`path` under `VB6MCP_ROOTS`): `VB6.EXE /make` from the files on disk, started elevated by an add-in, or by the watchdog when no IDE runs (PLAN.md D1: `via` says which; with neither, the error says how to start one), so an ActiveX DLL/OCX is registered on success. Returns `status` (`succeeded`, `failed`, `dialog`, `timeout`), `errors` (file, line, message), the raw `log`, and the output file before/after. **Open project:** if saved, built in its IDE (File > Make; `via` says so); with unsaved changes, refused |
+| `build_in_ide` | `project?`, `pid?` | File > Make from IDE memory (`MakeCompiledFile`), unsaved edits included; design mode. `status`: `succeeded`, `failed` (with `compileCheck`: message and location from a full compile, because `MakeCompiledFile` itself only fails generically), `make-failed` (the full compile passed, so the make step itself failed: improvement notes 20; `causes` lists what the server can see: output folder missing or not writable, output file read-only or in use), `dialog`, `timeout`. A project with no components loaded is refused up front (VB would open Project Properties, improvement notes 9). An existing output file is replaced without a prompt |
+
+Notes from spike 21:
+- **`defines`:** conditional compilation constants for this build, e.g. `{"noterm": 1}`, passed as `/make /d noterm=1` (improvement notes 7). Integers only (VB's `True` is -1). For closed projects only: an open project builds through VB's Make, and VBIDE can't set its constants. Use `project_settings` for a lasting change.
+- **Load errors:** when VB can't load a form or control ("Errors during load. Refer to '…\frmMain.log' for details", e.g. a licensed control without its licence, spike 27), the error has `kind: "load"`, `file` is that `.log`, and `details` holds its lines (up to 50), e.g. `Line 12: Cannot load control WinHook1; license not found`.
+- **Error lines:** `/make` counts the IDE's code lines from 0. `errors[].line` is the 1-based IDE line (as in `code_read`) and `fileLine` the line in the file on disk.
+- **Binary compatibility break:** `/make` fails with a `kind: "compatibility"` error naming the class and member. Nothing is written or registered.
+- **In the IDE:** the same break is a decision dialog. `build_in_ide` returns `status: "compatibility-decision"` and leaves it for the user (hard rule 13).
+
+**Verified live** (2026-10-14): closed EXE and ActiveX DLL builds (the DLL registered and callable), compile errors from `/make` and from memory with location, and a binary compatibility break both ways.
+
+---
+## Sync: files changed outside the IDE
+
+The watchdog's sync engine checks the files of every loaded project every 2 seconds (PLAN.md §8):
+- **How it knows:** a file whose time stamp or size changed without the IDE writing it (the add-in records the IDE's own saves) was changed outside: git, another editor, or another IDE that has the same shared file. The change must look the same on the next check before anything happens, so half-written files are left alone.
+- **Clean component, design mode:** reloaded automatically (the add-in checks again right before).
+- **Run or break mode:** reloaded once the IDE is back in design mode.
+- **Component with unsaved IDE changes:** a **conflict**. Nothing is touched; it is resolved with the tools below.
+- **`.vbp` changed, file deleted:** reported only. Reloading a project is disruptive and left to the user.
+
+| Tool | Arguments | What it does |
+|------|-----------|--------------|
+| `sync_status` | `pid?` | conflicts (`pid`, `project`, `component`, `file`, `detected`) and the last 30 events (`reloaded`, `pending`, `conflict`, `resolved`, `not-reloaded`, `project-changed`, `deleted`) |
+| `sync_diff` | `component?`, `project?`, `pid?` | unified diff of the IDE text (unsaved changes included) against the file on disk (`--- ide`, `+++ disk`); `same` when equal. **Without `component`:** a project summary (improvement notes 23): counts `same`/`caseOnly`/`differs`, and for each component that differs its `state`: `case-only` with `respelled` (`"Number -> number"`, disk -> IDE: VB keeps one spelling per name project-wide, so new code re-cases other modules), `differs` with `changedLines`, `never saved`, `file missing` |
+| `sync_take_disk` | `component`, `confirm` (required true), `project?`, `pid?` | keeps a recovery copy of the IDE text (if unsaved) in its own recovery session (`kept`; listed by `recovery_list` with a note, kept 7 days), then reloads the component from disk, **discarding the IDE changes**; design mode. Verifies the IDE text equals the file afterwards |
+| `sync_take_ide` | `component`, `confirm` (required true), `project?`, `pid?` | saves the project, writing the IDE version over the changed file. **All** unsaved components of the project are saved (`alsoSaved` lists them) |
+
+A conflict ends by itself when the component has no unsaved changes any more: after either tool, or after the user saves or reloads in VB6.
+
+**Verified live** (2026-10-14, scratch copy of Basic):
+- An outside change to an unmodified module was reloaded 4 s later, also while the "Add to SourceSafe?" prompt was open.
+- An outside change to a module with an unsaved edit became a conflict, the edit untouched; `sync_diff` showed both sides.
+- `sync_take_disk` reloaded from disk, and the conflict resolved itself on the next poll.
+- **Found in that test:** the recovery poller deleted the kept copy, because the component was no longer unsaved. Kept copies now live in their own session; verified in the second round.
+- `sync_take_ide` saved without a group dialog, and the conflict resolved as "the IDE saved its version". The save was recognised as the IDE's own, with no reload (spike 22).
 
 ---
 
@@ -901,12 +1272,15 @@ Which projects a change affects, **in rebuild order** (`Vb6Mcp.Core.Files.Affect
 
 ### `file_replace_lines`
 
+Takes `edits` like `code_replace_lines` (several ranges, one hash, applied bottom-up). On disk all edits are applied in memory and the file is written once, so a failing edit changes nothing. When the file is open in an IDE, the edits go there one by one, as with `code_replace_lines`.
+
 Edits the code of a VB6 source file **of a closed project** on disk. Arguments: `path`, `start_line` (1-based, the code as the IDE shows it and as `file_read` returns it), `count` (0 inserts before `start_line`), `new_text`, `expected_hash` (from `file_read`), and `pid?` when the file is open in several IDEs.
 
 - **On disk** (the file isn't open in any IDE):
   - Only the code lines change; header, designer block and everything else stay byte-exact (hard rule 2), and the file stays Windows-1252 with CR LF.
   - The new text is validated: 1252 only, 1023 characters per line, 24 continuations.
-  - Hidden inline `Attribute` lines (e.g. `VB_UserMemId` after a default property's signature) are put back after the same line when the new text keeps it; otherwise the edit is refused.
+  - Hidden inline `Attribute` lines (e.g. `VB_UserMemId` after a default property's signature, `VB_VarHelpID` after a `WithEvents` declaration) are put back after the same line when the new text keeps it; otherwise the edit is refused. This includes attributes right after the range's last line.
+  - `drop_var_help_ids: true` lets an edit drop a `WithEvents` variable's `VB_VarHelpID` instead, because VB writes it again on save (spike [30](spikes/30-withevents-attribute.md)).
 - **Open in an IDE:** the edit goes to the IDE instead, because its memory is the truth (hard rule 4). It stays unsaved there; `routedTo` names the component.
   - Refused if the IDE's text doesn't match `expected_hash`: it has unsaved changes, so use `code_read`.
   - Refused if the IDE isn't in design mode.
@@ -945,8 +1319,118 @@ Reads a `.bas/.cls/.frm/.ctl/.pag/.dsr` from disk **the way the IDE shows it**: 
 ```
 `openInIde` lists every running IDE that has the file loaded (hard rule 4: when it's loaded, the IDE's memory is the truth).
 
+### `res_read`
+
+A project's resource file (`.res`, the `.vbp`'s `ResFile32`), read-only (spike 35). VB code loads resources by id (`LoadResString`, `LoadResPicture`, `LoadResData`), so changing UI text or icons means knowing which ids exist and what they hold.
+
+**Arguments:** `path` (a `.res`, or a `.vbp` whose `ResFile32` is used; under the roots), `extract?` (`TYPE/name` keys such as `BITMAP/101`, `GROUP_ICON/MAINICON`, `CUSTOM/7`, or `["all"]`), `out_dir?` (a folder under the roots).
+
+- **Result:** `resources` (`key`, `type` such as STRING, BITMAP, GROUP_ICON, VERSION or a custom name like CUSTOM, `name` or id, `language`, `bytes`), `strings` (`id` as `LoadResString` takes it, `language`, `text`; at most 500), `version` (`fileVersion`, `productVersion`, `strings` such as CompanyName, FileDescription).
+- **Extracting:** bitmaps as `.bmp` (the file header added), icon and cursor groups as `.ico`/`.cur` (built from their images), anything else as raw data (its picture type if it is one, else `.bin`). Written to `out_dir`, never overwriting; without `out_dir` the first picture is shown. `all` takes everything except strings, version and the single icon/cursor images (their groups make the files).
+- Only 32-bit `.res` files (they start with an empty 32-byte entry). Changing resources stays with VB's Resource Editor; the hook refuses Edit/Write on `.res`.
+
+Verified on `AceScrollBarControl.res` (icon group and bitmap extracted as valid files), `VersionRipper.res` (version 1.9.0.204 and its strings) and the VB98 sample `AECLIENT.RES` (52 strings).
+
+## `batch_run`: several calls in one
+
+**Arguments:** `calls` (list of `{tool, args}`, at most 50), `continue_on_error?`.
+
+Runs vb6 tool calls in order, in the server, through the same tool code as single calls, so every check still applies per call: ownership, design mode, roots, audit, `expected_hash`. It adds no add-in verb.
+- **Why:** each MCP call is a model turn, and turns are what cost tokens and time. The free-hand Opus runs (benchmark T12) made 285–326 calls, many of them small chains like `app_click`, `app_wait`, `app_screenshot`.
+- **Errors:** it stops at the first error unless `continue_on_error: true`. The whole list is checked before anything runs: unknown tool names, malformed entries and excluded tools refuse the batch.
+- **Not allowed in a batch:** `ide_launch`, `ide_kill`, `build_make`, `build_in_ide` (long or disruptive: they stay single, visible calls), and `batch_run` itself.
+- **Values from earlier calls** (PLAN.md E4): an argument whose whole value is `$<n>.<path>` is replaced by that field of call n's result (its first text item, parsed as JSON), keeping its JSON type: `"$1.hash"`, `"$2.added.name"`, `"$1.positions[0].left"`. Keys match exactly, then case-insensitively. A path starts with a letter, so text such as `"Price = $1.00"` is never taken for one, and only whole values are replaced, never part of a string.
+  - A reference to the same or a later call refuses the batch before anything runs.
+  - A reference to a failed call, a missing field (the error lists the result's fields) or a non-JSON result (an image) fails that call.
+- **`compact: true`:** successful calls other than the last keep only the first 160 characters of their text; errors, the last call and images come in full.
+- **Result:** each call's content in order, text items labelled `[n] tool:` (with `(error)` for a failed call), images unchanged, then a summary `{ran, failed, notRun, note}`. `isError` when any call failed.
+
+Example with a reference: `{"calls": [{"tool": "code_read", "args": {"component": "modMath"}}, {"tool": "code_replace_lines", "args": {"component": "modMath", "start_line": 5, "count": 1, "new_text": "...", "expected_hash": "$1.hash"}}, {"tool": "project_save"}]}`
+
+Example: `{"calls": [{"tool": "app_click", "args": {"text": "Apply"}}, {"tool": "app_wait", "args": {"window": "Results"}}, {"tool": "app_screenshot", "args": {"window": "Results"}}]}`
+
+## Watchdog and recovery
+
+The elevated watchdog (`vb6mcp watchdog`, started by the add-in; PLAN.md §3.1) covers the times when an IDE's add-in can't answer, because the debugged program loops or the IDE hangs. It is a sidecar. Without it everything else still works, and the tools below say when they need it. `ide_list` and `ide_status` report it as `watchdog: { pid, version, elevated }`, or `null` when it isn't running.
+
+**Fallbacks in existing tools:**
+- **`run_break`:** uses the IDE's Break command when the IDE responds. When the program keeps the IDE busy, the watchdog injects Ctrl+Break (spike 12) instead. It does that only with VB6, or Windows' stand-in for its unresponsive window, in front, and puts the previous window back afterwards. `method` says which was used.
+- **`ide_dialog_respond`:** if the add-in doesn't answer, the watchdog clicks the button (`via: "watchdog"`).
+- **`app_screenshot`:** if an elevated IDE can't run the add-in's capture (busy or hung), the watchdog captures it. `PrintWindow` gets a 3 s timeout, then falls back to a copy of the screen area, which shows only what is visible.
+- **`ide_launch`:** with an elevated watchdog running, VB6 is started by the watchdog: elevated, with **no UAC prompt** (`via: "watchdog (no UAC prompt)"`, spike 12b). If the new VB6 shows a dialog before our add-in has loaded (another add-in's error at startup, e.g. Visual Component Manager), the result is `status: "dialog-before-addin"` with the new `pid` and the dialog.
+- **`ide_dialog_respond` with the pid of a VB6 that has no add-in yet** (still starting) clicks through the watchdog (`via: "watchdog (no add-in yet)"`).
+
+| Tool | Arguments | What it does |
+|------|-----------|--------------|
+| `ide_kill` | `force` (required true), `pid?` | ends a hung VB6 through the watchdog. The result lists the recovery copies of that IDE with their age. Killed in run or break mode, it also lists `comLeftovers`: `.vbp` files whose classes stay registered to the VB6 debugger until VB6 next starts (spike 25; repair with `com_orphans`) |
+| `ide_quit` | `discard?`, `force?`, `pid?` | closes VB6 normally (PLAN.md C7): `WM_CLOSE` through the watchdog (`QUIT`; a non-elevated post is refused, spike 10). Only an IDE this session owns (`ide_launch` / `ide_claim`), otherwise `force: true`. Design mode. Refused while anything is unsaved, listing it, unless `discard: true`: each project with unsaved changes is first closed through `project_close discard` (files snapshotted and restored, spike 31). Waits up to 15 s for the process to exit, then drops the owner file. `status`: `quit`, `dialog` (another add-in or a prompt; not answered), `still-running`, `not-quit` (a discard didn't finish) |
+| `recovery_list` | `from_pid?` | recovery sessions: pid, `running`, `crashed`, projects, and per component when it was copied |
+| `recovery_read` | `from_pid`, `component`, `project?` | the copied text, and whether it differs from the file on disk |
+| `recovery_restore` | `from_pid`, `component`, `project?`, `pid?` (target) | replaces the code of the component **with the same file** in an open project of a running IDE (design mode). The component is left unsaved |
+| `recovery_discard` | `from_pid`, `confirm` (required true) | deletes a finished session's copies (refused while that VB6 is still running) |
+
+**How recovery copies are taken:**
+- Every 10 s the watchdog asks each IDE's add-in for its projects and components. It reads the code of the **unsaved** ones and writes copies to `%LOCALAPPDATA%\vb6mcp\recovery\<pid>\` when the text changed.
+- It does this only while the user has been idle for 5 s (`GetLastInputInfo`) and the IDE is in design or break mode, so it never interrupts typing or a running program (hard rule 12).
+- Copies of components that were saved are removed. A cleanly closed IDE's folder is removed.
+- An IDE whose discovery file stayed behind (crash, kill) is marked `crashed`, and its copies are kept for 7 days.
+- Only the code is copied, not designer properties: a form's layout comes from its file on disk.
+
+After a crash: `ide_launch` the project, then `recovery_list`, `recovery_read` and `recovery_restore`. The user reviews the result and saves (`project_save`).
+
+**Verified live** (spike 19), with no help from the user:
+1. A busy loop was broken with `run_break` through the watchdog while Claude was in front: VB6 came forward, stopped at the `Loop` line, and Claude was restored.
+2. An unsaved edit was copied about 10 s after it was made.
+3. `ide_kill` listed the copy.
+4. `ide_launch` started VB6 elevated without a UAC prompt. A Visual Component Manager startup box was answered through the watchdog.
+5. `recovery_restore` brought back the identical module (same hash), unsaved.
+
+---
+
 ## Change log
 
+- 2026-10-17: `ide_dialog_respond repeat` (click through one load error per form, then sum up the load logs).
+- 2026-10-17: `ide_launch` reports load dialogs instead of failing while VB loads the project (spike 36).
+- 2026-10-17: `res_read` (resource files: strings, version, bitmaps, icons).
+- 2026-10-17: `form_resources` (read and extract what a .frx holds).
+- 2026-10-17: the hook also refuses Edit/Write on binary companions (.frx .ctx .pgx .dsx .dox .res) and .vbw; server instructions name the companion files.
+- 2026-10-17: `codeHints` for C-style escapes in VB string literals; Windows/CR LF rule in code parameters and server instructions.
+- 2026-10-17: `form_layout` suggested after controls are moved by hand.
+- 2026-10-17: the hook asks the user (spike 33) for flagged shell commands and for `debug_eval` with `allow_side_effect`.
+- 2026-10-17: `debug_eval` refuses side effects by default (`VB6MCP_EVAL=open` allows them); the hook checks Bash/PowerShell commands.
+- 2026-10-17: `markedChangedByRun` (spike 32) in `run_end`, `syntax_check`, `project_components`, `build_make`.
+- 2026-10-17: crash notices (`ideCrashed`) with the next result; `ide_launch reopen`; the watchdog stays 30 minutes after a crash.
+- 2026-10-17: `build_make` without an IDE, through the watchdog (verb `MAKE`).
+- 2026-10-17: `ide_launch` reports `startSeconds` / `seconds` (time the UAC prompt was up).
+- 2026-10-17: find/replace with preview in `code_replace_lines` and `file_replace_lines`.
+- 2026-10-17: `project_open` preflight hints: unregistered files with the library, similar registered libraries.
+- 2026-10-17: `ide_quit` (watchdog verb `QUIT`).
+- 2026-10-17: `sync_diff` project summary (case-only re-casing).
+- 2026-10-17: `build_in_ide`: `make-failed` with `causes` when the code compiles; empty projects refused.
+- 2026-10-17: `symbol_refs`.
+- 2026-10-17: `com_register` verdict: `notRegistered` / `registeredElsewhere`.
+- 2026-10-17: `com_describe` marks default members.
+- 2026-10-17: `server_restart` (spike E7).
+- 2026-10-17: shorter results: `form_set_properties` lists failed changes only (`verbose`), `form_properties` `names`, `batch_run` `compact`, compact `app_tree`.
+- 2026-10-17: `batch_run` references to earlier results (`"$1.hash"`).
+- 2026-10-17: `project_checkpoint`, `project_rollback`.
+- 2026-10-17: `form_layout` (arrange controls as a grid).
+- 2026-10-17: `batch_run` (several tool calls in one).
+- 2026-10-17: IDE ownership: `ide_claim`, `ide_release`, `owner` in `ide_list`; write tools refuse another session's IDE; `ide_launch` claims what it starts.
+- 2026-10-17: `project_close` discards through VB's save prompt (spike 31); `project_add_component` saves new components to their file; `project_save` takes `components`.
+- 2026-10-17: `project_close`, `project_add_component`, `project_settings`; `build_make` takes `defines` (add-in verbs `CLOSE`, `COMPADD`, `PRJGET`, `PRJSET`, `SAVECOMP`).
+- 2026-10-17: `file_replace_lines` `drop_var_help_ids`; attributes right after the last replaced line are kept with it.
+- 2026-10-17: `syntax_check`, `build_in_ide` and `run_start` wait for pending sync reloads (`reloads`).
+- 2026-10-17: `project_open` preflight (unregistered controls refuse, `force`), `opened-incomplete` with load logs, the add-in's error on a failed open.
+- 2026-10-17: `build_make` load errors include the form's `.log` lines (`details`).
+- 2026-10-17: IDE edits report names VB re-cased (`vbKeptSpelling`).
+- 2026-10-17: `project_save` reports `.vbp` rewrites and reference/control version changes (`vbp`).
+- 2026-10-17: `code_read` and `file_read` return at most 2,000 lines / 100,000 characters without a range (`truncated`, `nextStartLine`).
+- 2026-10-17: `form_add_control` takes `properties`.
+- 2026-10-17: `edits` (several ranges in one call) for `code_replace_lines` and `file_replace_lines`.
+- 2026-10-16: designer results carry `hints` and `overlaps`; `Font.*`-only changes are made to count for Save (spike 29); `form_screenshot` stitches forms bigger than the designer.
+- 2026-10-15: `form_set_properties` (several designer properties in one call).
+- 2026-10-15: `form_screenshot` (designer image, add-in `DESIGN SHOW`).
 - 2026-10-15: `com_orphans`, `com_diagnose`, `refs_fix_broken`; pictures and lists in `form_set_property`/`form_properties`; `refs_remove name=#<position>`; `ide_kill` warns about debugger registrations; `com_where` flags them.
 - 2026-10-15: COM tools (`com_describe`, `com_search`, `com_where`, `compat_status`, `com_register`, `com_unregister`).
 - 2026-10-14: form designer tools (`form_controls`, `form_properties`, `form_set_property`, `form_add_control`, `form_remove_control`) and references (`refs_list`, `refs_add`, `refs_remove`, `refs_add_component`).
@@ -969,3 +1453,9 @@ Reads a `.bas/.cls/.frm/.ctl/.pag/.dsr` from disk **the way the IDE shows it**: 
 
 - 2026-10-13: `project_open` (deferred open, mode rules, dialog reporting).
 - 2026-10-13: Phase 1 read tools (`ide_list`, `ide_status`, `project_components`, `code_read`, `symbol_outline`, `proc_get`).
+
+**Large modules:** without `start_line`/`count`, at most 2,000 lines and 100,000 characters come back (a 185 KB class overflowed the client, improvement notes item 13).
+- A cut result has `truncated: true`, `nextStartLine` and a `note`. Read on with `start_line`.
+- `hash` always covers the whole text, so edits need no full read.
+- An explicit range is returned as asked, up to the character cap.
+

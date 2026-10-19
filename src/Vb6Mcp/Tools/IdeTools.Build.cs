@@ -169,9 +169,17 @@ public sealed partial class IdeTools
 
         string log = File.Exists(logPath) ? Vb1252.Encoding.GetString(File.ReadAllBytes(logPath)) : "";
         var parsed = BuildLog.Parse(log);
+        // Spike 41: an ActiveX build by a VB6 that isn't elevated writes the DLL but can't register it. The log then has
+        // "Error accessing the system registry" next to "Build of '…' succeeded", and nothing is registered anywhere.
+        bool? builderElevated = Vb6Install.IsElevated(launcher?.Pid ?? watchdog!.Pid);
+        bool registryError = parsed.Errors.Any(e => e.Message.Contains("Error accessing the system registry", StringComparison.OrdinalIgnoreCase));
+        string? registryNote = !registryError ? null :
+            $"VB6 wrote {output ?? "the output file"} but couldn't register it (\"Error accessing the system registry\"). Registering an ActiveX build needs administrator rights" +
+            (builderElevated == false ? ", and the VB6 that ran /make isn't elevated" : "") +
+            $". Register it from an elevated prompt (regsvr32 \"{output}\"), or build with VB6 running as administrator (spike 41)";
         return ToolResult.Ok(new
         {
-            status = parsed.Succeeded ? "succeeded" : "failed", vbp = vbpPath, via,
+            status = parsed.Succeeded ? "succeeded" : "failed", vbp = vbpPath, via, registered = registryError ? false : (bool?)null,
             seconds = Math.Round((DateTime.UtcNow - start).TotalSeconds, 1),
             output = new { before, after = FileState(output) },
             errors = parsed.Errors.Select(e => new
@@ -180,9 +188,9 @@ public sealed partial class IdeTools
                 details = e.Kind == "load" ? LoadLogLines(e.File) : null,
             }),
             log = log.Trim(), logFile = logPath,
-            note = parsed.Errors.Any(e => e.Kind == "compatibility")
+            note = registryNote ?? (parsed.Errors.Any(e => e.Kind == "compatibility")
                 ? "binary compatibility would break; /make refuses (nothing was written or registered). Make the declaration compatible, or decide with the user to break compatibility (in the IDE: Project Properties or the Make dialog)"
-                : vbp?.Type is "OleDll" or "Control" or "OleExe" && parsed.Succeeded ? "the component was registered by the build (VB6 does that on success)" : null,
+                : vbp?.Type is "OleDll" or "Control" or "OleExe" && parsed.Succeeded ? "the component was registered by the build (VB6 does that on success)" : null),
         });
     }
 

@@ -62,7 +62,7 @@ installer/              install.ps1 / uninstall.ps1 / INSTALL.txt, shipped in th
   - Development builds (`build-addin.ps1`, `install-server.ps1`) use the repo and `%LOCALAPPDATA%\vb6mcp\roots.txt`.
   - Whichever ran last decides where the ProgID points. A local-scope `vb6` MCP registration in a folder and the installer's user-scope one are separate entries: remove one when testing the other.
 - .NET SDK 10.x, Node 24. Shell: PowerShell 7 or Git Bash.
-- VB6 is 32-bit and runs elevated (UAC consent prompt, same user account). The MCP server runs non-elevated and as x86 (32-bit registry view, same as VB6).
+- VB6 is 32-bit. On this machine it normally runs elevated (UAC consent prompt, same user account; a per-path compatibility entry, spike 16), but non-elevated VB6 is supported and tested too (spike 41): only registering components needs elevation. The MCP server runs non-elevated and as x86 (32-bit registry view, same as VB6).
 
 ## Hard rules
 
@@ -157,7 +157,7 @@ dotnet run --project tests/Vb6Mcp.Tests -- --cat Build,IDE,Launch
 - **Designer lists and pictures** (spike 25):
   - `Property.IndexedValue(j)` past the end returns ""/0, no error. The end of a List is its last non-empty item.
   - `Set Property.Object = LoadPicture(file)` sets Picture/Icon; VB writes the `.frx`.
-- **Screenshots need elevation** (spike 15): non-elevated `PrintWindow` on VB6 windows fails, and a screen copy only sees what's on top. Elevated `PrintWindow` (watchdog) captures covered windows, dialogs and running forms, including Labels (no hwnd). For IDE panes, capture the main IDE window and crop; `PrintWindow` on the child panes is misaligned. Use a timeout: `PrintWindow` blocks on a hung window.
+- **Screenshots of an elevated VB6 need elevation** (spike 15; a non-elevated VB6 is captured by the server itself, spike 41): non-elevated `PrintWindow` on VB6 windows fails, and a screen copy only sees what's on top. Elevated `PrintWindow` (watchdog) captures covered windows, dialogs and running forms, including Labels (no hwnd). For IDE panes, capture the main IDE window and crop; `PrintWindow` on the child panes is misaligned. Use a timeout: `PrintWindow` blocks on a hung window.
 - `VBE.Windows(i).HWnd` is always 0. Find IDE windows by enumerating child windows of the main window (e.g. Immediate = `VbaWindow` captioned "Immediate").
 - Debug command Ids: Start/Continue 186, Break 189, End 228, Restart 515, Step Into/Over/Out 188/194/2559, Run To Cursor 1811, Toggle Breakpoint 51, Clear All Breakpoints 579, Copy 19, Paste 22, Select All 756, Undo 128. Many controls share the generic Id 746: find those by menu path + caption.
 - Immediate evaluation: WM_CHAR the text + VK_RETURN to the Immediate `VbaWindow`, then Select All + Copy, then read the clipboard (save and restore the user's clipboard). `Debug.Print` output is read the same way.

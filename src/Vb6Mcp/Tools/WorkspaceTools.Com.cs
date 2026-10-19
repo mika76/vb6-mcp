@@ -543,6 +543,10 @@ public sealed partial class WorkspaceTools
             registeredElsewhere = !unregister && after.Elsewhere.Count > 0 ? after.Elsewhere : null,
             before = new { before.TypeLib, before.Classes }, after = new { after.TypeLib, after.Classes },
             note = exit is null ? "regsvr32 didn't finish within 60 s" :
+                   // Spike 41: the add-in runs regsvr32 at VB6's level; without elevation DllRegisterServer fails (exit 5)
+                   exit != 0 && Vb6Install.IsElevated(inst.Pid) == false
+                       ? $"regsvr32 failed (exit {exit}): registering needs administrator rights, and VB6 (pid {inst.Pid}) isn't elevated, so the add-in's regsvr32 isn't either. " +
+                         $"Register it from an elevated prompt (regsvr32{(unregister ? " /u" : "")} \"{path}\"), or start VB6 as administrator (spike 41)" :
                    verified && !unregister && after.Missing.Count > 0 ? $"registered; the file doesn't register {string.Join(", ", after.Missing)} (classes in its typelib that nothing registers are usually internal helpers, not a failure)" :
                    verified ? null :
                    !unregister && after.Elsewhere.Count > 0 ? $"regsvr32 finished, but {string.Join(", ", after.Elsewhere)} {(after.Elsewhere.Count == 1 ? "is" : "are")} registered to another file (com_where)" :

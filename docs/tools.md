@@ -240,7 +240,9 @@ Answers, then ends the server process a second later (exit code 3), so a newly i
 
 **Wait for its answer before the next vb6 call** (spike 42): once `server_restart` has run, every new call is answered at once with "the vb6 server is restarting … call again in a few seconds", instead of going to the exiting process. In the incident that led to this, an `ide_launch` batched with the restart ran in the dying server; the call after it was never answered, and the session's vb6 connection didn't recover.
 
-What the desktop app does (tested 2026-10-17):
+**Later in the desktop app (2026-10-19): the server didn't come back.** Twice, after `server_restart`, the app started no new server. It kept showing `vb6` as connected (`session_connectors_status`, 94 tools) while no process ran, and every vb6 call waited until the idle timeout (spike 42). A session restart didn't help, and `/mcp` offered no Reconnect; only restarting the app did. **So prefer restarting the session or the app after installing a new build.** `server_restart` is kept for clients that bring the server back.
+
+What the desktop app did (tested 2026-10-17):
 - The MCP servers dialog never showed Reconnect: it kept saying "Connected · 90 tools" after the process ended.
 - On the **next vb6 tool call** the app started the server again, by itself, **from the command it read at session start**. A re-registration to a new path during the session is ignored.
 - So `scripts\install-server.ps1` now installs into one fixed folder, `build\server\current\`, moving files in use aside (`*.old-<stamp>`, spike 26: renamed, not overwritten). After an install: `server_restart`, then any vb6 call runs the new build. The first session after switching to the fixed folder still needs one restart, to pick up the new path.
@@ -500,7 +502,7 @@ Read one procedure or property, with the comment lines above it.
 
 **Arguments:** `button` (caption, e.g. `OK`, `No`), `dialog?` (caption; needed when several dialogs are open), `repeat?`, `pid?`.
 
-**Served by:** window reads (finds the dialog and the button's window handle) + add-in `CLICK`, then a re-read to verify.
+**Served by:** window reads (finds the dialog and the button's window handle) + add-in `CLICK`, then a re-read to verify. Before the add-in has loaded (another add-in's startup error), or when it doesn't answer, the watchdog clicks. When VB6 isn't elevated and no watchdog is running yet, the server clicks the button itself, since it runs at the same level (`via: server (…; VB6 isn't elevated)`, spike 41).
 
 **`repeat: true`** (the owner: a missing reference or control makes VB "ask the same message many many times" in a project with many forms; "click OK until it stops", spike 36): after the first click, keeps pressing the same button while the next dialog is the same kind of message (its text with quoted paths blanked out), waiting up to 5 s for each next form; at most 500 clicks. Then it reads the `.log` files the messages named and sums them up. Result: `repeated` (clicks), `stoppedBecause` (`no more dialogs`, `a different dialog`, the limit), `distinctMessages`, `missing` (per class or licence: `class`, `reason`, `controls`, `forms`, `formNames`), `dialogsNow`. Verified on a 12-form fixture: 12 clicks, stopped at the SourceSafe question, `MSComctlLib.ProgressBar` on 12 forms. Saving such a project would drop the controls that didn't load; fix the component and reopen instead.
 
@@ -1151,7 +1153,7 @@ It only reports; it never changes compatibility settings (hard rule 13).
 **Arguments:** `file` (a `.dll`/`.ocx` under the workspace roots), `confirm: true` (required), `force?` (unregister only), `pid?` (which IDE's add-in runs it).
 
 **How it runs:**
-- `regsvr32 /s` (32-bit) runs elevated through the add-in; no UAC prompt.
+- `regsvr32 /s` (32-bit) runs through the add-in, at VB6's level: elevated when VB6 is, with no UAC prompt. A VB6 that isn't elevated can't register (regsvr32 exit 5); the `note` then says why, and suggests an elevated `regsvr32` or VB6 as administrator (spike 41).
 - The add-in checks the path again on its side.
 - Each call goes to the audit log.
 
@@ -1211,7 +1213,7 @@ VB6 `/make` refuses a project that is open in any IDE (spike 21). So the tools s
 
 | Tool | Arguments | What it does |
 |------|-----------|--------------|
-| `build_make` | `path?` (`.vbp`), `project?`, `pid?` | **Closed project** (`path` under `VB6MCP_ROOTS`): `VB6.EXE /make` from the files on disk, started elevated by an add-in, or by the watchdog when no IDE runs (PLAN.md D1: `via` says which; with neither, the error says how to start one), so an ActiveX DLL/OCX is registered on success. Returns `status` (`succeeded`, `failed`, `dialog`, `timeout`), `errors` (file, line, message), the raw `log`, and the output file before/after. **Open project:** if saved, built in its IDE (File > Make; `via` says so); with unsaved changes, refused |
+| `build_make` | `path?` (`.vbp`), `project?`, `pid?`, `defines?` | **Closed project** (`path` under `VB6MCP_ROOTS`): `VB6.EXE /make` from the files on disk, started elevated by an add-in, or by the watchdog when no IDE runs (PLAN.md D1: `via` says which; with neither, the error says how to start one), so an ActiveX DLL/OCX is registered on success. Started by a VB6 that isn't elevated, `/make` writes the DLL/OCX but can't register it ("Error accessing the system registry"): then `registered: false` and a `note` with the cause and an elevated `regsvr32` command (spike 41). Returns `status` (`succeeded`, `failed`, `dialog`, `timeout`), `errors` (file, line, message), the raw `log`, and the output file before/after. **Open project:** if saved, built in its IDE (File > Make; `via` says so); with unsaved changes, refused |
 | `build_in_ide` | `project?`, `pid?` | File > Make from IDE memory (`MakeCompiledFile`), unsaved edits included; design mode. `status`: `succeeded`, `failed` (with `compileCheck`: message and location from a full compile, because `MakeCompiledFile` itself only fails generically), `make-failed` (the full compile passed, so the make step itself failed: improvement notes 20; `causes` lists what the server can see: output folder missing or not writable, output file read-only or in use), `dialog`, `timeout`. A project with no components loaded is refused up front (VB would open Project Properties, improvement notes 9). An existing output file is replaced without a prompt |
 
 Notes from spike 21:
@@ -1450,6 +1452,8 @@ After a crash: `ide_launch` the project, then `recovery_list`, `recovery_read` a
 
 ## Change log
 
+- 2026-10-19: non-elevated VB6 tested (spike 41): `ide_dialog_respond` clicks itself when VB6 isn't elevated and no watchdog runs; `build_make` (`registered: false`) and `com_register` explain failed registration.
+- 2026-10-19: heartbeat during slow calls; calls refused while `server_restart` ends the server (spike 42).
 - 2026-10-19: `debug_eval allow_side_effect` trusts the hook only for Claude Code; other clients are asked through MCP elicitation, or refused (spike 40).
 - 2026-10-18: IDE edits with `""` no longer fail after being applied; a failed edit says what state the module is in (improvement notes 29, 30).
 - 2026-10-17: `ide_dialog_respond repeat` (click through one load error per form, then sum up the load logs).

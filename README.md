@@ -168,15 +168,20 @@ vb6mcp describe C:\path\to\Component.dll [TypeNameFilter]
 
 ## Elevated or not?
 
-Whether VB6 runs as administrator is your machine's configuration (a "Run as administrator" shortcut or compatibility setting); a default install runs it non-elevated (spike 16). vb6-mcp works either way (`ide_list` shows `elevated` per IDE):
+Whether VB6 runs as administrator is your machine's configuration (a "Run as administrator" shortcut or compatibility setting); a default install runs it non-elevated (spike 16). vb6-mcp works either way, tested both ways (spike 41: the integration tests and the demo scenario pass against a non-elevated VB6 without XP compatibility mode). `ide_list` shows `elevated` per IDE:
 
 | | VB6 elevated | VB6 not elevated |
 |---|---|---|
 | Read/edit live code, open/save projects, dialogs | ✓ | ✓ |
-| Build ActiveX DLL/OCX (registers the component) | ✓ | ✗ registration needs admin rights |
+| Build ActiveX DLL/OCX (registers the component) | ✓ | the file is written but not registered: registering needs admin rights. `build_make` says so (`registered: false`) and how to register it |
+| Register a component (`com_register`) | ✓ | ✗ needs admin rights; the result says so |
 | Input into the IDE / running app (`app_click`, `app_set_text`) | through the add-in only | through the add-in (Claude's computer use also works) |
 | Screenshots (`app_screenshot`) | captured by the add-in | captured by the server |
-| Starting VB6 from Claude (`ide_launch`) | UAC prompt | no prompt |
+| Starting VB6 from Claude (`ide_launch`) | UAC prompt (none while an elevated watchdog runs) | no prompt |
+| Another add-in's error before ours loads | answered through the watchdog | answered by the server itself |
+| Code the agent runs (Immediate, the project started from the IDE) | runs as administrator | runs with your rights |
+
+Running VB6 without elevation is the safer choice when you don't need to register components.
 
 `ide_launch` takes `elevation: auto | elevated | normal`. Machine-specific values come from configuration: `VB6MCP_VB6_EXE` (VB6.EXE; otherwise found via the registry) and `VB6MCP_ROOTS` (workspace roots).
 

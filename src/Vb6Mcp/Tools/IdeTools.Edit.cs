@@ -407,19 +407,31 @@ public sealed partial class IdeTools
         var btn = dlg.Buttons.FirstOrDefault(b => b.Caption.Equals(button, StringComparison.OrdinalIgnoreCase))
                   ?? throw new ToolException($"dialog '{dlg.Caption}' has no button '{button}'. Buttons: {string.Join(", ", dlg.Buttons.Select(b => b.Caption))}");
 
+        // Spike 41: a VB6 that isn't elevated runs at the server's own level, so the server can post the click itself.
+        // Before the add-in has loaded there is no watchdog yet either (the add-in starts it), so another add-in's
+        // startup error ("Data View") could only be answered by hand.
+        bool ownLevel = Vb6Install.IsElevated(targetPid) == false;
+        string ClickHere(long hwnd, string why)
+        {
+            Audit.Write("ide_dialog_respond", targetPid, $"server BM_CLICK {hwnd:X} ({why})");
+            LocalInput.Click(hwnd);
+            return $"server ({why}; VB6 isn't elevated)";
+        }
         async Task<string> Click(long hwnd)
         {
             if (inst is null)
             {
-                if (!await PressViaWatchdogAsync(hwnd, targetPid)) throw new ToolException($"VB6 {targetPid} has no add-in loaded yet and " + NoWatchdog);
-                return "watchdog (no add-in yet)";
+                if (await PressViaWatchdogAsync(hwnd, targetPid)) return "watchdog (no add-in yet)";
+                if (ownLevel) return ClickHere(hwnd, "no add-in yet");
+                throw new ToolException($"VB6 {targetPid} has no add-in loaded yet and " + NoWatchdog);
             }
             try { await _env.Client(inst).ClickAsync(hwnd); return "add-in"; }
             catch (Exception ex) when (ex is AddinBusyException or AddinUnreachableException)
             {
                 // The add-in shares the IDE thread; if it can't answer, the elevated watchdog can still click (PLAN §3.1)
-                if (!await PressViaWatchdogAsync(hwnd, targetPid)) throw new ToolException($"the add-in didn't answer ({ex.Message}) and " + NoWatchdog);
-                return "watchdog";
+                if (await PressViaWatchdogAsync(hwnd, targetPid)) return "watchdog";
+                if (ownLevel) return ClickHere(hwnd, "the add-in didn't answer");
+                throw new ToolException($"the add-in didn't answer ({ex.Message}) and " + NoWatchdog);
             }
         }
         string via = await Click(btn.Hwnd);

@@ -35,6 +35,10 @@ Starting `VB6.EXE` from a non-elevated process always triggered UAC (spike 2). I
   - With a project path, VB6 skips the New Project chooser; without one, the chooser is reported.
 - README gets an "Elevated or not?" section: what works in each mode (non-elevated: builds of ActiveX projects can't register; elevated: input only through the add-in, Claude's computer use can't drive VB6).
 
+## Measured (2026-10-19, spike 41)
+
+With the compatibility entry removed by the owner, VB6 started non-elevated through `ide_launch elevation=normal` with no prompt, and everything was tested against it: the integration tests (8/8), the demo scenario, builds and registration. All of it works except registering components, which needs administrator rights; `build_make` and `com_register` now say so. Details: [spike 41](41-non-elevated-vb6.md).
+
 ## Addendum (2026-10-17, from real use: improvement notes 15, 16)
 
 - **A copy of the whole VB98 folder doesn't give a usable non-elevated VB6 either.** The copy starts non-elevated (the path-specific setting doesn't apply to it), but stops at startup with "Missing or not registered VB6TMPL.TLB": VB6's registration points at the installed folder. So "run a non-elevated copy" isn't a way out without registry changes, which this project doesn't make.

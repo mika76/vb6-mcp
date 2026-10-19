@@ -37,6 +37,9 @@ vb6-mcp was built and tested only against an elevated VB6. On this machine a per
 
 - **Supported, measured.** Everything the tools do works against a non-elevated VB6 except registering components, which needs administrator rights. The README's "Elevated or not?" section now says so from these results.
 - **Registration failures say why.** `build_make` and `com_register` name the missing rights and the way out instead of a bare error.
+- **Registration got elevated routes** (follow-up, same day): `com_register` runs through an elevated VB6's add-in, else the elevated watchdog (new verb `REGSVR`), else a UAC prompt with `elevate: true`, else it refuses before running a regsvr32 that can only fail. `build_make` uses an elevated watchdog when the running VB6 isn't elevated.
+  - **Verified live** (2026-10-19, `scratch\comdll-ne\ComFixture.dll`, unregistered at the start): with a non-elevated VB6 and a non-elevated watchdog, `com_register` refused and named `elevate=true`. With `elevate: true` Windows showed the UAC prompt, the user approved it, and the result was exit 0, `verified`, via "regsvr32 elevated through a UAC prompt". Then, with an elevated `--stay` watchdog and no IDE open, unregister, register and unregister again all went through the watchdog with no prompt: exit 0 and `verified` each time.
+  - Not run live: `build_make` choosing the elevated watchdog while a non-elevated VB6 is open (unit-tested routing only).
 - **Dialogs before the add-in loads are answered by the server itself** when VB6 isn't elevated; the watchdog route stays for elevated VB6.
 - **Security is better non-elevated.** Code the agent runs (Immediate, the project started from the IDE) runs with the user's rights, not the administrator's. The limits in docs/tools.md (`debug_eval`) matter far less there.
 

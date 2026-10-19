@@ -242,6 +242,48 @@ public sealed class WatchdogActions(Action<string> log, string shotsDir) : IWatc
         catch (Win32Exception ex) { throw new WatchdogRefusedException("VB6.EXE /make didn't start: " + ex.Message); }
     }
 
+    /// <summary>regsvr32 runs started by REGSVR, by pid, until REGSTATUS has reported their exit code.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, Process> _regsvr = new();
+
+    /// <summary>
+    /// REGSVR: (un)registers a DLL/OCX with the 32-bit regsvr32 (VB6 components are 32-bit), at the watchdog's level. An
+    /// elevated watchdog can register although VB6 itself isn't elevated (spike 41: a non-elevated VB6's add-in gets
+    /// regsvr32 exit 5). Same checks as MAKE: an absolute .dll/.ocx without "..", under the admin-controlled roots,
+    /// existing. Returns the regsvr32 pid; REGSTATUS gives its exit code.
+    /// </summary>
+    public string Regsvr(string file, bool unregister)
+    {
+        if (!Path.IsPathFullyQualified(file) || file.Contains("..", StringComparison.Ordinal) || Path.GetExtension(file).ToLowerInvariant() is not (".dll" or ".ocx"))
+            throw new ArgumentException("the file must be the absolute path of a .dll or .ocx, without '..'");
+        var full = Path.GetFullPath(file);
+        if (!Roots().Any(r => full.StartsWith(r.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)))
+            throw new WatchdogRefusedException($"{full} isn't under the workspace roots ({RootsFile()})");
+        if (!File.Exists(full)) throw new WatchdogRefusedException("file not found: " + full);
+        var regsvr = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "SysWOW64", "regsvr32.exe");
+        if (!File.Exists(regsvr)) regsvr = Path.Combine(Environment.SystemDirectory, "regsvr32.exe");   // a 32-bit Windows
+        var psi = new ProcessStartInfo(regsvr, (unregister ? "/s /u " : "/s ") + $"\"{full}\"") { UseShellExecute = false, CreateNoWindow = true };
+        try
+        {
+            var p = Process.Start(psi) ?? throw new WatchdogRefusedException("regsvr32 didn't start");
+            _regsvr[p.Id] = p;
+            log($"regsvr32{(unregister ? " /u" : "")} started, pid {p.Id}: {full}");
+            return p.Id.ToString(CultureInfo.InvariantCulture);
+        }
+        catch (Win32Exception ex) { throw new WatchdogRefusedException("regsvr32 didn't start: " + ex.Message); }
+    }
+
+    /// <summary>REGSTATUS: the exit code of a regsvr32 that REGSVR started, or "running".</summary>
+    public string RegStatus(int pid)
+    {
+        if (!_regsvr.TryGetValue(pid, out var p)) throw new WatchdogRefusedException($"no regsvr32 with pid {pid} was started by this watchdog");
+        if (!p.HasExited) return "running";
+        _regsvr.TryRemove(pid, out _);
+        var code = p.ExitCode;
+        p.Dispose();
+        log($"regsvr32 pid {pid} exited {code}");
+        return code.ToString(CultureInfo.InvariantCulture);
+    }
+
     /// <summary>The roots file the add-in reads too: next to this exe when installed (Program Files, admin-only), else the development one.</summary>
     internal static string RootsFile()
     {

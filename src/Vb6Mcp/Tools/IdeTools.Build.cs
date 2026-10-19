@@ -129,6 +129,9 @@ public sealed partial class IdeTools
         // Starting VB6.EXE from here would show a UAC prompt (spike 2), so without either there is no build.
         var launcher = _env.Scan().Live.OrderByDescending(i => Vb6Install.IsElevated(i.Pid) == true).FirstOrDefault();
         var watchdog = launcher is null ? _env.FindWatchdog() : null;
+        // Spike 41: a VB6 that isn't elevated builds but can't register an ActiveX output; an elevated watchdog can
+        if (launcher is not null && Vb6Install.IsElevated(launcher.Pid) == false && _env.FindWatchdog() is { } wdUp && Vb6Install.IsElevated(wdUp.Pid) == true)
+            (launcher, watchdog) = (null, wdUp);
         if (launcher is null && watchdog is null)
             throw new ToolException("no VB6 IDE with the add-in and no watchdog is running, and the build must be started elevated: start VB6 (ide_launch, " +
                                     "a UAC prompt unless a watchdog runs), or ask the user to start the watchdog once (vb6mcp watchdog --stay; builds then need no IDE)");
@@ -150,7 +153,9 @@ public sealed partial class IdeTools
             var f = r.Payload.Split(Core.Protocol.Wire.US);
             (pid, logPath, vbpPath) = (int.Parse(f[0], CultureInfo.InvariantCulture), f[1], f[2]);
         }
-        string via = launcher is not null ? $"VB6.EXE /make (started by VB6 pid {launcher.Pid})" : $"VB6.EXE /make (started by the watchdog, pid {watchdog!.Pid}: no IDE was running)";
+        string via = launcher is not null ? $"VB6.EXE /make (started by VB6 pid {launcher.Pid})"
+                   : _env.Scan().Live.Count > 0 ? $"VB6.EXE /make (started by the elevated watchdog, pid {watchdog!.Pid}: the running VB6 isn't elevated, so its build couldn't register)"
+                   : $"VB6.EXE /make (started by the watchdog, pid {watchdog!.Pid}: no IDE was running)";
 
         var start = DateTime.UtcNow;
         while (DateTime.UtcNow - start < BuildWait && Alive(pid))
@@ -176,7 +181,7 @@ public sealed partial class IdeTools
         string? registryNote = !registryError ? null :
             $"VB6 wrote {output ?? "the output file"} but couldn't register it (\"Error accessing the system registry\"). Registering an ActiveX build needs administrator rights" +
             (builderElevated == false ? ", and the VB6 that ran /make isn't elevated" : "") +
-            $". Register it from an elevated prompt (regsvr32 \"{output}\"), or build with VB6 running as administrator (spike 41)";
+            $". Register it with com_register elevate=true (the user gets a UAC prompt), or build with VB6 or the watchdog running as administrator (spike 41)";
         return ToolResult.Ok(new
         {
             status = parsed.Succeeded ? "succeeded" : "failed", vbp = vbpPath, via, registered = registryError ? false : (bool?)null,

@@ -173,8 +173,8 @@ Whether VB6 runs as administrator is your machine's configuration (a "Run as adm
 | | VB6 elevated | VB6 not elevated |
 |---|---|---|
 | Read/edit live code, open/save projects, dialogs | ✓ | ✓ |
-| Build ActiveX DLL/OCX (registers the component) | ✓ | the file is written but not registered: registering needs admin rights. `build_make` says so (`registered: false`) and how to register it |
-| Register a component (`com_register`) | ✓ | ✗ needs admin rights; the result says so |
+| Build ActiveX DLL/OCX (registers the component) | ✓ | registered when an elevated watchdog runs (it starts the build); otherwise the file is written but not registered, and `build_make` says so (`registered: false`) |
+| Register a component (`com_register`) | ✓ | through an elevated watchdog; otherwise with `elevate: true` Windows asks you (UAC prompt); without either it's refused |
 | Input into the IDE / running app (`app_click`, `app_set_text`) | through the add-in only | through the add-in (Claude's computer use also works) |
 | Screenshots (`app_screenshot`) | captured by the add-in | captured by the server |
 | Starting VB6 from Claude (`ide_launch`) | UAC prompt (none while an elevated watchdog runs) | no prompt |

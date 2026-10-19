@@ -26,6 +26,8 @@ public static class QuitTests
         public string Make(string vbp, string defines) => throw new NotSupportedException();
         public Task<string> SnapAsync(long h, string id, CancellationToken ct) => throw new NotSupportedException();
         public string Launch(string? project) => throw new NotSupportedException();
+        public string Regsvr(string file, bool unregister) => throw new NotSupportedException();
+        public string RegStatus(int pid) => throw new NotSupportedException();
     }
 
     sealed class Env(FakeAddin addin, InstanceInfo watchdog) : IIdeEnvironment

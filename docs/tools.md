@@ -88,9 +88,9 @@ All 95 tools, generated from the server's tool list (`node scripts/tool-index.js
 | COM | `com_describe` | What a COM component offers: the classes, interfaces, methods, properties, events and enums in its type library, as VB declarations (read from the … |
 | COM | `com_diagnose` | Checks behind a COM runtime error (429 can't create object, 430 class doesn't support the expected interface, 48 error loading DLL, or any other) f… |
 | COM | `com_orphans` | Broken COM registrations, report only (nothing is changed): classes whose server file is missing, typelibs whose file is missing, and VB6 debugger … |
-| COM | `com_register` | Register a DLL/OCX under the workspace roots (regsvr32, elevated through the VB6 add-in, audited) |
+| COM | `com_register` | Register a DLL/OCX under the workspace roots (regsvr32, audited) |
 | COM | `com_search` | Find registered COM components: type libraries whose description or file name, and ProgIDs whose name, has a word starting with the text (32-bit re… |
-| COM | `com_unregister` | Unregister a DLL/OCX under the workspace roots (regsvr32 /u, elevated through the VB6 add-in, audited), then check the registry |
+| COM | `com_unregister` | Unregister a DLL/OCX under the workspace roots (regsvr32 /u, audited; elevated like com_register), then check the registry |
 | COM | `com_where` | Where a component is registered: give one of prog_id, clsid, libid or file |
 | COM | `compat_status` | Binary compatibility state of ActiveX projects under the roots: mode, compatibility file, the typelib IDs of the compatibility file and the build o… |
 | Builds | `build_in_ide` | Compile an open project from the IDE's memory (unsaved edits included) with File > Make, to its output file |
@@ -1173,12 +1173,15 @@ It only reports; it never changes compatibility settings (hard rule 13).
 
 ### `com_register` / `com_unregister`
 
-**Arguments:** `file` (a `.dll`/`.ocx` under the workspace roots), `confirm: true` (required), `force?` (unregister only), `pid?` (which IDE's add-in runs it).
+**Arguments:** `file` (a `.dll`/`.ocx` under the workspace roots), `confirm: true` (required), `force?` (unregister only), `elevate?` (allow a UAC prompt), `pid?` (which IDE's add-in runs it).
 
-**How it runs:**
-- `regsvr32 /s` (32-bit) runs through the add-in, at VB6's level: elevated when VB6 is, with no UAC prompt. A VB6 that isn't elevated can't register (regsvr32 exit 5); the `note` then says why, and suggests an elevated `regsvr32` or VB6 as administrator (spike 41).
-- The add-in checks the path again on its side.
-- Each call goes to the audit log.
+**How it runs:** `regsvr32 /s` (32-bit). Registering needs administrator rights (spike 41), so it runs through the first of these that is elevated:
+1. **The add-in** of the IDE named by `pid`, or of an elevated IDE. No UAC prompt. The add-in checks the path again on its side. (With `pid` naming an IDE that isn't elevated, regsvr32 runs anyway and fails with exit 5; the `note` says why.)
+2. **The elevated watchdog** (`REGSVR`, docs/protocol.md): no UAC prompt, and no IDE needs to be open. It checks the path against its own roots file.
+3. **A UAC prompt**, only with `elevate: true`: the server starts regsvr32 with ShellExecute `runas`, and the user sees Windows' prompt naming regsvr32. Declining is an error ("the user declined the UAC prompt: nothing was registered"); the 60 s wait starts after the answer.
+4. Otherwise it's **refused** before anything runs, and the error says to pass `elevate: true` or to start VB6 or the watchdog as administrator.
+
+`via` in the result says which one ran it. Each call, including a declined prompt, goes to the audit log.
 
 **Result:**
 - `exitCode`.
@@ -1236,7 +1239,7 @@ VB6 `/make` refuses a project that is open in any IDE (spike 21). So the tools s
 
 | Tool | Arguments | What it does |
 |------|-----------|--------------|
-| `build_make` | `path?` (`.vbp`), `project?`, `pid?`, `defines?` | **Closed project** (`path` under `VB6MCP_ROOTS`): `VB6.EXE /make` from the files on disk, started elevated by an add-in, or by the watchdog when no IDE runs (PLAN.md D1: `via` says which; with neither, the error says how to start one), so an ActiveX DLL/OCX is registered on success. Started by a VB6 that isn't elevated, `/make` writes the DLL/OCX but can't register it ("Error accessing the system registry"): then `registered: false` and a `note` with the cause and an elevated `regsvr32` command (spike 41). Returns `status` (`succeeded`, `failed`, `dialog`, `timeout`), `errors` (file, line, message), the raw `log`, and the output file before/after. **Open project:** if saved, built in its IDE (File > Make; `via` says so); with unsaved changes, refused |
+| `build_make` | `path?` (`.vbp`), `project?`, `pid?`, `defines?` | **Closed project** (`path` under `VB6MCP_ROOTS`): `VB6.EXE /make` from the files on disk, started elevated by an add-in, or by the watchdog when no IDE runs (PLAN.md D1: `via` says which; with neither, the error says how to start one), so an ActiveX DLL/OCX is registered on success. When the running VB6 isn't elevated but an elevated watchdog runs, the watchdog starts it, so the build still registers. Started by a VB6 that isn't elevated, `/make` writes the DLL/OCX but can't register it ("Error accessing the system registry"): then `registered: false` and a `note` with the cause and the way out (`com_register elevate=true`, spike 41). Returns `status` (`succeeded`, `failed`, `dialog`, `timeout`), `errors` (file, line, message), the raw `log`, and the output file before/after. **Open project:** if saved, built in its IDE (File > Make; `via` says so); with unsaved changes, refused |
 | `build_in_ide` | `project?`, `pid?` | File > Make from IDE memory (`MakeCompiledFile`), unsaved edits included; design mode. `status`: `succeeded`, `failed` (with `compileCheck`: message and location from a full compile, because `MakeCompiledFile` itself only fails generically), `make-failed` (the full compile passed, so the make step itself failed: improvement notes 20; `causes` lists what the server can see: output folder missing or not writable, output file read-only or in use), `dialog`, `timeout`. A project with no components loaded is refused up front (VB would open Project Properties, improvement notes 9). An existing output file is replaced without a prompt |
 
 Notes from spike 21:
@@ -1475,6 +1478,7 @@ After a crash: `ide_launch` the project, then `recovery_list`, `recovery_read` a
 
 ## Change log
 
+- 2026-10-19: registration without an elevated VB6: `com_register`/`com_unregister` run through the elevated watchdog, or show a UAC prompt with `elevate: true`, and refuse otherwise; `build_make` uses an elevated watchdog when the running VB6 isn't elevated, so the build registers.
 - 2026-10-19: non-elevated VB6 tested (spike 41): `ide_dialog_respond` clicks itself when VB6 isn't elevated and no watchdog runs; `build_make` (`registered: false`) and `com_register` explain failed registration.
 - 2026-10-19: heartbeat during slow calls; calls refused while `server_restart` ends the server (spike 42).
 - 2026-10-19: `debug_eval allow_side_effect` trusts the hook only for Claude Code; other clients are asked through MCP elicitation, or refused (spike 40).

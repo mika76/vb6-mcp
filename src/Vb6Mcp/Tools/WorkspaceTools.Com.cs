@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json.Nodes;
 using Vb6Mcp.Core;
 using Vb6Mcp.Core.Bridge;
@@ -49,16 +50,21 @@ public sealed partial class WorkspaceTools
             Schema.Object(("project", "string", ".vbp path or project name filter.", false), ("refresh", "boolean", "Rescan the roots first.", false)),
             (a, _) => Task.FromResult(CompatStatus(a))),
         new("com_register",
-            "Register a DLL/OCX under the workspace roots (regsvr32, elevated through the VB6 add-in, audited). Then checks the registry: " +
-            "its typelib and classes must point at this file. Needs confirm=true.",
-            Schema.Object(("file", "string", "Full path of the DLL/OCX.", true), ("confirm", "boolean", "Required: true.", true), ("pid", "integer", "IDE whose add-in runs it (default: the only one).", false)),
+            "Register a DLL/OCX under the workspace roots (regsvr32, audited). Needs administrator rights: runs through an elevated VB6's " +
+            "add-in or the elevated watchdog; with neither, elevate=true shows the user a UAC prompt. Then checks the registry: its typelib " +
+            "and classes must point at this file. Needs confirm=true.",
+            Schema.Object(("file", "string", "Full path of the DLL/OCX.", true), ("confirm", "boolean", "Required: true.", true),
+                          ("elevate", "boolean", "If no elevated VB6 or watchdog runs: ask the user through a UAC prompt.", false),
+                          ("pid", "integer", "IDE whose add-in runs it (default: an elevated one).", false)),
             (a, _) => RegisterAsync(a, unregister: false)),
         new("com_unregister",
-            "Unregister a DLL/OCX under the workspace roots (regsvr32 /u, elevated through the VB6 add-in, audited), then check the " +
+            "Unregister a DLL/OCX under the workspace roots (regsvr32 /u, audited; elevated like com_register), then check the " +
             "registry. Refused if its classes are registered to a different file (unregistering would remove those registrations too) " +
             "unless force=true. Needs confirm=true.",
             Schema.Object(("file", "string", "Full path of the DLL/OCX.", true), ("confirm", "boolean", "Required: true.", true),
-                          ("force", "boolean", "Also when its classes point at another copy.", false), ("pid", "integer", "IDE whose add-in runs it.", false)),
+                          ("force", "boolean", "Also when its classes point at another copy.", false),
+                          ("elevate", "boolean", "If no elevated VB6 or watchdog runs: ask the user through a UAC prompt.", false),
+                          ("pid", "integer", "IDE whose add-in runs it.", false)),
             (a, _) => RegisterAsync(a, unregister: true)),
         new("com_orphans",
             "Broken COM registrations, report only (nothing is changed): classes whose server file is missing, typelibs whose file is " +
@@ -511,46 +517,116 @@ public sealed partial class WorkspaceTools
             throw new ToolException("some of this file's classes are registered to another file; unregistering this one removes those registrations too. " +
                                     "Check with com_where, then pass force=true if that's intended");
 
-        var live = env.Scan().Live;
-        var inst = a.Int("pid") is int pid ? live.FirstOrDefault(i => i.Pid == pid) ?? throw new ToolException($"no VB6 IDE with the add-in has pid {pid}")
-                 : live.Count == 1 ? live[0]
-                 : throw new ToolException(live.Count == 0 ? "registration runs elevated through the VB6 add-in: start VB6 (with the add-in) first" : "several VB6 IDEs are running; pass pid");
-        var client = env.Client(inst);
-        int child;
-        try { child = await client.RegsvrAsync(path, unregister); }
-        catch (AddinErrorException ex) when (ex.Code == 400 && ex.AddinMessage.StartsWith("unknown verb", StringComparison.Ordinal))
-        { throw new ToolException("the add-in is older than this server (no REGSVR verb): rebuild and register it (scripts\\build-addin.ps1)"); }
-        catch (AddinErrorException ex) { throw new ToolException(ex.AddinMessage); }
-        Audit.Write(verb, inst.Pid, $"regsvr32{(unregister ? " /u" : "")} \"{path}\" child pid {child}");
-
-        int? exit = null;
-        var deadline = DateTime.UtcNow.AddSeconds(60);
-        while (exit is null && DateTime.UtcNow < deadline)
-        {
-            await Task.Delay(200);
-            exit = await client.RegStatusAsync(child);
-        }
+        var (via, auditPid, exit) = await RunRegsvrAsync(a, verb, path, unregister);
         var after = FileRegistration(path, TypeLibRegistry.All());
         // Registered = regsvr32 succeeded, the typelib points here and no class points at another file. A class of the
         // typelib that nothing registers isn't a failure (improvement notes 18: CapPRO.dll registered 5 of 6 classes;
         // the sixth, RivetTalk, is an internal helper the DLL never registers): listed in notRegistered instead.
         bool verified = Verified(unregister, exit, after.AllHere, after.AnyHere, after.LibHere, after.Elsewhere.Count, after.Missing.Count, after.Classes.Count);
-        Audit.Write(verb, inst.Pid, $"\"{path}\" exit {exit?.ToString() ?? "timeout"} verified={verified}");
+        Audit.Write(verb, auditPid, $"\"{path}\" exit {exit?.ToString() ?? "timeout"} verified={verified}");
         return ToolResult.Ok(new
         {
-            file = path, action = unregister ? "unregister" : "register", exitCode = exit, verified,
+            file = path, action = unregister ? "unregister" : "register", via, exitCode = exit, verified,
             notRegistered = !unregister && after.Missing.Count > 0 ? after.Missing : null,
             registeredElsewhere = !unregister && after.Elsewhere.Count > 0 ? after.Elsewhere : null,
             before = new { before.TypeLib, before.Classes }, after = new { after.TypeLib, after.Classes },
             note = exit is null ? "regsvr32 didn't finish within 60 s" :
                    // Spike 41: the add-in runs regsvr32 at VB6's level; without elevation DllRegisterServer fails (exit 5)
-                   exit != 0 && Vb6Install.IsElevated(inst.Pid) == false
-                       ? $"regsvr32 failed (exit {exit}): registering needs administrator rights, and VB6 (pid {inst.Pid}) isn't elevated, so the add-in's regsvr32 isn't either. " +
-                         $"Register it from an elevated prompt (regsvr32{(unregister ? " /u" : "")} \"{path}\"), or start VB6 as administrator (spike 41)" :
+                   exit != 0 && auditPid > 0 && Vb6Install.IsElevated(auditPid) == false
+                       ? $"regsvr32 failed (exit {exit}): registering needs administrator rights, and VB6 (pid {auditPid}) isn't elevated, so the add-in's regsvr32 isn't either. " +
+                         "Pass elevate=true (the user gets a UAC prompt), or start VB6 as administrator (spike 41)" :
                    verified && !unregister && after.Missing.Count > 0 ? $"registered; the file doesn't register {string.Join(", ", after.Missing)} (classes in its typelib that nothing registers are usually internal helpers, not a failure)" :
                    verified ? null :
                    !unregister && after.Elsewhere.Count > 0 ? $"regsvr32 finished, but {string.Join(", ", after.Elsewhere)} {(after.Elsewhere.Count == 1 ? "is" : "are")} registered to another file (com_where)" :
                    unregister ? "regsvr32 finished, but registry entries still point at this file" : "regsvr32 finished, but the registry doesn't point at this file for everything",
         });
+    }
+
+    /// <summary>
+    /// Runs regsvr32 [/u] elevated and waits up to 60 s for its exit code. Registration needs administrator rights (spike 41),
+    /// so the first that is elevated runs it: the add-in of the IDE named by pid (or of an elevated IDE), the elevated
+    /// watchdog, or, with elevate=true, regsvr32 started from here through a UAC prompt (the user's consent, not ours).
+    /// Without any of them it's refused instead of running a regsvr32 that can only fail. Returns (via, pid for the audit
+    /// log, exit code or null on timeout).
+    /// </summary>
+    private async Task<(string Via, int AuditPid, int? Exit)> RunRegsvrAsync(JsonObject a, string verb, string path, bool unregister)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(60);
+        var live = env.Scan().Live;
+        var inst = a.Int("pid") is int pid ? live.FirstOrDefault(i => i.Pid == pid) ?? throw new ToolException($"no VB6 IDE with the add-in has pid {pid}")
+                 : live.FirstOrDefault(i => Vb6Install.IsElevated(i.Pid) == true);
+        if (inst is not null)
+        {
+            var client = env.Client(inst);
+            int child;
+            try { child = await client.RegsvrAsync(path, unregister); }
+            catch (AddinErrorException ex) when (ex.Code == 400 && ex.AddinMessage.StartsWith("unknown verb", StringComparison.Ordinal))
+            { throw new ToolException("the add-in is older than this server (no REGSVR verb): rebuild and register it (scripts\\build-addin.ps1)"); }
+            catch (AddinErrorException ex) { throw new ToolException(ex.AddinMessage); }
+            Audit.Write(verb, inst.Pid, $"regsvr32{(unregister ? " /u" : "")} \"{path}\" child pid {child} (add-in)");
+            int? exit = null;
+            while (exit is null && DateTime.UtcNow < deadline) { await Task.Delay(200); exit = await client.RegStatusAsync(child); }
+            return ($"the add-in of VB6 pid {inst.Pid}", inst.Pid, exit);
+        }
+
+        if (env.FindWatchdog() is { } wd && Vb6Install.IsElevated(wd.Pid) == true)
+        {
+            var client = new AddinClient(wd, TimeSpan.FromSeconds(10));
+            var r = await client.SendRawAsync("REGSVR", [path, unregister ? "unregister" : "register"]);
+            if (r.Status == Core.Protocol.ResponseStatus.Error)
+                throw new ToolException(r.ErrorMessage.StartsWith("unknown verb", StringComparison.Ordinal)
+                    ? "the elevated watchdog is older than this server (no REGSVR verb): restart it, pass elevate=true, or start VB6 as administrator"
+                    : "the watchdog couldn't run regsvr32: " + r.ErrorMessage);
+            var child = r.Payload;
+            Audit.Write(verb, 0, $"regsvr32{(unregister ? " /u" : "")} \"{path}\" child pid {child} (watchdog pid {wd.Pid})");
+            int? exit = null;
+            while (exit is null && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(200);
+                var s = await client.SendRawAsync("REGSTATUS", [child]);
+                if (s.Status == Core.Protocol.ResponseStatus.Error) throw new ToolException("the watchdog lost the regsvr32: " + s.ErrorMessage);
+                if (s.Payload != "running") exit = int.Parse(s.Payload, CultureInfo.InvariantCulture);
+            }
+            return ($"the elevated watchdog (pid {wd.Pid})", 0, exit);
+        }
+
+        if (a.Bool("elevate") != true)
+            throw new ToolException("registering needs administrator rights, and no elevated VB6 (with the add-in) or elevated watchdog is running (spike 41). " +
+                                    "Pass elevate=true to show the user a UAC prompt for regsvr32, or ask the user to start VB6 as administrator " +
+                                    "or to start the watchdog elevated");
+        return await RegsvrWithUacAsync(verb, path, unregister);
+    }
+
+    /// <summary>
+    /// regsvr32 through ShellExecute "runas": Windows shows the user a UAC prompt, and declining is ERROR_CANCELLED (1223).
+    /// This is the one place the server starts something elevated; it only happens on the explicit elevate=true, and the
+    /// prompt names regsvr32, so the user sees what they approve (hard rule 13).
+    /// </summary>
+    private static async Task<(string Via, int AuditPid, int? Exit)> RegsvrWithUacAsync(string verb, string path, bool unregister)
+    {
+        // VB6 components are 32-bit: the 32-bit regsvr32 (SysWOW64 on 64-bit Windows; this server runs as x86, so
+        // Environment.SystemDirectory would be redirected anyway, but ShellExecute resolves the path we give it)
+        var regsvr = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "SysWOW64", "regsvr32.exe");
+        if (!File.Exists(regsvr)) regsvr = Path.Combine(Environment.SystemDirectory, "regsvr32.exe");
+        var psi = new System.Diagnostics.ProcessStartInfo(regsvr, (unregister ? "/s /u " : "/s ") + $"\"{path}\"")
+        { UseShellExecute = true, Verb = "runas", WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden };
+        Audit.Write(verb, 0, $"regsvr32{(unregister ? " /u" : "")} \"{path}\" (UAC prompt, elevate=true)");
+        System.Diagnostics.Process? p;
+        // ShellExecuteEx waits for the user's answer to the prompt: off this thread, so the heartbeat keeps going
+        try { p = await Task.Run(() => System.Diagnostics.Process.Start(psi)); }
+        catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
+        {
+            Audit.Write(verb, 0, $"\"{path}\" UAC prompt declined");
+            throw new ToolException("the user declined the UAC prompt: nothing was registered");
+        }
+        catch (System.ComponentModel.Win32Exception ex) { throw new ToolException("regsvr32 didn't start: " + ex.Message); }
+        if (p is null) throw new ToolException("regsvr32 didn't start");
+        using (p)
+        {
+            // 60 s from the user's answer, not from the prompt: they may take a while to read it
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            try { await p.WaitForExitAsync(cts.Token); } catch (OperationCanceledException) { return ("regsvr32 elevated through a UAC prompt", 0, null); }
+            return ($"regsvr32 elevated through a UAC prompt (pid {p.Id})", 0, p.ExitCode);
+        }
     }
 }

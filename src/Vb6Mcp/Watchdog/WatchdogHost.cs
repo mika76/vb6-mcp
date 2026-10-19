@@ -25,6 +25,10 @@ public interface IWatchdogActions
     string Make(string vbp, string defines);
     Task<string> SnapAsync(long hwnd, string id, CancellationToken ct);
     string Launch(string? project);
+    /// <summary>Starts regsvr32 [/u] for a .dll/.ocx under the roots at the watchdog's level; returns its pid (spike 41).</summary>
+    string Regsvr(string file, bool unregister);
+    /// <summary>The exit code of a regsvr32 started by Regsvr, or "running".</summary>
+    string RegStatus(int pid);
 }
 
 /// <summary>Raised by actions for an expected refusal; becomes ERR 409 with the message.</summary>
@@ -132,6 +136,18 @@ public sealed class WatchdogHost(IWatchdogActions actions, Action<string> log, s
                     if (a.Length < 1 || a.Length > 2) return Err(400, "MAKE takes the .vbp path and optional defines");
                     log($"MAKE {a[0]}{(a.Length > 1 && a[1].Length > 0 ? " /d " + a[1] : "")}");
                     return Ok(actions.Make(a[0], a.Length > 1 ? a[1] : ""));
+                }
+                case "REGSVR":
+                {
+                    // registration changes the machine: the literal "register" or "unregister" is required (hard rules 9, 13)
+                    if (a.Length != 2 || a[1] is not ("register" or "unregister")) return Err(400, "REGSVR takes the file and 'register' or 'unregister'");
+                    log($"REGSVR {a[1]} {a[0]}");
+                    return Ok(actions.Regsvr(a[0], a[1] == "unregister"));
+                }
+                case "REGSTATUS":
+                {
+                    if (a.Length != 1 || !int.TryParse(a[0], NumberStyles.None, CultureInfo.InvariantCulture, out var regPid)) return Err(400, "REGSTATUS takes a pid");
+                    return Ok(actions.RegStatus(regPid));
                 }
                 case "SNAP":
                 {

@@ -34,6 +34,8 @@ public static class WatchdogMakeTests
         public string Make(string vbp, string defines) { Calls.Add($"make {vbp} {defines}"); return string.Join(Wire.US, "2147483000", log, vbp); }
         public Task<string> SnapAsync(long h, string id, CancellationToken ct) => throw new NotSupportedException();
         public string Launch(string? project) => throw new NotSupportedException();
+        public string Regsvr(string file, bool unregister) => throw new NotSupportedException();
+        public string RegStatus(int pid) => throw new NotSupportedException();
     }
 
     sealed class NoIde(InstanceInfo? watchdog) : IIdeEnvironment
@@ -73,5 +75,25 @@ public static class WatchdogMakeTests
             Assert.True((bool)none["isError"]! && ((string)none["content"]![0]!["text"]!).Contains("watchdog --stay"), "without IDE and watchdog: says how to get one");
         }
         finally { stop.Cancel(); Directory.Delete(dir, true); }
+    }
+
+    /// <summary>
+    /// Spike 41: with no elevated VB6 and no elevated watchdog, com_register refuses (a regsvr32 at our level can only
+    /// fail) and says how to elevate; it never shows a UAC prompt without elevate=true.
+    /// </summary>
+    [Test]
+    public static async Task RegisteringWithoutElevationAsksForElevate()
+    {
+        var dir = Directory.CreateTempSubdirectory("vb6mcp-reg-").FullName;
+        try
+        {
+            var dll = Path.Combine(dir, "A.dll");
+            File.WriteAllBytes(dll, [0x4D, 0x5A]);
+            var tool = new WorkspaceTools(new NoIde(null), [dir]).All().First(t => t.Name == "com_register");
+            var r = (await tool.InvokeAsync(new JsonObject { ["file"] = dll, ["confirm"] = true }, CancellationToken.None)).ToJson();
+            var text = (string)r["content"]![0]!["text"]!;
+            Assert.True((bool)r["isError"]! && text.Contains("elevate=true"), text);
+        }
+        finally { Directory.Delete(dir, true); }
     }
 }

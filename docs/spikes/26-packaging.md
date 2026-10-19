@@ -76,3 +76,17 @@ Startup is immediate. Watchdog mode is the same exe.
   - works in Windows PowerShell 5.1.
 - **Roots** are machine policy: changing them means running the installer again (one UAC prompt).
 - **Development** stays as it was (`build-addin.ps1`, `install-server.ps1`). A development build of the add-in has no `roots.txt` next to it, so it reads `%LOCALAPPDATA%`.
+
+## Release check: 1.0.0 (2026-10-19)
+
+The published `vb6mcp-1.0.0.zip`, unpacked and installed with Windows PowerShell 5.1 on the development machine:
+
+- **Install** (one UAC prompt): the four files in `C:\Program Files (x86)\vb6mcp`, `roots.txt` writable only by SYSTEM and Administrators, the ProgID's `InprocServer32` pointing at the installed DLL, the HKCU add-in entry, the user-scope `vb6` server and the hook.
+- **A short session through the installed `vb6mcp.exe`** (stdio, driven by a script): `initialize` (1.0.0, 94 tools), then the steps below. The add-in answered as v1.0.0 (protocol 1) and started the installed 1.0.0 watchdog.
+  1. `ide_launch` of a scratch copy of the Basic fixture: it went through the shell with a UAC prompt, because no elevated watchdog was running.
+  2. The SourceSafe question was reported and answered with `ide_dialog_respond`.
+  3. `code_read`, an edit, `symbol_refs`, `syntax_check`.
+  4. `run_start`, `app_tree`, `app_screenshot`, `run_end`.
+  5. `ide_quit discard: true`, which restored the files.
+- **Uninstall** (one UAC prompt): it stopped the installed watchdog, unregistered the DLL, and deleted the Program Files folder, the ProgID and CLSID keys, the HKCU add-in entry, the user-scope server and the hook. `%LOCALAPPDATA%\vb6mcp` stays (logs, recovery copies), as documented; `-RemoveData` deletes it.
+- **Afterwards on a development machine:** the installed hook and ProgID replace the development ones, and uninstalling removes both. Restore them with `install-server.ps1` (hook, no elevation) and `build-addin.ps1` (add-in, elevated).

@@ -16,6 +16,10 @@ An MCP server that lets AI agents (Claude Code) work **inside the Visual Basic 6
 
 ## What it does
 
+![An agent reproduces a wrong total in a running VB6 program, finds the cause at a breakpoint, fixes the line in the IDE and checks the result](docs/media/demo.gif)
+
+*A scripted session on the Cart test fixture: an agent reproduces a wrong total, finds the cause at a breakpoint, fixes one line and checks the result. The screenshots are real; the chat panel and the cursor are drawn (the tools send input to the controls directly). Full quality: [the MP4](https://github.com/mika76/vb6-mcp/releases/download/v1.0.0/vb6mcp-demo.mp4) (81 s). Regenerate both with `node scripts/demo/video.js`, then `dotnet run --project scripts/demo/videomaker -c Release -- build/demo/video build/demo/demo.mp4 docs/media/demo.gif`.*
+
 The agent works on what the developer sees in the IDE, not just on the files:
 
 - **Code:** read and edit the code as the IDE holds it, unsaved edits included; symbols and every use of a name across projects; save explicitly.
@@ -57,7 +61,7 @@ MIT, see [LICENSE](LICENSE).
 | `spikes/` | Phase 0 experiments (throwaway) |
 | `docs/` | Architecture, protocol, tools, spike write-ups |
 | `installer/` | `install.ps1`, `uninstall.ps1`, `INSTALL.txt`: shipped in the package |
-| `scripts/` | development: `build-addin.ps1`, `install-server.ps1`; `package.ps1` builds `dist\vb6mcp-<version>.zip` |
+| `scripts/` | development: `build-addin.ps1`, `install-server.ps1`; `package.ps1` builds `dist\vb6mcp-<version>.zip`; `demo/` records and renders the README demo |
 
 ## Build and test
 

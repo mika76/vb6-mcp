@@ -16,6 +16,15 @@ public static class KeySyntaxTests
     }
 
     [Test]
+    public static void RealInputTypesMappedCharactersAsKeys()
+    {
+        // US-like layout for the test: letters and digits have keys, 'é' has none (stays a character)
+        (int, bool)? Map(char c) => char.IsAsciiLetterOrDigit(c) ? (char.ToUpperInvariant(c), char.IsUpper(c)) : null;
+        Assert.Equal("D66;U66;S1;D66;U66;S0;D49;U49;C233;D13;U13", KeySyntax.ToEvents("bB1é{ENTER}", Map),
+            "Form_KeyDown should see KeyCode 66 for b, not VK_PACKET (improvement notes 54)");
+    }
+
+    [Test]
     public static void ChordsSetAndClearModifiers()
     {
         Assert.Equal("S2;D83;U83;S0", KeySyntax.ToEvents("{CTRL+S}"));

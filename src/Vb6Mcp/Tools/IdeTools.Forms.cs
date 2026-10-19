@@ -282,7 +282,7 @@ public sealed partial class IdeTools
     ///   button that way). One CONTROLS read, only when geometry changed or a control was added.
     /// </summary>
     private async Task<(bool Dirty, List<string> Hints, List<object> Overlaps)> ReviewAsync(AddinClient client, string project, string component, bool dirty,
-        IReadOnlyList<(string Control, string Property, string Value)> done, string? added)
+        IReadOnlyList<(string Control, string Property, string Value)> done, string? added, bool byLayout = false)
     {
         var hints = new List<string>();
         var overlaps = new List<object>();
@@ -362,7 +362,8 @@ public sealed partial class IdeTools
             }
         if (overlaps.Count > 0)
             hints.Add("Some controls overlap (see overlaps): the one in front hides the other. Move them apart, unless they're never visible at the same time. Code may show controls that are hidden at design time.");
-        if (LayoutSuggestion(component, controls, done) is { } suggestion) hints.Add(suggestion);
+        // not after form_layout itself: it placed them (improvement notes 38)
+        if (!byLayout && LayoutSuggestion(component, controls, done) is { } suggestion) hints.Add(suggestion);
         hints.Add("Check the layout with form_screenshot.");
         return (dirty, hints, overlaps);
     }

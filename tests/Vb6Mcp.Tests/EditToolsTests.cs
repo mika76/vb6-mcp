@@ -18,6 +18,7 @@ public static class EditToolsTests
     {
         public string Text = Module;
         public List<string[]> Replaces = [];
+        public bool FailAfterDelete;   // like an InsertLines error after DeleteLines in the add-in
         public long ClickedHwnd;
         public IdeWindowState Window;
         public FakeAddin Addin;
@@ -43,6 +44,7 @@ public static class EditToolsTests
             if (VbCode.Slice(Text, start, count) != a[4] && count > 0) return ("ERR", $"409{US}the target lines changed since they were read");
             var lines = Text.Split("\r\n").ToList();
             lines.RemoveRange(start - 1, count);
+            if (FailAfterDelete) { Text = string.Join("\r\n", lines); return ("ERR", $"500{US}Invalid procedure call or argument"); }
             if (a[5].Length > 0) lines.InsertRange(start - 1, a[5].Split("\r\n"));
             Text = string.Join("\r\n", lines);
             return ("OK", $"{lines.Count}{US}1");
@@ -100,6 +102,47 @@ public static class EditToolsTests
         Assert.Equal("Option Explicit\r\n' header\r\n\r\nPrivate Sub A()\r\n    Beep\r\nEnd Sub", ide.Text);
         Assert.Equal(4, int.Parse(ide.Replaces[0][2]), "the lower edit goes first");
         Assert.Equal(2, r["json"]!["edits"]!.AsArray().Count);
+    }
+
+    /// <summary>
+    /// Improvement notes 29 and 30: a fresh module reads as "Option Explicit\r\n" with countOfLines 2 (VB counts the empty
+    /// last line). Replacing both lines with text holding "" must succeed in one go, with no error after it was applied.
+    /// </summary>
+    [Test]
+    public static async Task ReplacingAFreshModuleWithAnEmptyLiteralSucceeds()
+    {
+        using var ide = new FakeIde();
+        ide.Text = "Option Explicit\r\n";
+        var r = await Call(ide.Tools(), "code_replace_lines", new JsonObject
+        {
+            ["component"] = "modA", ["start_line"] = 1, ["count"] = 2, ["expected_hash"] = VbCode.Hash(ide.Text),
+            ["new_text"] = "Option Explicit\n\nPublic Function Nz(s As String) As String\n    If s = \"\" Then Nz = \"-\" Else Nz = s\nEnd Function\n",
+        });
+        Assert.Equal(false, (bool)r["isError"]!, (string?)r["text"]);
+        Assert.Equal("Option Explicit\r\n", ide.Replaces[0][4], "the empty last line is part of the guard");
+        Assert.Equal("Option Explicit\r\n\r\nPublic Function Nz(s As String) As String\r\n    If s = \"\" Then Nz = \"-\" Else Nz = s\r\nEnd Function", ide.Text);
+        Assert.Equal(1, ide.Replaces.Count, "one edit, no retry");
+        Assert.True(r["json"]!["codeHints"] is null, "\"\" is no escape");
+        Assert.Equal(VbCode.Hash(ide.Text), (string)r["json"]!["hash"]!);
+    }
+
+    /// <summary>An add-in error after the old lines were deleted (improvement notes 30): the result says the edit is half-applied.</summary>
+    [Test]
+    public static async Task AHalfAppliedEditIsReportedAsSuch()
+    {
+        using var ide = new FakeIde { FailAfterDelete = true };
+        var r = await Call(ide.Tools(), "code_replace_lines", new JsonObject
+        { ["component"] = "modA", ["start_line"] = 3, ["count"] = 2, ["new_text"] = "Private Sub B()\nEnd Sub", ["expected_hash"] = VbCode.Hash(Module) });
+        var text = (string)r["text"]!;
+        Assert.True((bool)r["isError"]! && text.Contains("half-applied") && text.Contains("Invalid procedure call"), text);
+    }
+
+    [Test]
+    public static void ReplaceLinesMatchesTheAddinsNumbering()
+    {
+        Assert.Equal("a\r\nb", VbCode.ReplaceLines("Option Explicit\r\n", 1, 2, "a\r\nb"));
+        Assert.Equal("x\r\ny\r\nz", VbCode.ReplaceLines("x\r\nz", 2, 0, "y"));
+        Assert.Equal("x", VbCode.ReplaceLines("x\r\ny", 2, 1, ""));
     }
 
     [Test]

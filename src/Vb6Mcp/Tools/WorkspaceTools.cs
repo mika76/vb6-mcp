@@ -15,6 +15,9 @@ namespace Vb6Mcp.Tools;
 /// </summary>
 public sealed partial class WorkspaceTools(IIdeEnvironment env, IReadOnlyList<string> roots)
 {
+    /// <summary>What the tools last left in each IDE component (improvement notes 50); the same instance as IdeTools.Ledger.</summary>
+    public ToolEditLedger Ledger { get; init; } = new();
+
     /// <summary>Cached map older than this is rebuilt on the next request.</summary>
     public static readonly TimeSpan MaxMapAge = TimeSpan.FromMinutes(5);
 
@@ -65,7 +68,8 @@ public sealed partial class WorkspaceTools(IIdeEnvironment env, IReadOnlyList<st
             "Every statement that uses a name (a procedure, variable, constant...) across the projects under the workspace roots: file, " +
             "line, the full statement with ' _' continuations joined (so the arguments passed are visible), and which projects include " +
             "the file. Whole-word, case-insensitive; matches in strings and comments don't count. Files a running IDE has with unsaved " +
-            "changes are read from the IDE. Declarations are marked. symbol_find finds only declarations.",
+            "changes are read from the IDE. Declarations are marked. Each file's hash is the expected_hash for file_replace_lines, so " +
+            "you can edit the lines without file_read. symbol_find finds only declarations.",
             Schema.Object(("name", "string", "The identifier, e.g. Add_To_Audit.", true),
                           ("project", "string", "Only projects whose name contains this, or one .vbp path.", false),
                           ("declarations", "boolean", "Include declarations (default true).", false),
@@ -139,7 +143,9 @@ public sealed partial class WorkspaceTools(IIdeEnvironment env, IReadOnlyList<st
             total += refs.Count;
             results.Add(new
             {
-                path, source, projects = map.ProjectsUsing(path).Select(p => p.Name),
+                // the hash of the scanned text, which is what file_replace_lines checks (the IDE's text for a file open there):
+                // the agent can edit from this result without reading each file for its hash (benchmark T13: 5 file_reads)
+                path, source, hash = VbCode.Hash(code), projects = map.ProjectsUsing(path).Select(p => p.Name),
                 refs = refs.Select(r => new { line = r.Line, endLine = r.EndLine > r.Line ? r.EndLine : (int?)null, declaration = r.Declaration ? true : (bool?)null, statement = r.Statement }),
             });
             if (truncated) break;
@@ -305,6 +311,7 @@ public sealed partial class WorkspaceTools(IIdeEnvironment env, IReadOnlyList<st
                 done++;
             }
             var now = await client.ReadAsync(target.Project, target.Component);
+            Ledger.Record(target.Inst.Pid, target.Project, target.Component, now.Text);
             return ToolResult.Ok(new
             {
                 source = "ide", routedTo = new { pid = target.Inst.Pid, project = target.Project, component = target.Component }, path, countOfLines = lines, dirty,

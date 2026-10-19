@@ -142,6 +142,24 @@ public static class LocalInput
         return GetGUIThreadInfo((uint)thread, ref gti) ? gti.hwndFocus : IntPtr.Zero;
     }
 
+    /// <summary>
+    /// The virtual key and Shift that type <paramref name="c"/> on the current keyboard layout (VkKeyScan), for real input;
+    /// null when it needs Ctrl or Alt (AltGr characters) or the layout has no key for it: then it goes as a Unicode
+    /// character. Caps Lock inverts Shift for letters, as it would for the user's own typing.
+    /// </summary>
+    public static (int Vk, bool Shift)? KeyFor(char c)
+    {
+        if (c < ' ') return null;
+        short r = VkKeyScanW(c);
+        if (r == -1 || (r & 0x0600) != 0) return null;     // no key, or needs Ctrl/Alt
+        int vk = r & 0xFF; bool shift = (r & 0x0100) != 0;
+        if (char.IsLetter(c) && (GetKeyState(0x14 /*VK_CAPITAL*/) & 1) != 0) shift = !shift;
+        return (vk, shift);
+    }
+
+    /// <summary>The top-level window a window belongs to (GetAncestor GA_ROOT), 0 for 0.</summary>
+    public static long Root(long hwnd) => hwnd == 0 ? 0 : GetAncestor(H(hwnd), 2).ToInt64();
+
     /// <summary>Thread that owns a window.</summary>
     public static int WindowThread(long hwnd) => (int)GetWindowThreadProcessId(H(hwnd), out _);
 
@@ -298,6 +316,8 @@ public static class LocalInput
     [StructLayout(LayoutKind.Sequential)] private struct INPUT { public uint type; public InputUnion u; }
 
     [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr h, uint msg, nint w, nint l);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern short VkKeyScanW(char c);
+    [DllImport("user32.dll")] private static extern short GetKeyState(int vk);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, string l, uint flags, uint timeout, out IntPtr r);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, nint w, StringBuilder l, uint flags, uint timeout, out IntPtr r);
     [DllImport("user32.dll")] private static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, nint w, IntPtr l, uint flags, uint timeout, out nint r);

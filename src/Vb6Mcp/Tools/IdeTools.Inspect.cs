@@ -100,10 +100,26 @@ public sealed partial class IdeTools
         }
 
         string? problem = null;
-        // Pass 1: TypeName never raises an error, whatever the variable holds
+        // Pass 1: TypeName raises no run-time error, whatever the variable holds. It doesn't compile for a variable of a
+        // user-defined type declared in a standard module (benchmark T17: "Only user-defined types defined in public object
+        // modules can be coerced to or from a variant"), which poisoned the whole line: such a chunk is retried one variable
+        // at a time, and a variable that still doesn't compile is reported as a user-defined type.
         foreach (var chunk in Chunks(vars, v => $"TypeName({v.Name})"))
         {
             var r = await EvalListAsync(inst, chunk.Select(x => x.Expr).ToList(), ct);
+            if (r.CompileError && chunk.Count > 1)
+            {
+                foreach (var (v, e) in chunk)
+                {
+                    var one = await EvalListAsync(inst, [e], ct);
+                    if (one.CompileError) v.Type = UdtType;
+                    else if (one.Error != null) { problem = one.Error; break; }
+                    else v.Type = one.Values![0];
+                }
+                if (problem != null) break;
+                continue;
+            }
+            if (r.CompileError) { chunk[0].Var.Type = UdtType; continue; }
             if (r.Error != null) { problem = r.Error; break; }
             for (int i = 0; i < chunk.Count; i++) chunk[i].Var.Type = r.Values![i];
         }
@@ -139,7 +155,8 @@ public sealed partial class IdeTools
             where.Project, where.Component, procedure = where.Procedure, line = where.StartLine,
             locals = vars.Where(v => v.Scope == "procedure").Select(Shape),
             module = vars.Where(v => v.Scope == "module").Select(Shape),
-            note = problem ?? "values of arrays, objects and Null aren't shown: use debug_eval (e.g. UBound(items), items(0), obj.Name). " +
+            note = problem ?? "values of arrays, objects, user-defined types and Null aren't shown: use debug_eval (e.g. UBound(items), items(0), " +
+                             "obj.Name; a user-defined type field by field: CStr(products(1).Price)). " +
                              "Strings are cut at 200 characters (truncated, length); \\r and \\n stand for line breaks",
         });
     }
@@ -163,15 +180,26 @@ public sealed partial class IdeTools
     /// Evaluates several expressions in one Immediate line, joined by <see cref="Sep"/>, with a final
     /// separator so trailing spaces survive the line trimming in <see cref="ResultAfter"/>.
     /// </summary>
-    private async Task<(IReadOnlyList<string>? Values, string? Error)> EvalListAsync(InstanceInfo inst, IReadOnlyList<string> exprs, CancellationToken ct)
+    /// <summary>What debug_locals reports as the type of a variable whose TypeName doesn't compile (a private user-defined type).</summary>
+    private const string UdtType = "(user-defined type)";
+
+    /// <remarks>
+    /// A "Compile error" dialog right after our own Immediate line was caused by that line, not by the user's program, so
+    /// it is closed here with OK (CompileError = true) and the IDE stays in break mode. Any other dialog (a run-time
+    /// error in code the evaluation ran) is left open and reported (hard rule 9).
+    /// </remarks>
+    private async Task<(IReadOnlyList<string>? Values, string? Error, bool CompileError)> EvalListAsync(InstanceInfo inst, IReadOnlyList<string> exprs, CancellationToken ct)
     {
         string line = string.Join($" & \"{Sep}\" & ", exprs) + $" & \"{Sep}\"";
         var (status, result, w) = await EvaluateAsync(inst, line, "debug_locals", ct);
         if (status == "dialog")
-            return (null, $"evaluating showed a dialog ('{w!.Dialogs[0].Caption}': {string.Join(" ", w.Dialogs[0].Texts)}); it was not answered");
-        if (status != "ok" || result is null) return (null, "the Immediate window didn't show a result in time");
+        {
+            if (await CloseOwnCompileErrorAsync(inst, w!, ct) is { } compileError) return (null, compileError, true);
+            return (null, $"evaluating showed a dialog ('{w!.Dialogs[0].Caption}': {string.Join(" ", w.Dialogs[0].Texts)}); it was not answered", false);
+        }
+        if (status != "ok" || result is null) return (null, "the Immediate window didn't show a result in time", false);
         var parts = SplitValues(result, exprs.Count);
-        return parts is null ? (null, "the values couldn't be separated (a value contains the separator?): " + result) : (parts, null);
+        return parts is null ? (null, "the values couldn't be separated (a value contains the separator?): " + result, false) : (parts, null, false);
     }
 
     /// <summary>Splits "v1|~|v2|~|" into exactly <paramref name="count"/> values, or null if that's not possible.</summary>

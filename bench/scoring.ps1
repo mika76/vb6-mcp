@@ -7,6 +7,10 @@
 $BenchNotDone = @{
     T4 = '(?i)(couldn''t|could not|unable to|wasn''t able to|was not able to)\s+(confirm|verify|build|compile|launch|run (the )?(build|compiler|vb6))|(didn''t|did not|haven''t|have not)\s+(confirm|verify|build|compile)|fix is unconfirmed|not confirmed'
     T5 = '(?i)(couldn''t|could not|unable to|wasn''t able to)\s+(run|launch|start|click)|from reading the code|without running|not from watching|prediction from the code'
+    # T14/T16 ask to check the fix by running the program: a fix that is right but unchecked ("I couldn't run the built
+    # program", A in the T16 runs) didn't do the asked part
+    T14 = '(?i)(couldn''t|could not|unable to|wasn''t able to|was not able to)\s+(run|launch|start|compile|build)|(didn''t|did not|haven''t|have not)\s+(run|launch|start)\s+(the |it|Cart)'
+    T16 = '(?i)(couldn''t|could not|unable to|wasn''t able to|was not able to)\s+(run|launch|start|compile|build)|(didn''t|did not|haven''t|have not)\s+(run|launch|start)\s+(the |it|Cart)'
 }
 
 # The answer asks the user to act (approve, run something themselves, click a UAC prompt).

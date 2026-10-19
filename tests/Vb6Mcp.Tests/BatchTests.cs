@@ -17,6 +17,7 @@ public static class BatchTests
             T("app_click", a => ToolResult.Ok(new { clicked = a.Str("x") })),
             T("app_screenshot", _ => ToolResult.Image([0x89, 0x50, 0x4E, 0x47], new { window = "Form1" })),
             T("app_wait", _ => throw new ToolException("timed out")),
+            T("dlg", _ => throw new ToolException("VB6 is showing a dialog: answer it first (ide_dialog_respond)")),
             T("ide_launch", _ => ToolResult.Ok(new { })),
             T("code_read", _ => ToolResult.Ok(new { hash = "h1", added = new { name = "Command1" }, positions = new[] { new { left = 120 }, new { left = 960 } } })),
             T("edit", a => ToolResult.Ok(new { got = a.ToJsonString() })),
@@ -51,6 +52,22 @@ public static class BatchTests
         var (batch2, ran2) = Make();
         await batch2.InvokeAsync(new JsonObject { ["calls"] = new JsonArray(Call("app_wait"), Call("app_click", new() { ["x"] = "after" })), ["continue_on_error"] = true }, CancellationToken.None);
         Assert.Equal("app_wait|app_click:after", string.Join("|", ran2));
+    }
+
+    /// <summary>Improvement notes 37: ten calls failed in a row on one SourceSafe prompt; a dialog stops the batch even with continue_on_error.</summary>
+    [Test]
+    public static async Task AnOpenDialogStopsEvenAContinueOnErrorBatch()
+    {
+        var (batch, ran) = Make();
+        var r = (await batch.InvokeAsync(new JsonObject { ["calls"] = new JsonArray(Call("dlg"), Call("app_click", new() { ["x"] = "after" })), ["continue_on_error"] = true }, CancellationToken.None)).ToJson();
+        Assert.Equal("dlg", string.Join("|", ran));
+        var summary = (string)r["content"]!.AsArray().Last()!["text"]!;
+        Assert.True(summary.Contains("\"notRun\":1") && summary.Contains("ide_dialog_respond"), summary);
+
+        var (batch2, ran2) = Make();
+        var other = (await batch2.InvokeAsync(new JsonObject { ["calls"] = new JsonArray(Call("app_wait"), Call("app_click", new() { ["x"] = "after" })), ["continue_on_error"] = true }, CancellationToken.None)).ToJson();
+        Assert.Equal("app_wait|app_click:after", string.Join("|", ran2));
+        Assert.True(!((string)other["content"]!.AsArray().Last()!["text"]!).Contains("ide_dialog_respond"), "an ordinary error keeps going");
     }
 
     [Test]

@@ -168,6 +168,23 @@ public sealed partial class WorkspaceTools
         var checks = new List<Check>();
         var debugging = await DebuggingProjectsAsync();
         ProjectMap? map = roots.Count > 0 ? Map(false) : null;
+        // the folders of the programs that load these DLLs: a delay import is looked for there, not next to the DLL
+        var appFolders = new List<string>();
+        if (Vb6Install.FindExe() is { } vb6) appFolders.Add(Path.GetDirectoryName(vb6)!);
+        if (!string.IsNullOrEmpty(project)) appFolders.Add(Path.GetDirectoryName(PathKey.Normalize(project))!);
+
+        // spike 39: registered, present and 32-bit, yet it can't load: a DLL it needs (here delay-loaded) is missing
+        void CheckDependencies(string label, string path)
+        {
+            var missing = PeDependencies.Missing(path, appFolders);
+            if (missing.Count == 0) return;   // only problems: an ok row per component doubled the result of a project check
+            foreach (var m in missing.Take(10))
+                checks.Add(new(label + " dependencies", "error", string.Join(" -> ", m.Chain) + ": not found" +
+                    (m.Note is { } n ? $" ({n})" : "") +
+                    (m.Delay ? ". A DLL in this chain is delay-loaded: the program fails only when it first needs it, with exception 0xc06d007e, which ends the process (the IDE too, spike 39)"
+                             : ". Loading the DLL fails (error 48 or 429)")));
+            if (missing.Count > 10) checks.Add(new(label + " dependencies", "error", $"{missing.Count - 10} more missing"));
+        }
 
         void CheckServerFile(string label, string? path)
         {
@@ -176,6 +193,7 @@ public sealed partial class WorkspaceTools
             if (!File.Exists(path)) { checks.Add(new(label, "error", $"server file missing: {path}")); return; }
             var bits = ComRegistry.Bitness(path);
             checks.Add(new(label, bits is "x86" or null ? "ok" : "error", $"{path} ({bits ?? "machine type unreadable"}, written {Stamp(path)})" + (bits is "x86" or null ? "" : "; VB6 programs are 32-bit and can't load it")));
+            if (bits is "x86") CheckDependencies(label, path);
         }
         void CheckTypeLib(string label, Guid lib, int? major)
         {
@@ -250,8 +268,10 @@ public sealed partial class WorkspaceTools
                 var name = line.Split('#').LastOrDefault() is { Length: > 0 } n && !line.TrimStart().StartsWith('{') ? n : line.Split(';').Last().Trim();
                 CheckTypeLib(name, d.LibId, d.Major);
                 var reg = libs.Where(t => t.LibId == d.LibId && t.Major == d.Major && !ComRegistry.IsProjectTypeLib(t)).Select(t => t.Win32Path).OfType<string>().Where(File.Exists).FirstOrDefault();
-                if (reg is not null && ComRegistry.Bitness(reg) is { } bits && bits != "x86" && !reg.EndsWith(".tlb", StringComparison.OrdinalIgnoreCase) && !reg.EndsWith(".olb", StringComparison.OrdinalIgnoreCase))
+                bool binary = reg is not null && !reg.EndsWith(".tlb", StringComparison.OrdinalIgnoreCase) && !reg.EndsWith(".olb", StringComparison.OrdinalIgnoreCase);
+                if (binary && ComRegistry.Bitness(reg!) is { } bits && bits != "x86")
                     checks.Add(new(name, "error", $"{reg} is {bits}; VB6 programs are 32-bit"));
+                else if (binary) CheckDependencies(name, reg!);
             }
         }
         return ToolResult.Ok(new

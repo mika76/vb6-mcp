@@ -21,6 +21,27 @@ public static class McpServerTests
             .ToDictionary(o => o["id"]?.ToJsonString() ?? "null");
     }
 
+    /// <summary>
+    /// Missing required arguments are named all at once, with the wrong names and the right ones (benchmark T16:
+    /// proc_replace with code/file took three calls); hwnd counts as control. The handler doesn't run.
+    /// </summary>
+    [Test]
+    public static async Task MissingArgumentsAreNamedTogether()
+    {
+        bool ran = false;
+        var tool = new Tool("proc_replace", "", Schema.Object(("component", "string", "", true), ("name", "string", "", true),
+            ("new_text", "string", "", true), ("expected_hash", "string", "", true), ("pid", "integer", "", false)), (_, _) => { ran = true; return Task.FromResult(ToolResult.Text("ok")); });
+        var j = (await tool.InvokeAsync(new JsonObject { ["name"] = "X", ["code"] = "..", ["file"] = "frmCart" }, CancellationToken.None)).ToJson();
+        var text = (string)j["content"]![0]!["text"]!;
+        Assert.True((bool)j["isError"]! && !ran, text);
+        Assert.Equal("missing required arguments: component, new_text, expected_hash. Not arguments of proc_replace: code, file. proc_replace takes: component, name, new_text, expected_hash, pid", text);
+
+        var select = new Tool("app_select", "", Schema.Object(("control", "string", "", true), ("text", "string", "", false)),
+            (a, _) => Task.FromResult(ToolResult.Text((string)a["control"]!)));
+        var s = (await select.InvokeAsync(new JsonObject { ["hwnd"] = "7400FE", ["text"] = "Books" }, CancellationToken.None)).ToJson();
+        Assert.Equal("7400FE", (string)s["content"]![0]!["text"]!);
+    }
+
     [Test]
     public static async Task HandshakeListAndUnknownMethods()
     {
@@ -108,7 +129,7 @@ public static class McpServerTests
             });
             (string, string) Open() { opened = true; return ("QUEUED", "open"); }
 
-            var tools = new IdeTools(new FakeEnv(fake)) { OpenWait = TimeSpan.FromSeconds(3) }.All();
+            var tools = new IdeTools(new FakeEnv(fake)) { OpenWait = TimeSpan.FromSeconds(3), SettleQuiet = TimeSpan.FromMilliseconds(10), SettleMax = TimeSpan.FromMilliseconds(300) }.All();
             var r = await Run(tools, Call(1, "project_open", new JsonObject { ["path"] = vbp }));
             var res = r["1"]["result"]!;
             Assert.Equal(false, (bool)res["isError"]!, (string?)res["content"]![0]!["text"]);

@@ -132,7 +132,7 @@ public static class CheckpointTests
                     default: return ("ERR", $"400{US}unexpected {verb}");
                 }
             });
-            var tools = new IdeTools(new Env(fake)) { Roots = [dir], CheckpointFolder = Path.Combine(dir, "store"), OpenWait = TimeSpan.FromSeconds(3) };
+            var tools = new IdeTools(new Env(fake)) { Roots = [dir], CheckpointFolder = Path.Combine(dir, "store"), OpenWait = TimeSpan.FromSeconds(3), SettleQuiet = TimeSpan.FromMilliseconds(10), SettleMax = TimeSpan.FromMilliseconds(300) };
             var original = File.ReadAllBytes(bas);
             Assert.True((await Call(tools, "project_checkpoint", new JsonObject { ["project"] = "Basic" }))["error"] is null, "checkpoint of a saved open project");
 

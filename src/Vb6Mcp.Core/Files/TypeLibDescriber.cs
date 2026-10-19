@@ -69,9 +69,14 @@ public static class TypeLibDescriber
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"' {d.Info.Name} {{{d.Info.LibId.ToString().ToUpperInvariant()}}} v{d.Info.Major}.{d.Info.Minor}{(d.Doc is null ? "" : " - " + d.Doc)}");
+        // VB marks a class's own interface hidden (_clsTax, events __clsTax): without these a VB DLL showed only
+        // "Implements _clsTax" and none of its methods (benchmark T15). Interfaces a visible class implements are shown.
+        var implemented = d.Types.Where(c => c.Kind == "coclass" && !c.Hidden)
+            .SelectMany(c => c.Implements.Select(i => i.Replace("[default]", "").Replace("[source]", "").Trim()))
+            .ToHashSet(StringComparer.Ordinal);
         foreach (var t in d.Types.Where(t => filter is null || t.Name.Contains(filter, StringComparison.OrdinalIgnoreCase)))
         {
-            if (t.Hidden && !includeHidden && filter is null) continue;
+            if (t.Hidden && !includeHidden && filter is null && !implemented.Contains(t.Name)) continue;
             sb.AppendLine();
             var head = t.Kind switch
             {

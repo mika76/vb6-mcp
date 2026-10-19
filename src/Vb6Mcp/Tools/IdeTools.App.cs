@@ -47,15 +47,16 @@ public sealed partial class IdeTools
             Args(("window", "string", WindowDesc, false)), (a, _) => Task.FromResult(AppTree(a))),
         new("app_click",
             "Click a command button, check box or option button of the running program. Address it by control (hex handle from app_tree) " +
-            "or by text (its caption, optionally within window). Returns the state afterwards (mode, dialogs, windows).",
+            "or by text (its caption, optionally within window). Returns the state afterwards (mode, dialogs, windows). A control the user " +
+            "can't see (hidden, or outside its container's visible area: app_tree's clipped) is refused unless force=true.",
             Args(("control", "string", "Control window handle (hex) from app_tree.", false), ("text", "string", "Control caption, e.g. Add or &Add.", false),
-                 ("window", "string", WindowDesc, false)),
+                 ("window", "string", WindowDesc, false), ("force", "boolean", "Click even a control the user can't see.", false)),
             (a, ct) => AppClickAsync(a, ct)),
         new("app_set_text",
             "Set the text of a text box in the running program (fires its Change event). Address it by control (hex handle from app_tree) " +
             "or by index (0-based among the form's text boxes, in app_tree order). Returns the text read back.",
             Args(("text", "string", "New text.", true), ("control", "string", "Text box window handle (hex).", false),
-                 ("index", "integer", "0-based index among the form's text boxes.", false), ("window", "string", WindowDesc, false)),
+                 ("index", "integer", "0-based index among the form's text boxes in reading order (top to bottom, left to right); app_tree shows each box's index.", false), ("window", "string", WindowDesc, false)),
             (a, ct) => AppSetTextAsync(a, ct)),
         new("app_mouse",
             "Mouse input at a position in a form of the running program: click, double_click, right_click, or drag (from x,y to to_x,to_y). " +
@@ -80,15 +81,15 @@ public sealed partial class IdeTools
         new("app_select",
             "Select an item in a list box or combo box of the running program, by text (exact, case-insensitive) or index (0-based). " +
             "Raises the control's Click event like a user's click. Returns the selection read back.",
-            Args(("control", "string", "List or combo box window handle (hex) from app_tree.", true), ("text", "string", "Item text.", false),
+            Args(("control", "string", "List or combo box window handle (hex) from app_tree. Default: the form's only list or combo box, or the only one that has the item text.", false), ("text", "string", "Item text.", false),
                  ("index", "integer", "0-based item index.", false)),
             (a, ct) => AppSelectAsync(a, ct)),
         new("app_keys",
             "Type text or press keys in the running program. Plain text is typed as characters; braces name keys: {ENTER} {TAB} {ESC} " +
             "{BACKSPACE} {DELETE} {UP} {DOWN} {LEFT} {RIGHT} {HOME} {END} {PGUP} {PGDN} {F1}..{F12}, with modifiers {CTRL+S} " +
-            "{SHIFT+TAB} {ALT+F}; {LBRACE}/{RBRACE} for literal braces. Goes to control, or to the program's focused control. " +
+            "{SHIFT+TAB} {ALT+F}; {LBRACE}/{RBRACE} for literal braces. Goes to control, or to the program's focused control (never to the IDE). " +
             "Posted by default (doesn't disturb the user); real_input=true sends real keystrokes (brings the form to the front briefly).",
-            Args(("keys", "string", "Text and {KEY} names.", true), ("control", "string", "Target window handle (hex). Default: the focused control.", false),
+            Args(("keys", "string", "Text and {KEY} names.", true), ("control", "string", "Target window handle (hex): a control (app_tree) or a form (app_windows). Default: the focused control.", false),
                  ("real_input", "boolean", "Real keystrokes (SendInput) instead of posted messages.", false)),
             (a, ct) => AppKeysAsync(a, ct)),
         new("app_wait",
@@ -128,6 +129,8 @@ public sealed partial class IdeTools
         var t = ResolveTarget(a);
         var form = ResolveWindow(t, a.Str("window"));
         var controls = AppWindows.Controls(form.Hwnd);
+        // each text box's app_set_text index (reading order), so the agent doesn't count them in window order (T18)
+        var textIndex = AppWindows.TextBoxes(form.Hwnd).Select((c, i) => (c.Hwnd, i)).ToDictionary(x => x.Hwnd, x => x.i);
         return ToolResult.Ok(new
         {
             window = new { hwnd = Hex(form.Hwnd), form.Kind, form.Caption },
@@ -136,8 +139,10 @@ public sealed partial class IdeTools
             controls = controls.Select(c =>
             {
                 var o = new System.Text.Json.Nodes.JsonObject { ["hwnd"] = Hex(c.Hwnd), ["kind"] = c.Kind, ["text"] = c.Text, ["left"] = c.Left, ["top"] = c.Top, ["width"] = c.Width, ["height"] = c.Height };
+                if (textIndex.TryGetValue(c.Hwnd, out var ti)) { o["index"] = ti; if (AppWindows.IsReadOnly(c.Hwnd)) o["readOnly"] = true; }
                 if (c.Depth > 0) o["depth"] = c.Depth;
                 if (!c.Visible) o["hidden"] = true;
+                if (c.Clipped is { } clip) o["clipped"] = clip;   // "partly" or "hidden": outside a container's visible area
                 if (!c.Enabled) o["disabled"] = true;
                 return o;
             }),
@@ -160,6 +165,8 @@ public sealed partial class IdeTools
             var wanted = text.Replace("&", "", StringComparison.Ordinal);
             var matches = AppWindows.Controls(form.Hwnd)
                 .Where(c => c.Kind is "CommandButton" or "CheckBox" or "OptionButton" && c.Text.Replace("&", "", StringComparison.Ordinal).Equals(wanted, StringComparison.OrdinalIgnoreCase)).ToList();
+            // a caption can belong to a visible button and a parked one (XmPanel moves unused buttons out of view)
+            if (matches.Count > 1 && matches.Count(Seen) == 1) matches = [.. matches.Where(Seen)];
             target = matches.Count switch
             {
                 0 => throw new ToolException($"no button, check box or option button captioned '{text}' in '{form.Caption}' (see app_tree)"),
@@ -168,24 +175,37 @@ public sealed partial class IdeTools
             };
         }
         if (!target.Enabled) throw new ToolException($"'{target.Text}' is disabled");
+        // improvement notes 33/52: the program acted on a click on a button no user could reach
+        if (!Seen(target) && a.Bool("force") != true)
+            throw new ToolException($"{target.Kind} '{target.Text}' ({Hex(target.Hwnd)}) can't be seen by the user: " +
+                (!target.Visible ? "its window is hidden" : "it lies outside its container's visible area") +
+                ". A user couldn't click it; pass force=true to click it anyway");
         Audit.Write("app_click", t.Pid, $"{Hex(target.Hwnd)} {target.Kind} '{target.Text}'");
+        var before = await UiFingerprintAsync(t);
         if (t.Ide is { } inst) await _env.Client(inst).AppClickAsync(target.Hwnd);
         else LocalInput.Click(target.Hwnd);
         await Task.Delay(500, ct);              // the click and its event code run after the posted message
-        return ToolResult.Ok(AfterState(t, $"clicked {target.Kind} '{target.Text}'"));
+        var result = ToolResult.Ok(AfterState(t, $"clicked {target.Kind} '{target.Text}'"));
+        // improvement notes 34: "clicked" was returned while a wedged form ignored the click. Say when nothing visible
+        // changed (windows, captions, texts, enabled/visible states, dialogs); a click can still have effects not seen here.
+        return before.Length > 0 && await UiFingerprintAsync(t) == before
+            ? result.With("changed", System.Text.Json.Nodes.JsonValue.Create(false))
+                    .With("verify", System.Text.Json.Nodes.JsonValue.Create("no change seen after the click: no window, text, enabled or visible state or list changed and no dialog appeared" + (t.IsIde ? " (check box states aren't compared for a program in the IDE). " : ". ") +
+                          "The click may have done nothing (form busy or wedged, handler empty) or something not shown in windows (a file, the database, Debug.Print): check app_screenshot or debug_immediate"))
+            : result;
     }
 
     private async Task<ToolResult> AppSetTextAsync(JsonObject a, CancellationToken ct)
     {
         var t = ResolveTarget(a);
-        RequireReady(t, allowDialogTarget: false);
+        RequireReady(t, allowDialogTarget: TargetsDialog(t, a));
         var text = a.Str("text") ?? throw new ToolException("missing required argument 'text'");
         AppControl target;
         if (a.Str("control") is { Length: > 0 } hex) target = FindControlByHandle(t, ParseHex(hex));
         else
         {
             var form = ResolveWindow(t, a.Str("window"));
-            var boxes = AppWindows.Controls(form.Hwnd).Where(c => c.Kind == "TextBox").ToList();
+            var boxes = AppWindows.TextBoxes(form.Hwnd);   // reading order, as app_tree's index shows it
             int index = a.Int("index") ?? (boxes.Count == 1 ? 0 : throw new ToolException($"the form has {boxes.Count} text boxes; pass index or control"));
             if (index < 0 || index >= boxes.Count) throw new ToolException($"index {index} is out of range (the form has {boxes.Count} text boxes)");
             target = boxes[index];
@@ -196,7 +216,11 @@ public sealed partial class IdeTools
         else await Task.Run(() => LocalInput.SetText(target.Hwnd, text), ct);
         await Task.Delay(400, ct);
         var now = AppWindows.Text(new IntPtr(target.Hwnd));
-        return ToolResult.Ok(new { textNow = now, applied = now == text, state = AfterState(t, "text set") });
+        // a Locked text box takes WM_SETTEXT, but no user could type there: say so (T18: the price went into the locked total)
+        bool readOnly = AppWindows.IsReadOnly(target.Hwnd);
+        return ToolResult.Ok(new { textNow = now, applied = now == text, readOnly = readOnly ? true : (bool?)null,
+            note = readOnly ? $"text box {Hex(target.Hwnd)} is read-only (Locked): a user can't type into it. Was another box meant? app_tree shows each box's index" : null,
+            state = AfterState(t, "text set") });
     }
 
     private async Task<ToolResult> AppMouseAsync(JsonObject a, CancellationToken ct)
@@ -328,12 +352,32 @@ public sealed partial class IdeTools
     {
         var t = ResolveTarget(a);
         RequireReady(t, allowDialogTarget: false);
-        long hwnd = FindControlByHandle(t, ParseHex(a.Req("control"))).Hwnd;
+        async Task<(string Kind, IReadOnlyList<string> Items, int Selected)> StateOf(long h)
+        {
+            bool combo = ClassOf(h).Contains("ComboBox", StringComparison.OrdinalIgnoreCase);
+            return t.Ide is { } inst ? await _env.Client(inst).ListStateAsync(h) : await Task.Run(() => LocalInput.ListState(h, combo), ct);
+        }
+        // Without control (benchmark T17: three calls with only text): the form's only list or combo box, or with text the
+        // only one that has that item (the Shop form has the product combo and the list of order lines)
+        long hwnd;
+        if (a.Str("control") is { Length: > 0 } hex) hwnd = FindControlByHandle(t, ParseHex(hex)).Hwnd;
+        else
+        {
+            var lists = AppWindows.Controls(ResolveWindow(t, a.Str("window")).Hwnd).Where(c => c.Kind is "ListBox" or "ComboBox").ToList();
+            if (lists.Count > 1 && a.Str("text") is { } wanted)
+            {
+                var having = new List<AppControl>();
+                foreach (var l in lists)
+                    if ((await StateOf(l.Hwnd)).Items.Any(s => s.Equals(wanted, StringComparison.OrdinalIgnoreCase))) having.Add(l);
+                if (having.Count > 0) lists = having;
+            }
+            hwnd = lists.Count == 1 ? lists[0].Hwnd
+                : throw new ToolException(lists.Count == 0 ? "the form has no list or combo box" : $"the form has {lists.Count} list and combo boxes{(a.Str("text") is null ? "" : $" with '{a.Str("text")}'")} ({string.Join(", ", lists.Select(l => $"{l.Kind} {Hex(l.Hwnd)}"))}); pass control");
+        }
         bool isCombo = ClassOf(hwnd).Contains("ComboBox", StringComparison.OrdinalIgnoreCase);
         if (!isCombo && !ClassOf(hwnd).Contains("ListBox", StringComparison.OrdinalIgnoreCase))
             throw new ToolException($"control {Hex(hwnd)} is a {AppWindows.Kind(ClassOf(hwnd))}, not a list box or combo box");
-        async Task<(string Kind, IReadOnlyList<string> Items, int Selected)> State() =>
-            t.Ide is { } inst ? await _env.Client(inst).ListStateAsync(hwnd) : await Task.Run(() => LocalInput.ListState(hwnd, isCombo), ct);
+        Task<(string Kind, IReadOnlyList<string> Items, int Selected)> State() => StateOf(hwnd);
         var (kind, items, before) = await State();
         int index;
         if (a.Int("index") is int i) index = i;
@@ -364,13 +408,17 @@ public sealed partial class IdeTools
     private async Task<ToolResult> AppKeysAsync(JsonObject a, CancellationToken ct)
     {
         var t = ResolveTarget(a);
-        RequireReady(t, allowDialogTarget: false);
+        RequireReady(t, allowDialogTarget: TargetsDialog(t, a));
         string events;
-        try { events = KeySyntax.ToEvents(a.Req("keys")); }
+        try { events = KeySyntax.ToEvents(a.Req("keys"), a.Bool("real_input") == true ? LocalInput.KeyFor : null); }
         catch (FormatException ex) { throw new ToolException(ex.Message); }
-        long hwnd = a.Str("control") is { Length: > 0 } hex ? FindControlByHandle(t, ParseHex(hex)).Hwnd : 0;
+        // control may also be a form (app_windows): a form with only Labels has no control to type into (improvement notes 54)
+        long hwnd = a.Str("control") is { Length: > 0 } hex
+            ? (AppWindows.List(t.Pid).FirstOrDefault(w => w.Hwnd == ParseHex(hex)) is { } formTarget ? formTarget.Hwnd : FindControlByHandle(t, ParseHex(hex)).Hwnd)
+            : 0;
         bool real = a.Bool("real_input") ?? false;
         string? realNote = null;
+        if (hwnd == 0 && t.IsIde) hwnd = ProgramFocusInIde(t, real);
         Audit.Write("app_keys", t.Pid, $"{(real ? "real " : "")}{(hwnd == 0 ? "focused" : Hex(hwnd))} {a.Req("keys")}");
         long target;
         if (t.Ide is { } inst)
@@ -391,8 +439,10 @@ public sealed partial class IdeTools
         }
         else
         {
-            int thread = LocalInput.WindowThread(ResolveWindow(t, null).Hwnd);
+            var exeForm = ResolveWindow(t, null);
+            int thread = LocalInput.WindowThread(exeForm.Hwnd);
             if (hwnd == 0) hwnd = LocalInput.Focused(thread).ToInt64();
+            if (hwnd == 0 && AppWindows.Controls(exeForm.Hwnd).Count == 0) hwnd = exeForm.Hwnd;   // only Labels: the form takes the keys
             if (hwnd == 0) throw new ToolException("no control of the program has the focus; pass the control (from app_tree)");
             target = hwnd;
             if (real)
@@ -435,10 +485,12 @@ public sealed partial class IdeTools
 
         var start = DateTime.UtcNow;
         string? seen = null;
+        HashSet<long>? dialogsAtStart = null;
         while (true)
         {
             var w = _env.ReadWindows(t.Pid);
             var dialogs = t.IsIde ? w.Dialogs : IdeWindows.Dialogs(t.Pid);
+            dialogsAtStart ??= [.. dialogs.Select(d => d.Hwnd)];
             if (modeWanted != null && Mode(w.Mode) == modeWanted) seen = $"mode {modeWanted}";
             else if (dialog && dialogs.Count > 0) seen = $"dialog '{dialogs[0].Caption}'";
             else if (window != null)
@@ -451,12 +503,15 @@ public sealed partial class IdeTools
                 var now = AppWindows.Text(new IntPtr(h));
                 if ((text != null && now == text) || (contains != null && now.Contains(contains, StringComparison.Ordinal))) seen = $"text '{now}'";
             }
-            if (seen != null || (DateTime.UtcNow - start).TotalSeconds >= timeout)
+            // improvement notes 32: a MsgBox that blocks the program won't let the awaited window appear: stop waiting
+            var blocking = seen is null && !dialog ? dialogs.FirstOrDefault(d => !dialogsAtStart.Contains(d.Hwnd)) : null;
+            if (seen != null || blocking != null || (DateTime.UtcNow - start).TotalSeconds >= timeout)
                 return ToolResult.Ok(new
                 {
                     met = seen != null, seen, waitedMs = (int)(DateTime.UtcNow - start).TotalMilliseconds,
                     mode = t.IsIde ? Mode(w.Mode) : null, dialogs = dialogs.Select(d => new { caption = d.Caption, text = string.Join("\n", d.Texts), buttons = d.Buttons.Select(b => b.Caption) }),
-                    note = seen is null ? $"not seen within {timeout} s" : null,
+                    note = blocking != null ? $"stopped waiting: dialog '{blocking.Caption}' appeared, and the program waits for it to be answered"
+                         : seen is null ? $"not seen within {timeout} s" : null,
                 });
             await Task.Delay(200, ct);
         }
@@ -508,15 +563,23 @@ public sealed partial class IdeTools
             {
                 var viaWd = await SnapViaWatchdogAsync(hwnd, maxWidth, ct)
                             ?? throw new ToolException("the IDE didn't produce the screenshot (busy or hung?) and " + NoWatchdog);
-                return ToolResult.Image(viaWd.Png, new { window = caption, hwnd = Hex(hwnd), method = viaWd.Method });
+                return ToolResult.Image(viaWd.Png, new { window = caption, hwnd = Hex(hwnd), method = viaWd.Method, clientOrigin = ClientOrigin(hwnd), note = CoordinatesNote });
             }
         }
         using (bmp)
         {
             var png = Screenshots.ToPng(bmp, maxWidth);
-            return ToolResult.Image(png, new { window = caption, hwnd = Hex(hwnd), width = bmp.Width, height = bmp.Height, method });
+            double scale = maxWidth > 0 && bmp.Width > maxWidth ? (double)maxWidth / bmp.Width : 1;
+            return ToolResult.Image(png, new { window = caption, hwnd = Hex(hwnd), width = bmp.Width, height = bmp.Height, method,
+                                               clientOrigin = ClientOrigin(hwnd), imageScale = scale < 1 ? Math.Round(scale, 4) : (double?)null, note = CoordinatesNote });
         }
     }
+
+    // improvement notes 35: the image is the whole window, app_mouse takes client coordinates; a click read off the
+    // image missed by the title bar and border (about 8, 31 px) and hit another control
+    private static object ClientOrigin(long hwnd) { var (x, y) = AppWindows.ClientOffset(hwnd); return new { x, y }; }
+
+    private const string CoordinatesNote = "the image shows the whole window; for app_mouse use x = image x / imageScale - clientOrigin.x (same for y)";
 
     // ---------- helpers ----------
 
@@ -536,6 +599,24 @@ public sealed partial class IdeTools
         return new Target(inst.Pid, inst, null);
     }
 
+    /// <summary>
+    /// app_keys without control on a program running in the IDE: the program shares the IDE's UI thread, so "the focused
+    /// control" can be the Immediate window or a code pane (improvement notes 51: {F6} went to the Immediate window after
+    /// debug_immediate). Returns the focused control when it is in one of the program's windows; otherwise, for real input,
+    /// the program's form (bringing it to the front gives the focus back to its own control); posted input is refused.
+    /// </summary>
+    private long ProgramFocusInIde(Target t, bool real)
+    {
+        var form = ResolveWindow(t, null);
+        long focused = LocalInput.Focused(LocalInput.WindowThread(form.Hwnd)).ToInt64();
+        var root = LocalInput.Root(focused);
+        if (focused != 0 && AppWindows.List(t.Pid).Any(w => w.Hwnd == root)) return focused;
+        // a form without windowed controls (only Labels: "Press any key") takes the keys itself (Form_KeyDown/KeyPress)
+        if (real || AppWindows.Controls(form.Hwnd).Count == 0) return form.Hwnd;
+        throw new ToolException("the keyboard focus is in the IDE (" + (focused == 0 ? "no focused window" : $"window {Hex(focused)}") +
+            "), not in the program, so posted keys would go to VB6 itself; pass control (from app_tree) or real_input=true (brings the program's form to the front)");
+    }
+
     private AppWindow ResolveWindow(Target t, string? which)
     {
         var windows = AppWindows.List(t.Pid);
@@ -553,6 +634,41 @@ public sealed partial class IdeTools
         return forms.Count >= 1 ? forms[0] : windows[0];
     }
 
+    /// <summary>What a user could see change: the program's windows and dialogs with their controls' text and states.</summary>
+    private async Task<string> UiFingerprintAsync(Target t)
+    {
+        try
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (var w in AppWindows.List(t.Pid))
+            {
+                sb.Append(w.Hwnd).Append('|').Append(w.Caption).Append('|').Append(w.Enabled).Append('\n');
+                foreach (var c in AppWindows.Controls(w.Hwnd))
+                {
+                    sb.Append(c.Hwnd).Append('|').Append(c.Text).Append('|').Append(c.Enabled).Append(c.Visible).Append(c.Left).Append(',').Append(c.Top);
+                    // UIPI blocks LB_*/CB_*/BM_* from the server to an elevated IDE (live check of notes 34: a log ListBox
+                    // grew and the click looked like "no change"). Lists go through the add-in there; check states are
+                    // read only for compiled programs, which run at the server's integrity.
+                    if (c.Kind is "ListBox" or "ComboBox")
+                        sb.Append('|').Append(t.Ide is { } inst ? await ListFingerprintAsync(inst, c.Hwnd) : AppWindows.ItemCount(c.Hwnd, c.Kind).ToString(CultureInfo.InvariantCulture));
+                    else if (c.Kind is "CheckBox" or "OptionButton" && !t.IsIde) sb.Append('|').Append(AppWindows.CheckState(c.Hwnd));
+                    sb.Append('\n');
+                }
+            }
+            return sb.ToString();
+        }
+        catch (Exception ex) when (ex is ToolException or InvalidOperationException) { return ""; }
+    }
+
+    private async Task<string> ListFingerprintAsync(InstanceInfo inst, long hwnd)
+    {
+        try { var (_, items, selected) = await _env.Client(inst).ListStateAsync(hwnd); return items.Count + ":" + selected; }
+        catch (Exception ex) when (ex is AddinErrorException or AddinBusyException or AddinUnreachableException) { return "?"; }
+    }
+
+    /// <summary>Whether a user could see (and so click) the control: its window is visible and not clipped away.</summary>
+    private static bool Seen(AppControl c) => c.Visible && c.Clipped != "hidden";
+
     private static AppControl FindControlByHandle(Target t, long hwnd)
     {
         foreach (var w in AppWindows.List(t.Pid))
@@ -561,6 +677,19 @@ public sealed partial class IdeTools
     }
 
     /// <summary>The IDE must be in run mode; a compiled program must still run. No open dialog unless allowed.</summary>
+    /// <summary>
+    /// Whether the call is aimed at an open dialog itself (improvement notes 36: the program's own InputBox): window names
+    /// it (caption or handle), or control is one of its child windows. Then the dialog isn't in the way, it's the target.
+    /// </summary>
+    private bool TargetsDialog(Target t, JsonObject a)
+    {
+        var dialogs = t.IsIde ? _env.ReadWindows(t.Pid).Dialogs : IdeWindows.Dialogs(t.Pid);
+        if (dialogs.Count == 0) return false;
+        if (a.Str("window") is { Length: > 0 } w &&
+            dialogs.Any(d => d.Caption.Equals(w, StringComparison.OrdinalIgnoreCase) || (TryParseHex(w, out var h) && d.Hwnd == h))) return true;
+        return a.Str("control") is { Length: > 0 } c && TryParseHex(c, out var ch) && dialogs.Any(d => d.Hwnd == LocalInput.Root(ch));
+    }
+
     private void RequireReady(Target t, bool allowDialogTarget)
     {
         if (t.IsIde)
@@ -599,7 +728,10 @@ public sealed partial class IdeTools
     }
 
     private static string Hex(long h) => h.ToString("X", CultureInfo.InvariantCulture);
-    private static long ParseHex(string s) => TryParseHex(s, out var v) ? v : throw new ToolException($"'{s}' isn't a window handle (hex)");
+    // Agents pass control names (txtPrice) here (benchmark T16, 3 failed calls): a running program's control names
+    // aren't visible from outside it, so say where the handle comes from
+    private static long ParseHex(string s) => TryParseHex(s, out var v) ? v
+        : throw new ToolException($"'{s}' isn't a window handle (hex). Control names can't be seen from outside the running program: take the control's hwnd from app_tree (kind, text and position tell them apart)");
     private static bool TryParseHex(string s, out long v)
         => long.TryParse(s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? s[2..] : s, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out v);
 }

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using Vb6Mcp.Core;
 using Vb6Mcp.Core.Bridge;
 using Vb6Mcp.Mcp;
@@ -21,6 +22,12 @@ public sealed partial class IdeTools
 
     /// <summary>IDE pids where this server started the current run (hard rule 11: ending other runs needs force).</summary>
     private readonly HashSet<int> _runsWeStarted = [];
+
+    /// <summary>IDEs whose current run this server started (handed to the next server by server_restart, notes 56).</summary>
+    public IReadOnlyList<int> RunsStarted => [.. _runsWeStarted];
+
+    /// <summary>Runs the previous server of this session started (from the handover), counted as this server's.</summary>
+    public IEnumerable<int> InheritedRuns { init { foreach (var pid in value) _runsWeStarted.Add(pid); } }
     /// <summary>IDEs where run_start stopped at a dialog in design mode; the run counts as ours if it starts once the dialog is answered (spike 24 live test).</summary>
     private readonly HashSet<int> _pendingStarts = [];
     /// <summary>Breakpoints set through this server, per pid. VBIDE can't list breakpoints, so this can drift.</summary>
@@ -49,17 +56,17 @@ public sealed partial class IdeTools
             Schema.Object(("force", "boolean", "End even though this server didn't start the run.", false), ("pid", "integer", PidDesc, false)),
             (a, ct) => RunEndAsync(a, ct)),
         new("step_into", "Step into the next statement (F8). Break mode, or design mode to start at the first statement.",
-            Schema.Object(("pid", "integer", PidDesc, false)), (a, ct) => SimpleCommandAsync(a, CmdStepInto, [IdeMode.Break, IdeMode.Design], [IdeMode.Break, IdeMode.Run, IdeMode.Design], ct)),
+            Schema.Object(("pid", "integer", PidDesc, false)), (a, ct) => StepAsync(a, CmdStepInto, [IdeMode.Break, IdeMode.Design], ct)),
         new("step_over", "Step over the next statement (Shift+F8). Break mode only.",
-            Schema.Object(("pid", "integer", PidDesc, false)), (a, ct) => SimpleCommandAsync(a, CmdStepOver, [IdeMode.Break], [IdeMode.Break, IdeMode.Run, IdeMode.Design], ct)),
+            Schema.Object(("pid", "integer", PidDesc, false)), (a, ct) => StepAsync(a, CmdStepOver, [IdeMode.Break], ct)),
         new("step_out", "Step out of the current procedure (Ctrl+Shift+F8). Break mode only.",
-            Schema.Object(("pid", "integer", PidDesc, false)), (a, ct) => SimpleCommandAsync(a, CmdStepOut, [IdeMode.Break], [IdeMode.Break, IdeMode.Run, IdeMode.Design], ct)),
+            Schema.Object(("pid", "integer", PidDesc, false)), (a, ct) => StepAsync(a, CmdStepOut, [IdeMode.Break], ct)),
         new("run_to_cursor", "Run until the given line (Ctrl+F8). Break or design mode.",
             Schema.Object(("component", "string", ComponentDesc, true), ("line", "integer", "Line to run to (1-based).", true),
                           ("project", "string", ProjectDesc, false), ("pid", "integer", PidDesc, false)),
             (a, ct) => RunToCursorAsync(a, ct)),
         new("bp_toggle",
-            "Toggle a breakpoint on a line (F9). Design or break mode. VBIDE can't list breakpoints, so the server tracks the ones it " +
+            "Toggle a breakpoint on a line (F9). Design, break or run mode (while the program runs too). VBIDE can't list breakpoints, so the server tracks the ones it " +
             "toggled; breakpoints the user sets by hand aren't known.",
             Schema.Object(("component", "string", ComponentDesc, true), ("line", "integer", "Line (1-based).", true),
                           ("project", "string", ProjectDesc, false), ("pid", "integer", PidDesc, false)),
@@ -121,6 +128,30 @@ public sealed partial class IdeTools
         return ToolResult.Ok(State("ended", w)).With("markedChangedByRun", MarkedJson(await MarkedChangedByRunAsync(inst)));
     }
 
+    /// <summary>
+    /// A step command, plus where it stopped (component, line, procedure, the line's text) when the IDE is in break mode:
+    /// stepping without it took a debug_where after every step (benchmark T18).
+    /// </summary>
+    private async Task<ToolResult> StepAsync(JsonObject a, string cmd, IdeMode[] allowed, CancellationToken ct)
+    {
+        var result = await SimpleCommandAsync(a, cmd, allowed, [IdeMode.Break, IdeMode.Run, IdeMode.Design], ct);
+        if (result.IsError) return result;
+        var inst = ResolveInstance(a);
+        if (_env.ReadWindows(inst.Pid).Mode != IdeMode.Break) return result;
+        try
+        {
+            var client = _env.Client(inst);
+            var where = await client.WhereAsync();
+            string? lineText = null;
+            try { lineText = (await client.ReadAsync(where.Project, where.Component, where.StartLine, 1)).Text; } catch (AddinErrorException) { }
+            return result.With("at", JsonSerializer.SerializeToNode(new
+            {
+                component = where.Component, line = where.StartLine, procedure = where.Procedure.Length == 0 ? null : where.Procedure, lineText,
+            }, McpServer.Json));
+        }
+        catch (Exception ex) when (ex is AddinBusyException or AddinUnreachableException or AddinErrorException) { return result; }
+    }
+
     private async Task<ToolResult> SimpleCommandAsync(JsonObject a, string cmd, IdeMode[] allowed, IdeMode[] expected, CancellationToken ct)
     {
         var inst = ResolveInstance(a);
@@ -157,7 +188,8 @@ public sealed partial class IdeTools
     private async Task<ToolResult> BreakpointToggleAsync(JsonObject a, CancellationToken ct)
     {
         var inst = ResolveInstance(a);
-        RequireMode(inst, IdeMode.Design, IdeMode.Break);
+        // run mode too: a breakpoint toggled while the program runs stops it, and clearing it works (spike 37)
+        RequireMode(inst, IdeMode.Design, IdeMode.Break, IdeMode.Run);
         var (client, project) = await ResolveProjectAsync(a);
         var component = a.Req("component");
         int line = a.Int("line") ?? throw new ToolException("missing required argument 'line'");
@@ -178,6 +210,7 @@ public sealed partial class IdeTools
     private async Task<ToolResult> BreakpointClearAsync(JsonObject a, CancellationToken ct)
     {
         var inst = ResolveInstance(a);
+        // not in run mode: Clear All Breakpoints did nothing while the program ran, and the next Add still stopped (spike 37)
         RequireMode(inst, IdeMode.Design, IdeMode.Break);
         await _env.Client(inst).CommandAsync(CmdClearBps);
         await Task.Delay(300, ct);
@@ -225,12 +258,37 @@ public sealed partial class IdeTools
         if (effect is not null) Audit.Write("debug_eval", inst.Pid, $"side effect {(approved ? "approved by the user (hook prompt)" : "allowed by VB6MCP_EVAL=open")} ({effect}) follows");
         var (status, result, w) = await EvaluateAsync(inst, expr, "debug_eval", ct);
         var effectNote = effect is null ? null : $"this had a side effect ({effect}); undo it when you are done (e.g. put data back), and mention it in your report";
+        if (status == "dialog" && await CloseOwnCompileErrorAsync(inst, w!, ct) is { } compileError)
+            return ToolResult.Fail($"the expression doesn't compile: {compileError} (VB's dialog was closed; the IDE is in {_env.ReadWindows(inst.Pid).Mode.ToString().ToLowerInvariant()} mode)" +
+                                   // printing a whole record gave "Type mismatch" or "Only user-defined types ... coerced" (T17)
+                                   (compileError.Contains("Type mismatch", StringComparison.OrdinalIgnoreCase) || compileError.Contains("user-defined type", StringComparison.OrdinalIgnoreCase)
+                                       ? ". If it is a user-defined type (a Type ... End Type record), print its fields one by one, e.g. CStr(items(1).Price)" : ""));
         return status switch
         {
             "ok" => ToolResult.Ok(new { expression = expr, status, result, sideEffect = effect, note = effectNote }),
             "dialog" => ToolResult.Ok(new { expression = expr, status, note = "evaluating showed a dialog (e.g. a runtime error); it was not answered", dialogs = Dialogs(w!) }),
             _ => ToolResult.Ok(new { expression = expr, status, note = $"no result after {CommandWait.TotalSeconds:0} s; check debug_immediate and ide_status" }),
         };
+    }
+
+    /// <summary>
+    /// Closes a "Compile error" message that our own Immediate line just caused (the only dialog open, with an OK button)
+    /// and returns its text; null if the dialog is anything else, which is left for the agent (hard rule 9: a run-time
+    /// error in the program is the agent's decision). Benchmark T17: debug_locals printed a private user-defined type,
+    /// VB answered with a compile error, and the agent had to close it with ide_dialog_respond.
+    /// </summary>
+    private async Task<string?> CloseOwnCompileErrorAsync(InstanceInfo inst, IdeWindowState w, CancellationToken ct)
+    {
+        if (w.Dialogs.Count != 1) return null;
+        var d = w.Dialogs[0];
+        var text = string.Join(" ", d.Texts).Trim();
+        if (!text.StartsWith("Compile error", StringComparison.OrdinalIgnoreCase)) return null;
+        if (d.Buttons.FirstOrDefault(b => b.Caption.Equals("OK", StringComparison.OrdinalIgnoreCase)) is not { } ok) return null;
+        try { await _env.Client(inst).ClickAsync(ok.Hwnd); }
+        catch (Exception ex) when (ex is AddinBusyException or AddinUnreachableException) { await PressViaWatchdogAsync(ok.Hwnd, inst.Pid); }
+        for (var until = DateTime.UtcNow.AddSeconds(3); DateTime.UtcNow < until; await Task.Delay(200, ct))
+            if (_env.ReadWindows(inst.Pid).Dialogs.Count == 0) return Regex.Replace(text, @"^Compile error:?\s*", "", RegexOptions.IgnoreCase);
+        return null;
     }
 
     /// <summary>
@@ -319,8 +377,20 @@ public sealed partial class IdeTools
 
     private async Task<ToolResult> SyntaxCheckAsync(JsonObject a, CancellationToken ct)
     {
-        var settled = await SettleReloadsAsync(ResolveInstance(a).Pid, ct);
-        return (await SyntaxCheckCoreAsync(a, ct)).With("reloads", settled);
+        var inst = ResolveInstance(a);
+        var settled = await SettleReloadsAsync(inst.Pid, ct);
+        // Code no tool edited gets compiled too: say so, the result may pass or fail because of it (improvement notes 50)
+        var outside = new List<object>();
+        try
+        {
+            var client = _env.Client(inst);
+            foreach (var p in await client.ProjectsAsync())
+                foreach (var o in await OutsideEditsAsync(inst, client, p.Name, (await client.ComponentsAsync(p.Name)).Where(c => c.IsDirty)))
+                    outside.Add(new { project = p.Name, component = o.Component, since = o.Since, changedLines = o.ChangedLines, diff = o.Diff, moreDiffLines = o.MoreDiffLines });
+        }
+        catch (Exception ex) when (ex is AddinErrorException or AddinBusyException or AddinUnreachableException) { }
+        return (await SyntaxCheckCoreAsync(a, ct)).With("reloads", settled)
+            .With("outsideEdits", outside.Count > 0 ? JsonSerializer.SerializeToNode(outside, McpServer.Json) : null);
     }
 
     private async Task<ToolResult> SyntaxCheckCoreAsync(JsonObject a, CancellationToken ct)

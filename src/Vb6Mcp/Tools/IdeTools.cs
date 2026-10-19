@@ -338,11 +338,14 @@ public sealed partial class IdeTools(IIdeEnvironment env)
                         };
                     }
                 }
+                var after = await SettleAsync(inst.Pid, ct);   // e.g. SourceSafe's "Add this project?" comes after the open (notes 31)
                 return ToolResult.Ok(new
                 {
                     status = incomplete is null ? "opened" : "opened-incomplete", path, project = opened.Name, type = ProjectType(opened.Type), projects = now.Select(p => p.Name),
                     incomplete, warnings = warnings.Count > 0 ? warnings : null,
-                    note = incomplete is null ? null : "VB6 loaded only part of the project; see loadLogs. Don't save it: the .vbp would lose the missing members. Close it and fix the cause first.",
+                    dialogs = after.Dialogs.Count > 0 ? Dialogs(after) : null,
+                    note = incomplete is not null ? "VB6 loaded only part of the project; see loadLogs. Don't save it: the .vbp would lose the missing members. Close it and fix the cause first."
+                         : after.Dialogs.Count > 0 ? "opened, and VB6 shows a dialog after it (e.g. source control): answer it with ide_dialog_respond before the next call" : null,
                 });
             }
         }

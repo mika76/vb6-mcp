@@ -72,6 +72,7 @@ public static class BatchTool
         var results = new List<(string Label, ToolResult Result)>();
         var outputs = new List<(JsonNode? Json, bool Failed)>();
         int failed = 0;
+        bool blocked = false;
         for (int i = 0; i < calls.Count; i++)
         {
             ct.ThrowIfCancellationRequested();
@@ -80,12 +81,21 @@ public static class BatchTool
             catch (ToolException ex) { r = ToolResult.Fail(ex.Message); }   // a reference that can't be resolved
             results.Add(($"[{i + 1}] {calls[i].Name}", r));
             outputs.Add((FirstJson(r), r.IsError));
-            if (r.IsError) { failed++; if (!keepGoing) break; }
+            if (r.IsError)
+            {
+                failed++;
+                if (!keepGoing) break;
+                // improvement notes 37: ten calls in a row failed on one SourceSafe prompt. A dialog the IDE shows
+                // doesn't go away by itself, so continue_on_error stops there too.
+                if (FirstText(r) is { } t && t.Contains("answer it first (ide_dialog_respond)", StringComparison.Ordinal)) { blocked = true; break; }
+            }
         }
         return ToolResult.Batch(results, new
         {
             ran = results.Count, failed, notRun = calls.Count - results.Count,
-            note = calls.Count > results.Count ? $"stopped at call {results.Count} ({calls[results.Count - 1].Name}), which failed; the rest didn't run" : null,
+            note = calls.Count == results.Count ? null
+                 : blocked ? $"stopped at call {results.Count} ({calls[results.Count - 1].Name}): the IDE is showing a dialog, which every later call would fail on too (even with continue_on_error); answer it with ide_dialog_respond"
+                 : $"stopped at call {results.Count} ({calls[results.Count - 1].Name}), which failed; the rest didn't run",
         }, a.Bool("compact") == true ? CompactChars : null);
     }
 
@@ -131,10 +141,12 @@ public static class BatchTool
         return (JsonObject)Walk(args)!;
     }
 
+    private static string? FirstText(ToolResult r) => r.ToJson()["content"]!.AsArray().Select(c => (string?)c?["text"]).FirstOrDefault(t => t is not null);
+
     /// <summary>The first text item of a result parsed as JSON, or null.</summary>
     private static JsonNode? FirstJson(ToolResult r)
     {
-        var text = r.ToJson()["content"]!.AsArray().Select(c => (string?)c?["text"]).FirstOrDefault(t => t is not null);
+        var text = FirstText(r);
         if (text is null) return null;
         try { return JsonNode.Parse(text); } catch (JsonException) { return null; }
     }

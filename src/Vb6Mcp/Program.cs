@@ -10,6 +10,7 @@
 //        vb6mcp windows <pid>                   prints the IDE's window tree (diagnosis)
 // Diagnostics go to stderr, or to the file named by VB6MCP_LOG (some clients hide stderr).
 using System.Text;
+using Vb6Mcp.Core.Bridge;
 using Vb6Mcp.Mcp;
 using Vb6Mcp.Tools;
 using Vb6Mcp.Watchdog;
@@ -44,15 +45,27 @@ public static class Program
         }
 
         var log = OpenLog(Environment.GetEnvironmentVariable("VB6MCP_LOG"));
+        var inheritedRuns = new List<int>();
+        try
+        {
+            var taken = IdeOwnership.TakeOver(IdeOwnership.SessionKey(), runs: inheritedRuns);
+            // a run counts only while it is still going: one the user ended and started again isn't the agent's
+            inheritedRuns.RemoveAll(pid => UI.IdeWindows.Read(pid).Mode is not (UI.IdeMode.Run or UI.IdeMode.Break));
+            log.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} start pid {Environment.ProcessId}: session {(IdeOwnership.SessionKey() is null ? "unknown (no handover)" : "set")}" +
+                          (taken.Count > 0 ? $"; took over IDEs [{string.Join(", ", taken)}] and runs [{string.Join(", ", inheritedRuns)}] from the previous server" : ""));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { log.WriteLine($"handover failed: {ex.Message}"); }
 
         var stdin = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false));
         var stdout = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { NewLine = "\n" };
         // Workspace roots for the disk tools (hard rule 8: paths are checked against them)
         var roots = Roots();
         var env = new IdeEnvironment();
-        var workspace = new WorkspaceTools(env, roots);
-        var tools = new IdeTools(env) { Roots = roots, MapProvider = workspace.CurrentMap,
-            EvalOpen = string.Equals(Environment.GetEnvironmentVariable("VB6MCP_EVAL"), "open", StringComparison.OrdinalIgnoreCase) }.All().Concat(workspace.All()).ToList();
+        var ledger = new ToolEditLedger();   // one for both: file_replace_lines edits the IDE too
+        var workspace = new WorkspaceTools(env, roots) { Ledger = ledger };
+        var ideTools = new IdeTools(env) { Roots = roots, MapProvider = workspace.CurrentMap, Ledger = ledger, InheritedRuns = inheritedRuns,
+            EvalOpen = string.Equals(Environment.GetEnvironmentVariable("VB6MCP_EVAL"), "open", StringComparison.OrdinalIgnoreCase) };
+        var tools = ideTools.All().Concat(workspace.All()).ToList();
         tools.Add(BatchTool.Create(tools));   // several calls in one (each with its own checks)
         // PLAN.md E7 (spike): the desktop app's MCP dialog offers Reconnect only for a failed server, so picking up a
         // reinstalled build meant restarting the Claude session. Ending the process after answering should make the
@@ -65,7 +78,10 @@ public static class Program
             (a, _) =>
             {
                 if (a.Bool("confirm") != true) throw new ToolException("ending the server needs confirm=true");
-                log.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} server_restart: exiting pid {Environment.ProcessId}");
+                // the next server of this session takes over this one's IDEs (improvement notes 53)
+                IReadOnlyList<int> handed;
+                try { handed = IdeOwnership.WriteHandover(IdeOwnership.SessionKey(), runs: ideTools.RunsStarted); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { handed = []; }
+                log.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} server_restart: exiting pid {Environment.ProcessId}; handing over IDEs [{string.Join(", ", handed)}] (session {(IdeOwnership.SessionKey() is null ? "unknown" : "set")})");
                 // after the reply is written, and after any call that is still running (at most 2 minutes)
                 Task.Run(async () =>
                 {
@@ -75,6 +91,7 @@ public static class Program
                     Environment.Exit(3);
                 });
                 return Task.FromResult(ToolResult.Ok(new { exiting = Environment.ProcessId, version = McpServer.ServerVersion, exe = Environment.ProcessPath,
+                    handedOver = handed.Count > 0 ? handed : null,
                     note = "the server ends in a second; reconnect vb6 in the MCP servers dialog (/mcp) or restart the session" }));
             }));
         log.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} vb6mcp {McpServer.ServerVersion} started, pid {Environment.ProcessId}, {tools.Count} tools, roots: {(roots.Length == 0 ? "(none)" : string.Join("; ", roots))}");

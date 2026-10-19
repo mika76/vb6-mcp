@@ -55,6 +55,76 @@ public static class IdeOwnership
     /// <summary>Removes the IDE's owner file.</summary>
     public static void Release(int idePid, string? folder = null) => TryDelete(FileOf(idePid, folder));
 
+    // ---------- handover across server_restart (improvement notes 53) ----------
+
+    /// <summary>What a server that is about to end (server_restart) leaves for the server its Claude session starts next. Runs: IDEs whose current run it started (run_end ends those without force, notes 56).</summary>
+    public sealed record Handover(string Session, int OldServerPid, int[] Ides, DateTime Written, int[]? Runs = null);
+
+    /// <summary>How long a handover waits for the next server (the desktop app starts it on the session's next vb6 call).</summary>
+    public static readonly TimeSpan HandoverMaxAge = TimeSpan.FromHours(12);
+
+    /// <summary>
+    /// The Claude session this server belongs to: CLAUDE_CODE_SESSION_ID, which Claude Code passes to the MCP servers it
+    /// starts (checked live 2026-10-19). Null when it isn't set: then there is no handover, and a restarted server has to
+    /// ide_claim its IDEs.
+    /// </summary>
+    public static string? SessionKey() => Environment.GetEnvironmentVariable("CLAUDE_CODE_SESSION_ID") is { Length: > 0 } s ? s : null;
+
+    /// <summary>
+    /// Before this server ends: records the IDEs it owns for the next server of the same session (server_restart dropped
+    /// them: ownership is by server process, so the restarted server found its own IDE "not this session's"). Returns them.
+    /// </summary>
+    public static IReadOnlyList<int> WriteHandover(string? session, string? folder = null, IEnumerable<int>? runs = null)
+    {
+        if (session is null) return [];
+        var dir = folder ?? DefaultFolder;
+        if (!Directory.Exists(dir)) return [];
+        var mine = new List<int>();
+        foreach (var f in Directory.EnumerateFiles(dir, "*.json"))
+            if (int.TryParse(Path.GetFileNameWithoutExtension(f), out var ide) && ReadRaw(f) is { } o && IsMe(o)) mine.Add(ide);
+        if (mine.Count == 0) return [];
+        var file = HandoverFile(session, dir);
+        File.WriteAllBytes(file + ".tmp", JsonSerializer.SerializeToUtf8Bytes(new Handover(session, Environment.ProcessId, [.. mine], DateTime.UtcNow, [.. (runs ?? []).Where(mine.Contains)])));
+        File.Move(file + ".tmp", file, overwrite: true);
+        return mine;
+    }
+
+    /// <summary>
+    /// At startup: claims the IDEs a previous server of the same session handed over, when they still run and nobody else
+    /// claimed them since (owner file gone, or still naming the old server). The handover file is used once. runs is filled with the taken IDEs whose run the old server had started.
+    /// </summary>
+    public static IReadOnlyList<int> TakeOver(string? session, string? folder = null, Func<int, bool>? ideAlive = null, Func<IdeOwner, bool>? isAlive = null, List<int>? runs = null)
+    {
+        if (session is null) return [];
+        var dir = folder ?? DefaultFolder;
+        var file = HandoverFile(session, dir);
+        Handover? h;
+        try { h = File.Exists(file) ? JsonSerializer.Deserialize<Handover>(File.ReadAllBytes(file)) : null; }
+        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException) { h = null; }
+        TryDelete(file);
+        if (h is null || h.Session != session || DateTime.UtcNow - h.Written > HandoverMaxAge) return [];
+        var taken = new List<int>();
+        foreach (var ide in h.Ides)
+        {
+            if (!(ideAlive ?? Discovery.IsVb6Process)(ide)) continue;
+            var current = ReadRaw(FileOf(ide, dir));
+            if (current is not null && current.ServerPid != h.OldServerPid && (isAlive ?? Alive)(current)) continue;   // someone else claimed it since
+            Claim(ide, Me(current?.Client ?? "(restarted server)"), dir);
+            taken.Add(ide);
+            if (h.Runs?.Contains(ide) == true) runs?.Add(ide);
+        }
+        return taken;
+    }
+
+    private static string HandoverFile(string session, string dir) =>
+        Path.Combine(dir, "handover-" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(session)))[..16] + ".handover");
+
+    private static IdeOwner? ReadRaw(string file)
+    {
+        try { return File.Exists(file) ? JsonSerializer.Deserialize<IdeOwner>(File.ReadAllBytes(file)) : null; }
+        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException) { return null; }
+    }
+
     private static string FileOf(int idePid, string? folder) => Path.Combine(folder ?? DefaultFolder, idePid + ".json");
 
     private static bool Alive(IdeOwner o) => o.ServerPid > 0 && StartTicks(o.ServerPid) is long t && Math.Abs(t - o.ServerStartTicks) < TimeSpan.TicksPerSecond;

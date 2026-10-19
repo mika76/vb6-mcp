@@ -137,7 +137,7 @@ public sealed partial class IdeTools
 
         Audit.Write("form_layout", client.Instance.Pid, $"{project}.{component} {(onForm ? "" : container + " ")}{layout.Boxes.Count} controls, {changes.Count} changes");
         var (results, done, dirty, stopped, failed) = await ApplyChangesAsync(client, project, component, changes);
-        var review = stopped is null && done.Count > 0 ? await ReviewAsync(client, project, component, dirty, done, null) : (Dirty: dirty, Hints: new List<string>(), Overlaps: new List<object>());
+        var review = stopped is null && done.Count > 0 ? await ReviewAsync(client, project, component, dirty, done, null, byLayout: true) : (Dirty: dirty, Hints: new List<string>(), Overlaps: new List<object>());
         return ToolResult.Ok(new
         {
             source = "ide", project, component, container = onForm ? component : container, dirty = review.Dirty, block, positions, containerSize,

@@ -125,6 +125,8 @@ public sealed partial class IdeTools
         catch (ArgumentException ex) { throw new ToolException("the copy can't be inserted: " + ex.Message); }
         Audit.Write("recovery_restore", inst.Pid, $"{copy.Project}.{copy.Component} from session {fromPid} ({copy.Taken:yyyy-MM-dd HH:mm:ss})");
         var (lines, dirty) = await client.ReplaceAsync(target.Value.Project, target.Value.Comp.Name, 1, current.CountOfLines, current.Text, prepared);
+        try { Ledger.Record(inst.Pid, target.Value.Project, target.Value.Comp.Name, (await client.ReadAsync(target.Value.Project, target.Value.Comp.Name)).Text); }
+        catch (Exception ex) when (ex is AddinErrorException or AddinBusyException) { }
         return ToolResult.Ok(new
         {
             status = "restored", project = target.Value.Project, component = target.Value.Comp.Name, lines, dirty,

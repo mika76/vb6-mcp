@@ -69,6 +69,14 @@ public static class RefsTests
             Assert.Equal(1, o["files"]!.AsArray().Count);
             Assert.Equal("A,B", string.Join(",", o["files"]![0]!["projects"]!.AsArray().Select(n => (string)n!).Order()));
             Assert.Equal(4, (int)o["files"]![0]!["refs"]![0]!["line"]!);   // IDE numbering: the Attribute line isn't counted
+            // the file's hash is the one file_replace_lines wants: edit straight from the result, no file_read (benchmark T13)
+            var edit = new WorkspaceTools(new NoIde(), [root]).All().First(t => t.Name == "file_replace_lines");
+            var e = (await edit.InvokeAsync(new JsonObject
+            {
+                ["path"] = (string)o["files"]![0]!["path"]!, ["expected_hash"] = (string)o["files"]![0]!["hash"]!,
+                ["start_line"] = 4, ["count"] = 1, ["new_text"] = "    Add_To_Audit \"Pay\", \"now\"",
+            }, CancellationToken.None)).ToJson();
+            Assert.True(!(bool)e["isError"]!, (string)e["content"]![0]!["text"]!);
         }
         finally { Directory.Delete(root, true); }
     }

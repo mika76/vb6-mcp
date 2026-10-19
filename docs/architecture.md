@@ -104,6 +104,12 @@ A development build (no `roots.txt` next to the DLL) keeps reading `%LOCALAPPDAT
 | `Hook` | `vb6mcp hook`: Claude Code PreToolUse hook blocking Edit/Write on VB6 files (exit 2 + reason); `install-hook` merges it into `~/.claude/settings.json`, `uninstall-hook` removes only our entry | PLAN §8; generic tools would write UTF-8 and bypass the IDE |
 | `Tools.IIdeEnvironment` | discovery + window reads + clients | swapped for fakes in tests |
 
+### Edits no tool made (`ToolEditLedger`)
+
+One `ToolEditLedger` per server process, shared by `IdeTools` and `WorkspaceTools`, remembers the code each IDE component held right after the last tool edit (`code_replace_lines`, `code_insert`, `proc_replace`, `file_replace_lines` routed to the IDE, `recovery_restore`). Reads never update it.
+- `project_save` (whole project and `components`) compares each dirty component's IDE text with it, or with the file's code when no tool edited it, and refuses a difference other than case unless `outside_edits: true`. `syntax_check` reports the same differences without refusing. The point: keystrokes that reach a code pane (a selection left on a compile error) or the user's typing must not be saved unseen (improvement notes 50).
+- The other safety checks of the running-program tools sit next to their tools in `IdeTools.App.cs`: `app_keys` without `control` never targets the IDE's own windows (`ProgramFocusInIde`, note 51), and `app_click` refuses controls `AppWindows.Controls` marks `Clipped` (a pure `ClipState` over the ancestors' client areas, notes 33 and 52).
+
 ### Watchdog started by the user (`--stay`)
 
 The add-in starts the watchdog (`vb6mcp watchdog`), which exits 2 minutes after the last VB6 closes, or 30 minutes after a crash (a discovery file left behind by a gone process), so the agent can still relaunch through it without a UAC prompt once it notices (PLAN.md D2). The server notices a crash before running the next tool and adds an `ideCrashed` notice to that tool's result (`IdeTools.Crash.cs`: only IDEs it saw running, each once; `ide_kill` and `ide_quit` don't count), with the Application-log entry read through `wevtutil`. `vb6mcp watchdog --stay`, started elevated by the user once, keeps running without any VB6.

@@ -36,7 +36,11 @@ public static class ShellPolicy
     ];
 
     static readonly Regex Registration = R(@"\b(regsvr32|RegAsm|regtlib|regtlibv12)\b|\breg(\.exe)?\s+(add|delete|import|copy|load|restore|unload)\b|\b(New-ItemProperty|Set-ItemProperty|Remove-ItemProperty|Rename-ItemProperty)\b|\b(Remove-Item|New-Item|Set-Item)\b[^|;&]*(HK(LM|CU|CR|U|CC):|Registry::)");
-    static readonly Regex Vb6Process = R(@"\b(taskkill|Stop-Process|kill|pskill)\b[^|;&]*\bvb6\b|\bvb6(\.exe)?[""']?\s+/(make|m|run|r|d)\b");
+    // Ending VB6 also by pipeline (Get-Process VB6 | Stop-Process), wmic/CIM Terminate and .Kill(). A non-elevated process
+    // can terminate the elevated IDE and watchdog (only that: no memory access or threads), and an unhooked agent ran
+    // Stop-Process -Name VB6 -Force and ended the user's IDE (benchmark full T13-T18 run, 2026-10-18).
+    static readonly Regex Vb6Process = R(@"\b(taskkill|Stop-Process|kill|pskill)\b[^|;&]*\bvb6\b|\bvb6(\.exe)?[""']?\s+/(make|m|run|r|d)\b" +
+        @"|\bvb6\b[^;&\r\n]*\|\s*(Stop-Process|kill|spps)\b|\bwmic\b[^|;&]*\bvb6[^|;&]*\b(delete|terminate)\b|\bvb6\b[^;&\r\n]*(\.Kill\(|Invoke-CimMethod[^;&]*Terminate|\.Terminate\()");
 
     /// <summary>Why the command is refused, or null to allow it.</summary>
     public static string? Check(string command)

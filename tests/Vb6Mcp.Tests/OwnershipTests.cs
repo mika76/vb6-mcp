@@ -80,4 +80,35 @@ public static class OwnershipTests
         }
         finally { Directory.Delete(owners, true); }
     }
+
+    [Test]
+    public static void ServerRestartHandsTheSessionsIdesOver()
+    {
+        // improvement notes 53: the restarted server found the IDE it had launched "not this session's"
+        var dir = Path.Combine(Path.GetTempPath(), "vb6mcp-handover-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            IdeOwnership.Claim(101, IdeOwnership.Me("claude-code 1"), dir);
+            IdeOwnership.Claim(102, new IdeOwner(424242, 1, "other-client 1.0", DateTime.UtcNow), dir);   // another session's
+            Assert.Equal("101", string.Join(",", IdeOwnership.WriteHandover("s1", dir)));
+            Assert.True(IdeOwnership.TakeOver("other-session", dir, _ => true).Count == 0, "another session's server takes nothing");
+            Assert.Equal("101", string.Join(",", IdeOwnership.TakeOver("s1", dir, _ => true)));
+            Assert.True(IdeOwnership.Read(101, dir) is { } o && IdeOwnership.IsMe(o) && o.Client == "claude-code 1", "claimed again, client kept");
+
+            // someone else claimed the IDE between the restart and the takeover: it stays theirs
+            IdeOwnership.WriteHandover("s1", dir);
+            IdeOwnership.Claim(101, new IdeOwner(434343, 1, "other-client 1.0", DateTime.UtcNow), dir);
+            Assert.True(IdeOwnership.TakeOver("s1", dir, _ => true, _ => true).Count == 0, "a live new owner keeps it");
+            Assert.True(IdeOwnership.TakeOver("s1", dir, _ => true).Count == 0, "the handover is used once");
+            Assert.True(IdeOwnership.WriteHandover(null, dir).Count == 0, "no session id, no handover");
+
+            // improvement notes 56: the runs this server started go along, only for IDEs it hands over
+            IdeOwnership.Claim(101, IdeOwnership.Me("claude-code 1"), dir);
+            IdeOwnership.WriteHandover("s1", dir, runs: [101, 102]);
+            var runs = new List<int>();
+            IdeOwnership.TakeOver("s1", dir, _ => true, runs: runs);
+            Assert.Equal("101", string.Join(",", runs));
+        }
+        finally { try { Directory.Delete(dir, true); } catch (IOException) { } }
+    }
 }

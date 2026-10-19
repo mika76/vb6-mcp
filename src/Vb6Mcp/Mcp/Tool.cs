@@ -28,12 +28,31 @@ public sealed class Tool(string name, string description, JsonObject inputSchema
     /// <summary>Runs the handler. Expected failures (<see cref="ToolException"/>) and unexpected ones become isError results.</summary>
     public async Task<ToolResult> InvokeAsync(JsonObject args, CancellationToken ct)
     {
+        if (CheckArguments(args) is { } wrong) return ToolResult.Fail(wrong);
         try { return await handler(args, ct).ConfigureAwait(false); }
         catch (ToolException ex) { return ToolResult.Fail(ex.Message); }
         // Known failure types already carry a message written for the agent
         catch (Exception ex) when (ex is Core.Bridge.AddinErrorException or Core.Bridge.AddinBusyException or Core.Bridge.AddinUnreachableException)
         { return ToolResult.Fail(ex.Message); }
         catch (Exception ex) { return ToolResult.Fail($"{ex.GetType().Name}: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Missing required arguments, all at once, with the names the agent used that the tool doesn't take and the ones it
+    /// does. The handlers report one missing argument per call, so a wrong guess cost a call per name (benchmark T16:
+    /// proc_replace with code/file took three calls). Null when nothing required is missing. Also maps hwnd to control,
+    /// the name app_tree gives the handle (T16).
+    /// </summary>
+    public string? CheckArguments(JsonObject args)
+    {
+        if (inputSchema["properties"] is not JsonObject props) return null;
+        if (props.ContainsKey("control") && args["control"] is null && args["hwnd"] is { } hwnd) args["control"] = hwnd.DeepClone();
+        var missing = (inputSchema["required"] as JsonArray ?? []).Select(n => (string)n!).Where(n => args[n] is null).ToList();
+        if (missing.Count == 0) return null;
+        var unknown = args.Select(kv => kv.Key).Where(k => !props.ContainsKey(k)).ToList();
+        return $"missing required argument{(missing.Count > 1 ? "s" : "")}: {string.Join(", ", missing)}" +
+               (unknown.Count > 0 ? $". Not arguments of {Name}: {string.Join(", ", unknown)}" : "") +
+               $". {Name} takes: {string.Join(", ", props.Select(kv => kv.Key))}";
     }
 }
 

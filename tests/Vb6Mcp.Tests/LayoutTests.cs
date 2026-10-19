@@ -200,6 +200,34 @@ public static class LayoutTests
         Assert.True(!((string)three["content"]![0]!["text"]!).Contains("form_layout component"), "fewer than 4: no suggestion");
     }
 
+    /// <summary>Improvement notes 38: form_layout placed the controls itself, so its review must not tell the agent to use form_layout.</summary>
+    [Test]
+    public static async Task FormLayoutsOwnReviewDoesNotSuggestFormLayout()
+    {
+        var queued = new Dictionary<string, string[]>();
+        using var fake = new FakeAddin((verb, args) =>
+        {
+            switch (verb)
+            {
+                case "PROJECTS": return ("OK", $"1{US}P{US}0{US}C:/x/P.vbp{US}0");
+                case "DESIGN": queued[args[0]] = args; return ("QUEUED", args[0]);
+                case "RESULT":
+                    var q = queued[args[0]];
+                    return q[1] switch
+                    {
+                        "CONTROLS" => ("OK", $"ok{US}1{US}" + string.Join(RS, new[] { "a", "b", "c", "d" }.Select(n => $"txt{n}{US}-1{US}VB.TextBox{US}TextBox{US}2{US}{US}5{US}5{US}2000{US}315"))),
+                        "PROPS" => ("OK", $"ok{US}0{US}ScaleWidth{US}n{US}6000{RS}ScaleHeight{US}n{US}4000{RS}ScaleMode{US}n{US}1{RS}Width{US}n{US}6240{RS}Height{US}n{US}4650"),
+                        "SET" => ("OK", $"ok{US}1{US}{q[5]}{US}n{US}{q[6]}"),
+                        _ => ("ERR", $"400{US}unexpected op"),
+                    };
+                default: return ("ERR", $"400{US}unexpected {verb}");
+            }
+        });
+        var r = await Call(fake, new JsonObject { ["component"] = "Form1", ["project"] = "P", ["rows"] = Grid(["txta", "txtb"], ["txtc", "txtd"]) });
+        Assert.True(r["error"] is null, r.ToJsonString());
+        Assert.True(!r.ToJsonString().Contains("by hand"), r.ToJsonString());
+    }
+
     [Test]
     public static async Task TheFormIsResizedByItsBordersToo()
     {

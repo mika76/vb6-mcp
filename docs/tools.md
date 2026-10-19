@@ -189,6 +189,7 @@ Start a new VB6 IDE.
 **Behaviour:**
 - With `project`, VB6 opens it directly (no New Project chooser). Refused if that project is already open in a running IDE (VB6 would show "already open").
 - Waits up to 90 s (time to approve UAC) for the new IDE's add-in to answer, then reports mode, projects and dialogs. Dialogs (the New Project chooser when no project was given, source-control prompts, missing references) are **reported, not answered**: use `ide_dialog_respond`.
+- Then waits (at most 6 s) until a dialog shows or the IDE has been in design mode with no dialog for 1.5 s, because VB6 shows follow-up dialogs (the New Project chooser) a moment later (improvement notes 31).
 - A declined UAC prompt is an error; VB6 isn't started.
 - VB6.EXE is found via `VB6MCP_VB6_EXE`, the installer's `ProductDir` in the registry, the `.vbp` file association, or the default folder.
 
@@ -237,6 +238,7 @@ What the desktop app does (tested 2026-10-17):
 - On the **next vb6 tool call** the app started the server again, by itself, **from the command it read at session start**. A re-registration to a new path during the session is ignored.
 - So `scripts\install-server.ps1` now installs into one fixed folder, `build\server\current\`, moving files in use aside (`*.old-<stamp>`, spike 26: renamed, not overwritten). After an install: `server_restart`, then any vb6 call runs the new build. The first session after switching to the fixed folder still needs one restart, to pick up the new path.
 - The app keeps the **tool list** it fetched at session start (seen 2026-10-17: after `server_restart`, the changed tools ran the new code, but two tools added in that build weren't offered). New tools need a session restart.
+- **IDE ownership survives the restart** (improvement notes 53): ownership is per server process, so before ending, `server_restart` writes the IDEs it owns to `owners\handover-<hash of CLAUDE_CODE_SESSION_ID>.handover` (result: `handedOver`). The next server of the same Claude session claims them at startup, unless another live session claimed one in between; the file is used once and expires after 12 h. Without `CLAUDE_CODE_SESSION_ID` there is no handover and the IDEs need `ide_claim`. The runs this server started (`run_start`) go along too, so `run_end` doesn't ask for `force` afterwards (improvement notes 56); a run counts only if the IDE is still in run or break mode when the next server starts.
 
 ### Crash notices (`ideCrashed`, PLAN.md D2)
 
@@ -280,6 +282,7 @@ Open a `.vbp` or `.vbg` in a **running** IDE.
   - `AddFromFile(path, False)` makes even a single project a project group, and then Save asks for a group file name.
   - So only `add` next to other projects uses `False`.
 - If the path is already open, the result is `already-open` and nothing happens.
+- After the project appears it waits like `ide_launch` (dialog, or 1.5 s quiet, at most 6 s). A dialog shown by then (SourceSafe's "Add this project?") comes back as `dialogs` with a note to answer it with `ide_dialog_respond` before the next call (improvement notes 31).
 - Starting VB6 itself isn't possible from here: a non-elevated process starting VB6 triggers a UAC prompt (spike 2). That's the watchdog's `ide_launch` (Phase 2b).
 
 **Served by:** add-in `OPEN` (deferred), then polling `PROJECTS` and window dialogs for up to 20 s.
@@ -306,7 +309,7 @@ Open a `.vbp` or `.vbg` in a **running** IDE.
 
 ### `project_save`
 
-**Arguments:** `project?`, `pid?`.
+**Arguments:** `project?`, `components?`, `outside_edits?`, `pid?`.
 
 **Served by:** `SAVE` (deferred File > Save Project), then polling `COMPONENTS` and dialogs for up to 20 s.
 
@@ -319,6 +322,11 @@ Open a `.vbp` or `.vbg` in a **running** IDE.
 - The result's `vbp` lists the lines removed and added, and `versionChanges`: `{kind, guid, name, oldVersion, newVersion}` for references and controls.
 - A version change also gets a `note`, because committing it changes what the project needs on other machines.
 - `vbp` is absent when the `.vbp` didn't change.
+
+**Edits no tool made** (improvement notes 50): before saving (the whole project or `components`), each dirty component's IDE text is compared with what the tools last left in it (`code_replace_lines`, `code_insert`, `proc_replace`, `file_replace_lines` routed to the IDE, `recovery_restore`), or with the file on disk when no tool edited it since the server started.
+- A difference other than the case of identifiers is **refused**, listing each component's diff (at most 40 lines, `sync_diff` for the rest). Stray keystrokes that reach a code pane, or the user's own typing, are caught this way.
+- `outside_edits: true` saves anyway; the result then has `outsideEdits`: `{component, since, changedLines, diff, moreDiffLines}` (`since` is `last vb6-mcp edit` or `disk`).
+- Reads don't update the record, so a `code_read` after a stray keystroke doesn't hide it. Never-saved components and unreadable ones are skipped.
 
 ### Closing, adding, settings, checkpoints
 
@@ -454,7 +462,7 @@ Every statement that uses a name, across the projects under the workspace roots 
 - **Matching:** whole word, case-insensitive (VB names aren't case-sensitive), also when qualified (`modAudit.Add_To_Audit`). Statements are joined across ` _` continuations first. String literals and comments (`'`, `Rem`) don't count. No parser beyond that (principle 3): a local variable with the same name in another module is listed too.
 - **Declarations** (`Sub`/`Function`/`Property`/`Declare`/`Event` of that name) are marked `declaration: true`; `declarations: false` leaves them out.
 - **Limit:** 300 statements (`truncated`, narrow with `project`).
-- **Result:** `count`, `filesScanned`, `files: [{path, source, projects, refs: [{line, endLine?, declaration?, statement}]}]`, `warnings` (an IDE that didn't answer: its unsaved changes aren't included).
+- **Result:** `count`, `filesScanned`, `files: [{path, source, hash, projects, refs: [{line, endLine?, declaration?, statement}]}]`, `warnings` (an IDE that didn't answer: its unsaved changes aren't included). `hash` covers the text that was scanned (the IDE's for a file open there), so it is the `expected_hash` for `file_replace_lines`: edit the found lines without reading each file first.
 
 ```json
 { "name": "Add_To_Audit", "projects": 61, "filesScanned": 1830, "count": 2,
@@ -514,6 +522,9 @@ Rules for all editing tools:
 - All ranges are numbered against the text `expected_hash` covers, and must not overlap or share a start line. They are checked before anything is sent.
 - They are applied bottom-up, so line numbers above each edit stay valid.
 - Each is a separate VBIDE edit with its old text as guard. If one fails, the error says how many later edits were already applied (undo in VB6).
+- **After a failure** other than the guard (409), the server re-reads the module and the error says which state it is in: nothing changed, the later edits applied but not this one, this one applied too (don't redo it), or neither old nor new (half-applied: undo in VB6 or repair; don't retry blindly). This holds for a single range too (improvement notes item 30).
+- **Once applied, an edit is never reported as an error:** the follow-up checks (`vbKeptSpelling`, `codeHints`) are dropped if they fail, and if the final re-read fails the result is still a success with a note to get the new hash with `code_read` (item 29: an empty literal `""` used to throw here).
+- A fresh module reads as `Option Explicit\r\n` with `countOfLines: 2`: VB counts the empty line after the last line break, and it can be replaced like any other (`start_line: 1, count: 2`).
 - The result lists them as `edits` (in file order) instead of `replaced`.
 
 **Find/replace** (PLAN.md A6), instead of ranges: `find`, `replace`, `whole_word?` (default true), `match_case?` (default false, as VB names ignore case), `in_strings?`, `in_comments?` (default false: only code changes, so a rename doesn't touch messages or comments), `apply?`.
@@ -554,12 +565,12 @@ VB6 has no debugger API. These tools run IDE commands (deferred in the add-in, p
 | `run_break` | `pid?` | run | Break. If the program is in a busy loop the IDE can't take the command (the add-in shares its thread); the watchdog will inject Ctrl+Break (Phase 2b) |
 | `run_continue` | `pid?` | break | Continue |
 | `run_end` | `force?`, `pid?` | run, break | End. **Needs `force: true` if the agent didn't start the run** (hard rule 11) |
-| `step_into` / `step_over` / `step_out` | `pid?` | break (`step_into` also design) | F8 / Shift+F8 / Ctrl+Shift+F8 |
+| `step_into` / `step_over` / `step_out` | `pid?` | break (`step_into` also design) | F8 / Shift+F8 / Ctrl+Shift+F8. In break mode the result has `at`: `component`, `line`, `procedure`, `lineText` where it stopped |
 | `run_to_cursor` | `component`, `line`, `project?`, `pid?` | break, design | sets the cursor, then Ctrl+F8 |
-| `bp_toggle` | `component`, `line`, `project?`, `pid?` | design, break | sets the cursor, then F9. Returns the breakpoints this server knows; VBIDE can't list breakpoints, so ones set by hand are unknown |
-| `bp_clear_all` | `pid?` | design, break | Ctrl+Shift+F9 (all breakpoints, including the user's) |
+| `bp_toggle` | `component`, `line`, `project?`, `pid?` | design, break, run (spike 37) | sets the cursor, then F9. Returns the breakpoints this server knows; VBIDE can't list breakpoints, so ones set by hand are unknown |
+| `bp_clear_all` | `pid?` | design, break | Ctrl+Shift+F9 (all breakpoints, including the user's). Not while the program runs: VB ignores it then (spike 37) |
 | `debug_where` | `pid?` | any | active code pane: component, line, column, procedure, line text (in break mode: the current statement) |
-| `debug_eval` | `expression`, `pid?` | break, design | types `? expression` into the Immediate window and returns the new output |
+| `debug_eval` | `expression`, `pid?` | break, design | types `? expression` into the Immediate window and returns the new output. An expression that doesn't compile is a tool error with VB's message; the compile-error dialog it caused is closed (a run-time error dialog is left open and reported) |
 | `debug_immediate` | `last?`, `pid?` | any | the Immediate window's text (`Debug.Print` output) |
 | `syntax_check` | `pid?` | design | compiles the code **as it is in the IDE** (unsaved edits included) |
 
@@ -585,6 +596,8 @@ The refusal is audited and tells the agent to test through the program's UI. **A
 { "compiles": true, "status": "ended", "mode": "design" }
 { "compiles": true, "status": "running-with-dialog", "note": "...", "dialogs": [ ... ] }
 ```
+`outsideEdits` (info only, same shape as in `project_save`) lists unsaved components whose code differs from the last tool edit or from disk: the compile used that text too.
+
 It runs Start With Full Compile, so on success the program **starts** and is ended again at once; startup code (e.g. `Form_Load`) runs briefly. If that code shows a dialog, the program is left running with the dialog reported.
 ### Debug output (`debug_output`)
 
@@ -610,7 +623,10 @@ Compiled VB6 programs have no `Debug.Print`, because it is compiled out. Program
 
 **`debug_locals`.** The Locals window is custom-drawn and can't be read as text (spike 18), so the tool builds the list itself:
 - **Names:** the current procedure's parameters, return value and `Dim`/`Static`/`ReDim` variables (scanned from its code). With `module`, also the module's variables (from the IDE's `Members`). A local hides a module variable of the same name.
-- **Types:** one Immediate line of `TypeName(...)` for all names. `TypeName` never raises an error.
+- **Types:** one Immediate line of `TypeName(...)` for all names. `TypeName` raises no run-time error, but it doesn't **compile** for a variable of a user-defined type declared in a standard module: VB shows "Compile error: Only user-defined types defined in public object modules can be coerced to or from a variant" (benchmark T17).
+  - In that case the tool closes the dialog, which its own Immediate line caused, and evaluates that chunk one name at a time.
+  - Such a variable is reported with type `(user-defined type)`; look at its fields with `debug_eval` (`CStr(products(1).Price)`).
+  - Before this fix, one such module variable left every value empty and the dialog open.
 - **Values:** a second line, only for Integer, Long, Single, Double, Currency, Decimal, Date, Boolean, Byte and String. `CStr` of Null raises a runtime error dialog, so arrays, objects and Null show their type only; look inside with `debug_eval`. Strings are cut at 200 characters (`length`, `truncated`); `\r` and `\n` stand for line breaks.
 
 No user code runs. Example (DebugFixture, stopped in `Inner`):
@@ -661,23 +677,25 @@ Drive the program being debugged, the way a user would. The program runs **insid
 | Tool | Arguments | Needs mode | What it does |
 |------|-----------|------------|--------------|
 | `app_windows` | `pid?` | any | the program's top-level windows: `hwnd` (hex), `kind` (Form, MDIForm, Dialog), caption, class, position, size, enabled |
-| `app_tree` | `window?`, `pid?` | run, break | the controls of a form: `hwnd`, `kind` (CommandButton, TextBox, CheckBox, ...), text, position relative to the form's client area; `depth`, `hidden`, `disabled` only when they apply (compact, see the token breakdown) |
-| `app_click` | `control?` or `text?`, `window?`, `pid?` | run | clicks a command button, check box or option button. `text` matches the caption without `&`, case-insensitive |
-| `app_set_text` | `text`, `control?` or `index?`, `window?`, `pid?` | run, no dialog | sets a text box's text (fires `Change`); returns `textNow` and `applied` |
+| `app_tree` | `window?`, `pid?` | run, break | the controls of a form: `hwnd`, `kind` (CommandButton, TextBox, CheckBox, ...), text, position relative to the form's client area; for text boxes their `index` for `app_set_text` (reading order) and `readOnly` for a Locked one; `depth`, `hidden`, `clipped` (`partly` or `hidden`: outside an ancestor's visible area, e.g. buttons parked below a panel's edge or inside a 2 x 2 PictureBox), `disabled` only when they apply (compact, see the token breakdown) |
+| `app_click` | `control?` or `text?`, `window?`, `force?`, `pid?` | run | clicks a command button, check box or option button. `text` matches the caption without `&`, case-insensitive; when it matches several, the only one a user can see wins. A control the user can't see (window hidden, or `clipped: "hidden"`) is refused unless `force: true` |
+| `app_set_text` | `text`, `control?` or `index?`, `window?`, `pid?` | run, no dialog | sets a text box's text (fires `Change`); returns `textNow` and `applied`. `index` counts the form's text boxes in reading order (top to bottom, left to right). A read-only (Locked) box is set but flagged (`readOnly`, with a note): a user couldn't type there (benchmark T18) |
 | `app_mouse` | `action` (click, double_click, right_click, drag), `x`, `y`, `to_x?`, `to_y?`, `real_input?`, `window?`, `pid?` | run, no dialog | mouse input at a point relative to the form's client area. By default it posts messages to the deepest window under the point without touching the user's mouse, and a drag goes entirely to the window it starts in. **Labels and Images need `real_input: true`** (spike 17) |
 | `app_scroll` | `direction` (up, down, left, right), `amount?` (line, page, end), `count?` (1), `method?` (scrollbar, wheel), `control?`, `window?`, `pid?` | run, no dialog | scrolls a list box, text box, grid, scroll bar control or the form; returns `before`/`after` scroll positions and `moved` |
-| `app_select` | `control`, `text?` or `index?`, `pid?` | run, no dialog | selects an item in a list or combo box and raises its `Click`; returns `selectedNow`/`applied` |
-| `app_keys` | `keys`, `control?`, `real_input?`, `pid?` | run, no dialog | types text and keys (syntax below) into the control or the focused control |
+| `app_select` | `control?`, `text?` or `index?`, `pid?` | run, no dialog | selects an item in a list or combo box and raises its `Click`; returns `selectedNow`/`applied`. Without `control`: the form's only list or combo box, or the only one that has the item `text` |
+| `app_keys` | `keys`, `control?`, `real_input?`, `pid?` | run, no dialog | types text and keys (syntax below) into the control or the program's focused control. Without `control` for a program running in the IDE, the focus must be in one of the program's windows: otherwise `real_input` goes to the program's form and posted input is refused (it would reach VB6 itself) |
 | `app_wait` | `window`+`gone?` / `control`+`text`/`contains` / `mode` / `dialog`, `timeout?` (10, max 120), `pid?` | any | polls (every 200 ms) until the condition holds; returns `met`, `seen`, `waitedMs` |
 | `app_screenshot` | `window?` (or `ide`), `max_width?` (1024), `pid?` | any | an image of the window, plus `{ window, hwnd, width, height, method }` |
 
-`window` is a hex handle from `app_windows` or a caption. Without it, the tools use the program's first form.
+`window` is a hex handle from `app_windows` or a caption. Without it, the tools use the program's first form. `control` is the control's hex `hwnd` from `app_tree` (`hwnd` is accepted as another name for the argument). Control names such as `txtPrice` can't be used: they aren't visible from outside the running program.
 
 **Compiled programs:** every `app_*` tool also takes `exe`, the pid returned by `exe_run`, to act on a compiled EXE instead of the program in the IDE.
 - Such a program runs at the server's integrity, so the server reads it and sends input itself: posted messages, or `SendInput` for `real_input`. Screenshots are taken by the server.
 - Input only goes to programs the agent started with `exe_run` (hard rule 8).
 - Posted keys can't be deferred inside the program's thread from outside. The server attaches to the program's input thread to set modifiers, and pauses 60 ms after each key down so the generated character arrives first.
 - `mode` in `app_wait` is IDE-only.
+- `app_wait` returns early (`met: false`, note `stopped waiting: dialog ... appeared`) when a dialog that wasn't there at the start appears (a MsgBox blocks the program, so the wait could never succeed). Waiting for a dialog (`dialog`) is exempt (improvement notes 32).
+- `app_set_text` and `app_keys` are refused while a dialog is open, unless `window` names that dialog (caption or hex handle) or `control` is a child of it: that is how a program's own InputBox is answered (improvement notes 36).
 
 | Tool | Arguments | What it does |
 |------|-----------|--------------|
@@ -709,6 +727,7 @@ Drive the program being debugged, the way a user would. The program runs **insid
   "windows": [ { "hwnd": "1A0C4E", "kind": "Form", "caption": "Basic" } ], "note": null }
 ```
 If the click hits a breakpoint or a runtime error, `mode` becomes `break` and the `note` says so. A `MsgBox` shown by the click is reported in `dialogs`; answer it with `ide_dialog_respond`. `app_click` may target a button of a dialog the program shows, but `app_set_text` refuses while a dialog is open.
+`app_click` compares a fingerprint of the program's UI before and after (windows, captions, control texts, enabled/visible, positions, list item counts and selection, read through the add-in for a program in the IDE because UIPI blocks `LB_*` from the server; check-box states for compiled programs only). When nothing changed, the result adds `changed: false` and a note to verify the click took effect (improvement notes 34).
 
 **`app_mouse`:**
 - It can't tell whether the input did anything, so check with `app_screenshot` or `app_tree`.
@@ -733,7 +752,7 @@ If the click hits a breakpoint or a runtime error, `mode` becomes `break` and th
 - Modifiers: `{CTRL+S}` `{SHIFT+TAB}` `{ALT+F}` `{CTRL+SHIFT+END}`.
 - `{LBRACE}`/`{RBRACE}` type literal braces.
 
-By default the keys are posted, and modifiers are set in the program's key state between the messages (protocol `KEYS`). `real_input: true` sends real keystrokes instead: it brings the form to the front for a moment and restores the window that was in front. The result has `textNow` for text and combo boxes.
+By default the keys are posted, and modifiers are set in the program's key state between the messages (protocol `KEYS`). `real_input: true` sends real keystrokes instead: it brings the form to the front for a moment and restores the window that was in front. With real input, each character the keyboard layout has a key for is typed as that key (Shift added; `VkKeyScan`), so `KeyDown` sees its real `KeyCode` (66 for `b`), not 231 (VK_PACKET); characters without a plain key (AltGr) go as Unicode. The result has `textNow` for text and combo boxes.
 
 **`app_scroll`:**
 - `moved` compares the positions before and after.
@@ -748,6 +767,7 @@ By default the keys are posted, and modifiers are set in the program's key state
 - When VB6 is not elevated, the server captures the window itself (`method: "server PrintWindow"`).
 - When VB6 is elevated, the add-in captures it in-process (protocol `SNAP`), and the server waits up to 5 s for the file.
 - Covered windows are captured too.
+- The result adds `clientOrigin {x, y}`, the offset of the window's client area inside the image, and `imageScale` when the image was downscaled (`max_width`). `app_mouse` takes client coordinates: `(image x - clientOrigin.x) / imageScale` (improvement notes 35).
 - With `window: "ide"` it captures the whole IDE main window. Crop from that for IDE panes: `PrintWindow` on child panes is misaligned (spike 15).
 
 Errors: `the IDE is in design mode; the program must be running` (input tools), `no window 'X'. Open: ...`, `no button ... captioned 'X'`, `N controls are captioned 'X'; pass control`, `'X' is disabled`, `control 1A2B is a CommandButton, not a text box`, and the add-in's 400 when the handle isn't a window of the IDE process.
@@ -851,6 +871,7 @@ Arranges the controls of one container (the form, a Frame or a PictureBox) as a 
 - **Checked first:** names not in the container (with the container they are in), a name used twice, an empty grid, bad options: nothing changes.
 - **Only what changed** is set (positions already right are skipped). The result lists `positions`, the `block` rectangle, `containerSize`, `applied`/`failed`/`notAttempted`, `warnings` (the block runs past the container's edge) and the usual `overlaps` with controls outside the grid.
 - **`dry_run: true`** returns the positions and how many properties would be set, without changing anything.
+- Its own review doesn't add the "You placed N controls by hand ... form_layout" hint; that hint follows `form_set_properties` and `form_add_control` only (improvement notes 38).
 
 Verified live on a production project's `frmFixAccount` (a frame of label pairs fitted with `size_container`, two buttons with `align: right, anchor: bottom`), checked with `form_screenshot`.
 
@@ -1031,6 +1052,7 @@ GUIDs are only ever read, never typed in (hard rule 13).
 The type library as VB-like declarations:
 - `Class X` with its `Implements` lines (`[default]`, `[source]` = events). Marked `' control` for ActiveX controls, `' not creatable` for PublicNotCreatable classes.
 - Interfaces with `Sub`/`Function`/`Property Get|Let|Set` and parameters: `ByVal`, `Optional`, defaults, `ParamArray`, VB types.
+- Hidden types are left out (`include_hidden` shows them), except interfaces a visible class implements. VB marks every class's own interface hidden (`_clsTax`, events `__clsTax`), so a VB-built DLL used to show only `Implements _clsTax` (benchmark T15). Hidden and restricted members such as the `IDispatch` plumbing stay out.
 - `Enum`s with values, and `Type`s.
 - Help strings as comments.
 - **Default members** (improvement notes 14, PLAN.md C1): the member with `DISPID_VALUE` (memid 0) is marked `' default member`, and listed even when hidden. A class line names its default interface's default member: `Class MSComm ' control ... ' default member: CommPort (as hidden _CommPort)`. That's what VB uses when code names the object itself (`x = MSComm1`, `If MSComm1 Then`). A hidden `_X` alias of a visible `X` is reported as `X`.
@@ -1139,6 +1161,7 @@ The scan covers ~9,100 classes and ~800 typelibs and takes a few seconds.
 - **For a class:** ProgID → CLSID; class registered; server file present and **x86** (VB6 programs are 32-bit; a PE header check); server = VB6DEBUG.DLL (debugger leftover); typelib registered, with its file, or registered to a `.vbp`.
 - **For a file:** whether it's registered to this file.
 - **For a project:** each `Reference=`/`Object=` line is checked the same way.
+- **Dependencies** (spike 39): for every 32-bit DLL/OCX checked, the DLLs it imports and delay-loads, and theirs, are looked up the way the loader does (the DLL's folder for imports; the VB98 and project folders for delay-loads, which a plain `LoadLibrary` searches; then SysWOW64, Windows, PATH; WinSxS for the VC 8/9 runtimes). Only problems are listed: `X.dll -> Y.dll -> Z.dll: not found`, saying when a delay-load is in the chain (the program then dies with 0xc06d007e on first use, the IDE too). Windows' own DLLs aren't walked. No code of the files runs: the tables are read from the file.
 - **When a workspace project builds the file:** its `compat_status` findings, which matter for 430.
 
 **Verified live:** 429 on `ComFixture.clsGreeter` after an IDE kill reported "registered to the VB6 debugger" and "typelib registered to a project file, left over". On Form1x it found its unregistered ComFixture reference.
@@ -1338,6 +1361,7 @@ Verified on `AceScrollBarControl.res` (icon group and bitmap extracted as valid 
 Runs vb6 tool calls in order, in the server, through the same tool code as single calls, so every check still applies per call: ownership, design mode, roots, audit, `expected_hash`. It adds no add-in verb.
 - **Why:** each MCP call is a model turn, and turns are what cost tokens and time. The free-hand Opus runs (benchmark T12) made 285–326 calls, many of them small chains like `app_click`, `app_wait`, `app_screenshot`.
 - **Errors:** it stops at the first error unless `continue_on_error: true`. The whole list is checked before anything runs: unknown tool names, malformed entries and excluded tools refuse the batch.
+- **A blocking dialog stops it anyway:** a call that fails with "answer it first (ide_dialog_respond)" ends the batch even with `continue_on_error`, since every later call would fail on the same dialog; the summary note says so (improvement notes 37).
 - **Not allowed in a batch:** `ide_launch`, `ide_kill`, `build_make`, `build_in_ide` (long or disruptive: they stay single, visible calls), and `batch_run` itself.
 - **Values from earlier calls** (PLAN.md E4): an argument whose whole value is `$<n>.<path>` is replaced by that field of call n's result (its first text item, parsed as JSON), keeping its JSON type: `"$1.hash"`, `"$2.added.name"`, `"$1.positions[0].left"`. Keys match exactly, then case-insensitively. A path starts with a letter, so text such as `"Price = $1.00"` is never taken for one, and only whole values are replaced, never part of a string.
   - A reference to the same or a later call refuses the batch before anything runs.
@@ -1389,6 +1413,7 @@ After a crash: `ide_launch` the project, then `recovery_list`, `recovery_read` a
 
 ## Change log
 
+- 2026-10-18: IDE edits with `""` no longer fail after being applied; a failed edit says what state the module is in (improvement notes 29, 30).
 - 2026-10-17: `ide_dialog_respond repeat` (click through one load error per form, then sum up the load logs).
 - 2026-10-17: `ide_launch` reports load dialogs instead of failing while VB loads the project (spike 36).
 - 2026-10-17: `res_read` (resource files: strings, version, bitmaps, icons).
@@ -1412,6 +1437,13 @@ After a crash: `ide_launch` the project, then `recovery_list`, `recovery_read` a
 - 2026-10-17: `com_describe` marks default members.
 - 2026-10-17: `server_restart` (spike E7).
 - 2026-10-17: shorter results: `form_set_properties` lists failed changes only (`verbose`), `form_properties` `names`, `batch_run` `compact`, compact `app_tree`.
+- 2026-10-18: `app_set_text` `index` counts text boxes in reading order; `app_tree` shows each box's `index` and `readOnly`; setting a Locked box is flagged (benchmark T18).
+- 2026-10-18: step results carry `at` (where the step stopped); `bp_toggle` works while the program runs (spike 37).
+- 2026-10-18: `app_select` without `control` picks the form's only list or combo box, or the only one with the item (benchmark T17).
+- 2026-10-18: `debug_locals` reports variables of a private user-defined type as `(user-defined type)` instead of losing every value; `debug_locals` and `debug_eval` close the compile-error dialog their own Immediate line caused (benchmark T17).
+- 2026-10-18: every tool names all missing required arguments at once, the names it doesn't take and the ones it does (e.g. `missing required arguments: component, new_text, expected_hash. Not arguments of proc_replace: code, file. proc_replace takes: ...`); `hwnd` counts as `control`; a control name in `control` gets an error that says where the handle comes from (benchmark T16).
+- 2026-10-18: `com_describe` lists the methods of VB-built classes (their hidden default interfaces) without `include_hidden`.
+- 2026-10-17: `symbol_refs` returns each file's `hash` (the `expected_hash` for `file_replace_lines`; benchmark T13).
 - 2026-10-17: `batch_run` references to earlier results (`"$1.hash"`).
 - 2026-10-17: `project_checkpoint`, `project_rollback`.
 - 2026-10-17: `form_layout` (arrange controls as a grid).

@@ -21,8 +21,13 @@ public static class KeySyntax
         ["UP"] = 0x26, ["DOWN"] = 0x28, ["LEFT"] = 0x25, ["RIGHT"] = 0x27,
     };
 
-    /// <summary>Parses <paramref name="keys"/>; throws <see cref="FormatException"/> with a readable message.</summary>
-    public static string ToEvents(string keys)
+    /// <summary>
+    /// Parses <paramref name="keys"/>; throws <see cref="FormatException"/> with a readable message.
+    /// <paramref name="keyFor"/> (real input only) maps a character to its virtual key and Shift on the keyboard layout,
+    /// or null: such characters are sent as key presses, so Form_KeyDown sees KeyCode 66 for "b" rather than 231
+    /// (VK_PACKET, what a Unicode character event gives: improvement notes 54, live check). Others stay characters.
+    /// </summary>
+    public static string ToEvents(string keys, Func<char, (int Vk, bool Shift)?>? keyFor = null)
     {
         var ev = new List<string>();
         int i = 0;
@@ -40,7 +45,14 @@ public static class KeySyntax
             if (c == '}') throw new FormatException($"'}}' at position {i + 1} has no opening '{{' (use {{RBRACE}} for a literal brace)");
             if (c == '\r') { i++; continue; }
             if (c == '\n') { ev.Add("D13"); ev.Add("U13"); i++; continue; }          // a line break means Enter
-            AddChar(ev, c);
+            if (keyFor?.Invoke(c) is { } k)
+            {
+                if (k.Shift) ev.Add("S1");
+                ev.Add("D" + k.Vk.ToString(CultureInfo.InvariantCulture));
+                ev.Add("U" + k.Vk.ToString(CultureInfo.InvariantCulture));
+                if (k.Shift) ev.Add("S0");
+            }
+            else AddChar(ev, c);
             i++;
         }
         if (ev.Count == 0) throw new FormatException("no keys given");

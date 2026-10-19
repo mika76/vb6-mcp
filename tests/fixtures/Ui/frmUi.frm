@@ -9,6 +9,14 @@ Begin VB.Form frmUi
    ScaleHeight     =   4800
    ScaleWidth      =   7200
    StartUpPosition =   3  'Windows Default
+   Begin VB.CommandButton cmdKeys 
+      Caption         =   "&Keys..."
+      Height          =   375
+      Left            =   240
+      TabIndex        =   11
+      Top             =   4320
+      Width           =   1215
+   End
    Begin VB.TextBox txtDrop 
       Height          =   375
       Left            =   1680
@@ -187,4 +195,9 @@ End Sub
 ' OLE drop (txtDrop has OLEDropMode automatic): the text arrives by itself; report it
 Private Sub txtDrop_Change()
     lblStatus.Caption = "OLE drop: " & txtDrop.Text
+End Sub
+
+Private Sub cmdKeys_Click()
+    ' a form with only Labels takes keys itself (improvement notes 54)
+    frmKeys.Show vbModal, Me
 End Sub

@@ -39,7 +39,7 @@ public static class CaseChangeTests
         Assert.Equal(1, VbCode.LiteralHints("MsgBox \"line1\\nline2\"").Count);
         Assert.True(VbCode.LiteralHints("f = \"C:\\\\Temp\\\\x.txt\"")[0].Contains("single backslashes"), "doubled backslashes");
         Assert.Equal(2, VbCode.LiteralHints("a = \"x\\ty\": b = \"D:\\\\data\"").Count);
-        foreach (var fine in new[] { "f = \"C:\\Temp\\new.txt\"", "u = \"\\\\server\\share\"", "MsgBox \"a\" & vbCrLf & \"b\"", "' comment with \\n", "s = \"say \"\"hi\"\"\"" })
+        foreach (var fine in new[] { "f = \"C:\\Temp\\new.txt\"", "u = \"\\\\server\\share\"", "MsgBox \"a\" & vbCrLf & \"b\"", "' comment with \\n", "s = \"say \"\"hi\"\"\"", "s = \"\"", "If s = \"\" Then s = \"x\"", "s = \"\\\"" })
             Assert.Equal(0, VbCode.LiteralHints(fine).Count, fine);
     }
 

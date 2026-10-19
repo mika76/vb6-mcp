@@ -39,7 +39,11 @@ public static class ShellPolicyTests
     public static void RegistrationRegistryAndVb6ProcessesAreBlocked()
     {
         foreach (var bad in new[] { "regsvr32 /s x.ocx", "RegAsm.exe a.dll /tlb", "reg add HKCU\\Software\\X /v a /d b", "Set-ItemProperty HKLM:\\Software\\X -Name a -Value 1",
-                                     "taskkill /f /im vb6.exe", "Stop-Process -Name VB6", "\"C:\\VB98\\VB6.EXE\" /make x.vbp" })
+                                     "taskkill /f /im vb6.exe", "Stop-Process -Name VB6", "\"C:\\VB98\\VB6.EXE\" /make x.vbp",
+                                     // what an unhooked agent ran (full T13-T18 run), and the other ways to the same end
+                                     "Stop-Process -Name VB6 -Force -ErrorAction SilentlyContinue", "Get-Process VB6 | Stop-Process -Force",
+                                     "wmic process where name='VB6.EXE' delete", "(Get-Process vb6).Kill()",
+                                     "Get-CimInstance Win32_Process -Filter \"Name='VB6.EXE'\" | Invoke-CimMethod -MethodName Terminate" })
             Assert.True(ShellPolicy.Check(bad) is not null, bad);
         foreach (var ok in new[] { "reg query HKCR\\TypeLib", "Get-ItemProperty HKLM:\\Software\\X", "Get-Process vb6" })
             Assert.True(ShellPolicy.Check(ok) is null, ok);

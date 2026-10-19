@@ -68,6 +68,20 @@ public static partial class VbCode
     }
 
     /// <summary>
+    /// The text with <paramref name="count"/> lines at <paramref name="startLine"/> replaced by <paramref name="newText"/>
+    /// (CR LF separated; empty deletes), as the add-in's REPLACE does in the IDE. Lines are numbered like <see cref="Slice"/>,
+    /// so a trailing CR LF ends in the empty last line VB counts (improvement notes 30).
+    /// </summary>
+    public static string ReplaceLines(string text, int startLine, int count, string newText)
+    {
+        var lines = text.Length == 0 ? new List<string>() : text.Split("\r\n").ToList();
+        int first = Math.Clamp(startLine - 1, 0, lines.Count);
+        lines.RemoveRange(first, Math.Clamp(count, 0, lines.Count - first));
+        if (newText.Length > 0) lines.InsertRange(first, newText.Split("\r\n"));
+        return string.Join("\r\n", lines);
+    }
+
+    /// <summary>
     /// VB6's procedure start includes the blank lines above it (it starts right after the previous
     /// procedure). Drops those, so the range starts at the first comment or the declaration.
     /// </summary>
@@ -105,7 +119,8 @@ public static partial class VbCode
         {
             var s = m.Groups[1].Value;
             if (Regex.IsMatch(s, @"\\[nrt]") && !Regex.IsMatch(s, @"^[A-Za-z]:\\|^\\\\")) newline = true;   // a path like "C:\new" is fine
-            if (s.IndexOf(@"\\", 1, StringComparison.Ordinal) > 0) doubled = true;
+            // from index 1: a leading \\ is a UNC path. "" has no index 1 (improvement notes 29: IndexOf threw after the edit was applied)
+            if (s.Length > 1 && s.IndexOf(@"\\", 1, StringComparison.Ordinal) > 0) doubled = true;
         }
         if (newline) hints.Add(@"A string literal contains \n, \r or \t: VB6 has no escape sequences, so that is a backslash and a letter. Use vbCrLf, vbCr, vbLf or vbTab (e.g. ""a"" & vbCrLf & ""b"").");
         if (doubled) hints.Add(@"A string literal contains \\: in VB6 a backslash is literal, so write a path with single backslashes (""C:\Temp\x.txt""). Only a UNC path starts with \\.");

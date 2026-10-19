@@ -16,6 +16,32 @@ public sealed partial class IdeTools
     /// <summary>How long ide_launch waits for the add-in of the new IDE (includes time to approve UAC).</summary>
     public TimeSpan LaunchWait { get; init; } = TimeSpan.FromSeconds(90);
 
+    /// <summary>
+    /// After a launch or an open: VB6 shows follow-up dialogs a moment later (the New Project chooser; SourceSafe's "Add
+    /// this project to SourceSafe?" after project_open, which then failed the next ten calls: improvement notes 31).
+    /// Waits until a dialog shows, or the IDE has been in design mode with no dialog for <see cref="SettleQuiet"/>, at most
+    /// <see cref="SettleMax"/>.
+    /// </summary>
+    private async Task<UI.IdeWindowState> SettleAsync(int pid, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow + SettleMax;
+        DateTime? quietSince = null;
+        while (true)
+        {
+            var w = _env.ReadWindows(pid);
+            if (w.Dialogs.Count > 0) return w;
+            if (w.Mode == UI.IdeMode.Design) quietSince ??= DateTime.UtcNow; else quietSince = null;
+            if ((quietSince is { } q && DateTime.UtcNow - q >= SettleQuiet) || DateTime.UtcNow >= deadline) return w;
+            await Task.Delay(250, ct);
+        }
+    }
+
+    /// <summary>How long the IDE must stay in design mode with no dialog to count as settled.</summary>
+    public TimeSpan SettleQuiet { get; init; } = TimeSpan.FromSeconds(1.5);
+
+    /// <summary>The longest SettleAsync waits.</summary>
+    public TimeSpan SettleMax { get; init; } = TimeSpan.FromSeconds(6);
+
     private IReadOnlyList<Tool> LaunchTools() =>
     [
         new("ide_launch",
@@ -143,6 +169,7 @@ public sealed partial class IdeTools
             if (w.Dialogs.Count > 0 || project is null || projects.Any(p => SamePath(p.FileName, project)) || DateTime.UtcNow >= settle) break;
             await Task.Delay(500, ct);
         }
+        if (w.Dialogs.Count == 0) w = await SettleAsync(inst2.Pid, ct);   // the New Project chooser came after the result (notes 31)
         return ToolResult.Ok(new
         {
             status = "started", pid = inst2.Pid, owner = "you", elevated = Vb6Install.IsElevated(inst2.Pid), elevation, exe, via,

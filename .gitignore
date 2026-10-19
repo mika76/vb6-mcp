@@ -48,6 +48,11 @@ tests/fixtures/**/*.dll
 tests/fixtures/**/*.lib
 tests/fixtures/**/*.exp
 tests/fixtures/**/*.oca
+# ...except the Shared fixture's binary-compatibility file: AppA's committed reference names its LIBID (bench T13)
+!tests/fixtures/Shared/SharedLib/compat/*.dll
+!tests/fixtures/Compat/PriceLib/compat/*.dll
+# ...and the compiled RateLib that bench T16 ships without its source
+!tests/fixtures/CartTax/lib/*.dll
 
 # Packages (scripts\package.ps1)
 dist/

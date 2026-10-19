@@ -53,6 +53,19 @@ public static class ComTests
     }
 
     /// <summary>
+    /// A VB-built DLL hides each class's own interface (_clsPricing): its methods are still listed by default, and the
+    /// interface's restricted IDispatch plumbing isn't (benchmark T15). The committed compatibility file of tests\fixtures\Shared.
+    /// </summary>
+    [Test]
+    public static void AVbClassShowsItsMethods()
+    {
+        var dll = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "fixtures", "Shared", "SharedLib", "compat", "SharedLib.dll"));
+        var text = TypeLibDescriber.Render(TypeLibDescriber.Describe(dll));
+        Assert.True(text.Contains("Function PriceText(ByVal net As Currency, ByVal taxRate As Double) As String"), text);
+        Assert.True(!text.Contains("QueryInterface"), "IDispatch plumbing stays hidden: " + text);
+    }
+
+    /// <summary>
     /// PE machine type: the 32-bit scrrun.dll in SysWOW64 vs the 64-bit one (System32, reached as Sysnative from this
     /// 32-bit process). VB6 programs are 32-bit, so com_diagnose flags 64-bit servers.
     /// </summary>

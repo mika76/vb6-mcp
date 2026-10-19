@@ -1,5 +1,6 @@
 Type=Exe
 Form=frmUi.frm
+Form=frmKeys.frm
 IconForm="frmUi"
 Startup="frmUi"
 Command32=""

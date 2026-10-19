@@ -23,6 +23,8 @@ public static class ShellPolicyTests
             "echo x > frmMain.frm", "Set-Content -Path 'D:\\p\\modA.bas' -Value $t", "rm Common/frmMonitor.frm",
             "sed -i 's/a/b/' frmMain.frm", "python - <<'EOF'\nopen('D:/p/frmMain.frm','w').write(s)\nEOF",
             "cp backup/frmMain.frm 'APP/frmMain.frm'", "[IO.File]::WriteAllBytes('D:\\p\\App.vbp', $b)",
+            // in-place line-ending conversion (notes from real use, 2026-10-19: a .vbp rewritten with LF)
+            "unix2dos -q App.vbp", "dos2unix Common/modA.bas", "cd src && todos frmMain.frm", "flip -m App.vbp",
         })
             Assert.True(ShellPolicy.Check(bad) is not null, bad);
         foreach (var ok in new[]
@@ -31,6 +33,8 @@ public static class ShellPolicyTests
             "python - <<'EOF'\ntxt=open(f,encoding='cp1252').read()\nEOF", "cp frmMain.frm /tmp/backup/", "dotnet build src/Vb6Mcp",
             // T12 round 8: reads .frm files, writes a .json: different lines
             "python - <<'EOF'\nfiles={'a':'System/frmDenomBreakdown.frm'}\ntxt=open(f,encoding='cp1252').read()\njson.dump(out, open('changes.json','w'))\nEOF",
+            // "flip" is an ordinary word: only a command position counts, and other files aren't ours
+            "git commit -m \"flip the order of the fields in frmMain.frm\"", "unix2dos build/notes.txt",
         })
             Assert.True(ShellPolicy.Check(ok) is null, ok);
     }
@@ -43,9 +47,16 @@ public static class ShellPolicyTests
                                      // what an unhooked agent ran (full T13-T18 run), and the other ways to the same end
                                      "Stop-Process -Name VB6 -Force -ErrorAction SilentlyContinue", "Get-Process VB6 | Stop-Process -Force",
                                      "wmic process where name='VB6.EXE' delete", "(Get-Process vb6).Kill()",
-                                     "Get-CimInstance Win32_Process -Filter \"Name='VB6.EXE'\" | Invoke-CimMethod -MethodName Terminate" })
+                                     "Get-CimInstance Win32_Process -Filter \"Name='VB6.EXE'\" | Invoke-CimMethod -MethodName Terminate",
+                                     // a build where the exe is in a variable and /make in an array, so neither is next to the other
+                                     "Start-Process -FilePath $exe -ArgumentList '/make','App.vbp','/out','build.log' -Wait",
+                                     "& $exe /make App.vbp /out build.log", "cmd /c \"C:\\VB98\\VB6.EXE\" /make App.vbp",
+                                     "Start-Process 'C:\\VB98\\VB6.EXE' -ArgumentList '/make', $proj -Wait" })
             Assert.True(ShellPolicy.Check(bad) is not null, bad);
-        foreach (var ok in new[] { "reg query HKCR\\TypeLib", "Get-ItemProperty HKLM:\\Software\\X", "Get-Process vb6" })
+        foreach (var ok in new[] { "reg query HKCR\\TypeLib", "Get-ItemProperty HKLM:\\Software\\X", "Get-Process vb6",
+                                   // naming a project without building it, and paths that only contain "make"
+                                   "Start-Process notepad App.vbp", "Start-Process -FilePath $exe -ArgumentList 'App.vbp'",
+                                   "Get-ChildItem D:/make/App.vbp", "grep -n make build.log" })
             Assert.True(ShellPolicy.Check(ok) is null, ok);
     }
 

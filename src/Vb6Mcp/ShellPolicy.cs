@@ -31,6 +31,10 @@ public static class ShellPolicy
         R(@"\b(Remove-Item|Rename-Item|Move-Item|rm|del|erase|ren|rename|mv|move)\b[^|;&]*" + Vb6Ext),
         R(@"\b(Copy-Item|cp|copy|xcopy|robocopy)\b[^|;&]*" + Vb6Ext + @"[""']?\s*($|[|;&])"),     // copied onto a VB6 file (the destination comes last)
         R(@"\b(sed|perl)\s+(-\w*\s+)*-i\b.*" + Vb6Ext),
+        // in-place line-ending conversion: a .vbp rewritten with LF left VB6 unable to parse it, which lost the project's
+        // references and failed the build with a misleading error in an unrelated .bas (notes from real use, 2026-10-19).
+        // Only at a command position, because "flip" is an ordinary word (a commit message naming a .frm isn't a write).
+        R(@"(^\s*|[|;&(]\s*)(unix2dos|dos2unix|todos|fromdos|flip|u2d|d2u)\b[^|;&]*" + Vb6Ext),
         R(@"(WriteAll(Text|Bytes|Lines)|AppendAll(Text|Lines)|StreamWriter|\.write_(text|bytes)\s*\(|\bopen\s*\([^)]*,\s*[""'](w|a|wb|ab|w\+|r\+|a\+)[""']|writeFileSync|appendFileSync)" + ".*" + Vb6Ext),
         R(Vb6Ext + @".*(WriteAll(Text|Bytes|Lines)|AppendAll(Text|Lines)|StreamWriter|\.write_(text|bytes)\s*\(|\bopen\s*\([^)]*,\s*[""'](w|a|wb|ab|w\+|r\+|a\+)[""']|writeFileSync|appendFileSync|\.write\s*\()"),
     ];
@@ -41,6 +45,14 @@ public static class ShellPolicy
     // Stop-Process -Name VB6 -Force and ended the user's IDE (benchmark full T13-T18 run, 2026-10-18).
     static readonly Regex Vb6Process = R(@"\b(taskkill|Stop-Process|kill|pskill)\b[^|;&]*\bvb6\b|\bvb6(\.exe)?[""']?\s+/(make|m|run|r|d)\b" +
         @"|\bvb6\b[^;&\r\n]*\|\s*(Stop-Process|kill|spps)\b|\bwmic\b[^|;&]*\bvb6[^|;&]*\b(delete|terminate)\b|\bvb6\b[^;&\r\n]*(\.Kill\(|Invoke-CimMethod[^;&]*Terminate|\.Terminate\()");
+    // Building with VB6 where the switch isn't next to the executable, so the rule above can't see it: PowerShell's usual
+    // way puts the path in a variable and the switch in an array, as in
+    // `Start-Process -FilePath $exe -ArgumentList '/make','App.vbp','/out','build.log'` or `& $exe /make App.vbp`.
+    // Pair a standalone /make switch (not a path segment like D:/make/, and an argument of its own, not /makefiles) with
+    // something VB6: a project file or the VB6 name anywhere in the command. So a Start-Process that merely names a .vbp
+    // isn't flagged, and neither is a path that happens to contain "make".
+    static readonly Regex MakeSwitch = R(@"(?<![\w\\/.:-])/make\b(?![\\/])");
+    static readonly Regex MakeTarget = R(@"\bvb6\b|\.(vbp|vbg)\b");
 
     /// <summary>Why the command is refused, or null to allow it.</summary>
     public static string? Check(string command)
@@ -56,7 +68,7 @@ public static class ShellPolicy
                    "The vb6 tools do this safely: code_replace_lines / proc_replace (open project), file_replace_lines (closed), form_* for designers, project_checkpoint / project_rollback for copies.";
         if (Registration.IsMatch(command))
             return "this command registers COM components or changes the registry, which the vb6 tools do elevated and audited (com_register, com_unregister, refs_*). Reading the registry (reg query) is fine.";
-        if (Vb6Process.IsMatch(command))
+        if (Vb6Process.IsMatch(command) || (MakeSwitch.IsMatch(command) && MakeTarget.IsMatch(command)))
             return "this command ends VB6 or builds with it directly, which can lose unsaved work and needs elevation. The vb6 tools: ide_quit, ide_kill force=true (hung IDE), build_make.";
         return null;
     }

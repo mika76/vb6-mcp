@@ -34,7 +34,12 @@ A typical session: `ide_list` (which IDEs and projects are open), `symbol_refs` 
 ## Limits
 
 - **Windows 10/11 only.** The server is .NET 10, which doesn't run on Windows 7. Running Claude on another machine is planned for v2 ([docs/roadmap.md](docs/roadmap.md)).
-- **Claude Code first.** The server speaks plain MCP over stdio, but the instructions and the hook that keeps agents on the tools are written for Claude Code.
+- **Best in Claude Code; other agents work with less protection.** The server speaks plain MCP over stdio. GitHub Copilot CLI and OpenCode have been tested ([spike 40](docs/spikes/40-other-harnesses.md)): all 94 tools load, and `debug_eval`'s approval for side effects works there through MCP elicitation.
+  - **Only in Claude Code:** the hook that stops an agent from editing VB6 files with its own edit tools (which can break their encoding and hidden lines) and asks before risky shell commands. Copilot edited a `.frm` with its built-in edit tool.
+  - **The server instructions** don't reach the model in those clients by default. A line in your project's `AGENTS.md` telling the agent to use the vb6 tools for VB6 files helps.
+  - **Screenshots** reach the model in Copilot CLI, but not in OpenCode.
+  - **`server_restart`** only reconnects in Claude Code.
+  - **The installer** registers the server with Claude Code only. Other clients need a config entry by hand: the command is `C:\Program Files (x86)\vb6mcp\vb6mcp.exe` with no arguments, and it reads the [workspace roots](#workspace-roots) from `roots.txt` next to it.
 - **VB6 has no debugger API.** Debugging works through IDE commands and by reading the IDE's windows. Breakpoints the user sets by hand aren't known, and lightweight controls (Label, Image) only show in screenshots.
 - **One machine.** The server, VB6 and the add-in run on the same Windows machine.
 
@@ -76,11 +81,13 @@ The test runner's exit code is the number of failed tests.
 
 ## Install (users)
 
-Get the package (`vb6mcp-<version>.zip`, built with `scripts\package.ps1`), unpack it anywhere, and run **as yourself** (not as administrator):
+Download `vb6mcp-<version>.zip` from the [releases](https://github.com/mika76/vb6-mcp/releases) (or build it with `scripts\package.ps1`), unpack it anywhere, and run **as yourself** (not as administrator):
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Roots "D:\src;E:\work"
 ```
+
+`-Roots` names the folders with your VB6 projects; see [Workspace roots](#workspace-roots) below.
 
 **What you need:** VB6 (SP6) and Claude Code. No .NET is needed: `vb6mcp.exe` carries its own runtime (spike 26).
 
@@ -97,6 +104,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Roots "D:\src;E
 - **Upgrade:** run the new package's `install.ps1`. Without `-Roots` it keeps the existing roots, and files in use are replaced too.
 - **Change the roots:** run `install.ps1 -Roots ...` again.
 - **Uninstall:** close VB6, then `powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Program Files (x86)\vb6mcp\uninstall.ps1"`. `-RemoveData` also deletes `%LOCALAPPDATA%\vb6mcp`.
+
+### Workspace roots
+
+`-Roots` lists the folders vb6-mcp may work in, separated by `;`. Give the folders that hold your `.vbp` files, plus any shared source folders they include (a `.vbp` can pull in files from `..\Shared`).
+
+- **Paths:** a file path a tool takes must be under a root: opening or building a project, reading or editing a file on disk, registering a component, extracting a picture. Anything else is refused. The exception is `com_describe`, which also reads a registered component's file wherever it is installed.
+- **Searches:** workspace-wide searches (`ws_projects`, `symbol_refs`, `ws_affected`) look only under the roots.
+- **Why:** the add-in and the watchdog run with VB6's administrator rights, so the roots also decide what they may build, register and load.
+- **Where they live:** the installer writes them to `roots.txt` next to `vb6mcp.exe`, where only administrators can change them. To change them, run the installer again with new `-Roots`.
+- **Keep them narrow:** a whole drive works, but every workspace search then scans all of it.
 
 ## Development setup
 

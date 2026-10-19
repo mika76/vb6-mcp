@@ -12,7 +12,7 @@ An MCP server that lets AI agents (Claude Code) work **inside the Visual Basic 6
 
 - **What's next:** [docs/roadmap.md](docs/roadmap.md)
 
-> Status: **version 1.1.0.** All planned phases are built: live code, debugging, UI automation, the watchdog, builds and sync, forms, references and COM, packaging, and the improvements from real use and benchmarks. The spike code under `spikes/` is throwaway and is never referenced by `src/`.
+> Status: **version 1.1.1.** All planned phases are built: live code, debugging, UI automation, the watchdog, builds and sync, forms, references and COM, packaging, and the improvements from real use and benchmarks. The spike code under `spikes/` is throwaway and is never referenced by `src/`.
 
 ## What it does
 

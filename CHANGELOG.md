@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.1.1 (2026-10-19)
+
+A fix for the watchdog tray. Only `vb6mcp.exe` changed: the add-in is the same build as in 1.1.0 and still reports 1.1.0.
+
+**Upgrading:** run `install.ps1` from the new package. Restart a running `--stay` watchdog to get the fix.
 
 - Watchdog tray: Restart as administrator no longer leaves a console window open, and the log no longer calls the restart "stopped from the tray". The restart is now verified live.
 

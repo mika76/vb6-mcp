@@ -57,6 +57,8 @@ Public Sub RunQueued()
         Case "CLOSE": CloseProject f(1), (f(2) = "1")
         Case "COMPADD": AddComponent f
         Case "SAVECOMP": SaveComponent f(1), f(2), f(3)
+        Case "PRJNEW": NewProject f
+        Case "PRJSAVEAS": SaveProjectAs f(1), f(2)
         End Select
     End If
     Exit Sub

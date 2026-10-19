@@ -40,7 +40,7 @@ public sealed partial class IdeTools(IIdeEnvironment env)
     /// </summary>
     internal static readonly HashSet<string> WriteTools = new(StringComparer.Ordinal)
     {
-        "code_replace_lines", "code_insert", "proc_replace", "project_save", "project_open", "project_close", "project_add_component", "project_settings", "project_rollback",
+        "code_replace_lines", "code_insert", "proc_replace", "project_save", "project_open", "project_close", "project_add_component", "project_settings", "project_new", "project_rollback",
         "ide_dialog_respond", "ide_kill", "ide_quit", "run_start", "run_break", "run_continue", "run_end", "step_into", "step_over", "step_out", "run_to_cursor",
         "bp_toggle", "bp_clear_all", "debug_eval", "debug_immediate", "debug_locals", "syntax_check", "recovery_restore", "recovery_discard",
         "app_click", "app_set_text", "app_mouse", "app_scroll", "app_select", "app_keys", "build_in_ide", "sync_take_disk", "sync_take_ide",

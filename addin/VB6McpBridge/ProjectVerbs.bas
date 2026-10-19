@@ -1,6 +1,7 @@
 Attribute VB_Name = "ProjectVerbs"
 ' Project-level verbs (PLAN Phase 7, docs/protocol.md "Projects"): close with discard (CLOSE), add components
-' (COMPADD), project properties (PRJGET / PRJSET) and saving one component alone (SAVECOMP).
+' (COMPADD), project properties (PRJGET / PRJSET), saving one component alone (SAVECOMP), and new projects (PRJNEW,
+' PRJSAVEAS; spike 43, deferred too).
 ' CLOSE, COMPADD and SAVECOMP are deferred (hard rule 14): closing can prompt, adding a form runs the code of
 ' UserControls on it, and saving goes through VB's file code. PRJGET / PRJSET run no user code and answer at once.
 ' Indexed loops only (spike 3). Paths are checked here too (hard rule 8), on the elevated side.
@@ -230,11 +231,162 @@ Public Function QueueSaveComponent(args() As String) As String
         If InStr(path, "..") > 0 Or Mid$(path, 2, 2) <> ":\" Then Err.Raise E_BADREQUEST, , "the path must be absolute, without '..'"
         If Not UnderRoots(path) Then Err.Raise E_BADREQUEST, , path & " isn't under the workspace roots (" & RootsFile() & ")"
         If Len(Dir$(path)) > 0 Then Err.Raise E_CONFLICT, , "the file already exists: " & path
-    ElseIf cmp.FileCount = 0 Then
+    ElseIf NeverSaved(cmp) Then
         Err.Raise E_CONFLICT, , cmp.Name & " has never been saved; pass the path for its new file"
     End If
     Enqueue "SAVECOMP" & US() & args(0) & US() & cmp.Name & US() & path
     QueueSaveComponent = "QUEUED" & US() & "save " & cmp.Name
+End Function
+
+' ---------- PRJNEW / PRJSAVEAS ----------
+
+' args: kind, name, path, mode -> QUEUED. Creates a project (VBProjects.Add) and saves it under path (spike 43).
+' kind: exe, axexe, dll, ocx. mode: add (next to the open projects: the IDE becomes a group) or replace (closes the
+' open projects first; refused while one has unsaved changes, since VBProjects.Remove saves them, spike 31).
+' path: a new .vbp (absolute, no '..', under the roots, must not exist, its folder must exist).
+Public Function QueueNewProject(args() As String) As String
+    Dim mode As String, p As Long
+    If Not InDesignMode() Then Err.Raise E_CONFLICT, , "the IDE isn't in design mode; end the run first"
+    If ProjectTypeCode(args(0)) < 0 Then Err.Raise E_BADREQUEST, , "kind must be exe, axexe, dll or ocx"
+    If Not ValidName(args(1)) Then Err.Raise E_BADREQUEST, , "'" & args(1) & "' isn't a valid project name (a letter, then letters, digits or _, at most 40)"
+    CheckNewVbp args(2)
+    mode = LCase$(args(3))
+    If mode <> "add" And mode <> "replace" Then Err.Raise E_BADREQUEST, , "mode must be add or replace"
+    If mode = "replace" Then
+        For p = 1 To g_VBE.VBProjects.Count
+            If ProjectChanged(g_VBE.VBProjects(p)) Then Err.Raise E_CONFLICT, , "project " & g_VBE.VBProjects(p).Name & " has unsaved changes; save or close it first"
+        Next
+    End If
+    Enqueue "PRJNEW" & US() & LCase$(args(0)) & US() & args(1) & US() & args(2) & US() & mode
+    QueueNewProject = "QUEUED" & US() & "new " & LCase$(args(0)) & " " & args(1)
+End Function
+
+' args: project, path -> QUEUED. Saves a project that has never been saved (File > Save Project would open Save As)
+' under path, with its never-saved components next to it, like PRJNEW does after creating one.
+Public Function QueueSaveProjectAs(ByVal prjName As String, ByVal path As String) As String
+    Dim prj As VBIDE.VBProject
+    If Not InDesignMode() Then Err.Raise E_CONFLICT, , "the IDE isn't in design mode"
+    Set prj = FindProject(prjName)
+    If Len(VbpOf(prj)) > 0 Then Err.Raise E_CONFLICT, , "project " & prj.Name & " is already saved as " & VbpOf(prj)
+    CheckNewVbp path
+    Enqueue "PRJSAVEAS" & US() & prj.Name & US() & path
+    QueueSaveProjectAs = "QUEUED" & US() & "save " & prj.Name & " as " & path
+End Function
+
+Private Sub CheckNewVbp(ByVal path As String)
+    Dim folder As String
+    If InStr(path, "..") > 0 Or Mid$(path, 2, 2) <> ":\" Then Err.Raise E_BADREQUEST, , "the path must be absolute, without '..'"
+    If LCase$(Right$(path, 4)) <> ".vbp" Then Err.Raise E_BADREQUEST, , "the path must be a .vbp file"
+    If Not UnderRoots(path) Then Err.Raise E_BADREQUEST, , path & " isn't under the workspace roots (" & RootsFile() & ")"
+    If Len(Dir$(path)) > 0 Then Err.Raise E_CONFLICT, , "the file already exists: " & path
+    folder = Left$(path, InStrRev(path, "\"))
+    If Len(Dir$(folder, vbDirectory)) = 0 Then Err.Raise E_NOTFOUND, , "the folder doesn't exist: " & folder
+End Sub
+
+Private Function ProjectChanged(ByVal prj As VBIDE.VBProject) As Boolean
+    Dim c As Long
+    If prj.IsDirty Then ProjectChanged = True: Exit Function
+    For c = 1 To prj.VBComponents.Count
+        If prj.VBComponents(c).IsDirty Then ProjectChanged = True: Exit Function
+    Next
+End Function
+
+Private Function ProjectTypeCode(ByVal kind As String) As Long
+    Select Case LCase$(kind)
+    Case "exe": ProjectTypeCode = vbext_pt_StandardExe
+    Case "axexe": ProjectTypeCode = vbext_pt_ActiveXExe
+    Case "dll": ProjectTypeCode = vbext_pt_ActiveXDll
+    Case "ocx": ProjectTypeCode = vbext_pt_ActiveXControl
+    Case Else: ProjectTypeCode = -1
+    End Select
+End Function
+
+Private Function VbpOf(ByVal prj As VBIDE.VBProject) As String
+    On Error Resume Next                                     ' raises for a never-saved project
+    VbpOf = prj.FileName
+End Function
+
+' Deferred (hard rule 14): VBProjects.Add creates default components, and saving goes through VB's file code, which
+' can show dialogs.
+Public Sub NewProject(f() As String)
+    Dim prj As VBIDE.VBProject, i As Long
+    On Error GoTo Fail
+    If f(4) = "replace" Then
+        For i = g_VBE.VBProjects.Count To 1 Step -1          ' indexed, never For Each (spike 3)
+            g_VBE.VBProjects.Remove g_VBE.VBProjects(i)
+        Next
+    End If
+    ' Exclusive only when nothing is open: AddFromFile(path, False) made a one-project group (spike 22)
+    Set prj = g_VBE.VBProjects.Add(ProjectTypeCode(f(1)), (g_VBE.VBProjects.Count = 0))
+    LogLine "new project " & prj.Name & " (" & f(1) & "), components: " & ComponentList(prj) & "; " & g_VBE.VBProjects.Count & " projects open"
+    prj.Name = f(2)
+    SaveProjectTo prj, f(3)
+    Exit Sub
+Fail:
+    LogLine "new project failed " & f(2) & ": " & Err.Number & ": " & Err.Description
+End Sub
+
+Public Sub SaveProjectAs(ByVal prjName As String, ByVal path As String)
+    On Error GoTo Fail
+    SaveProjectTo FindProject(prjName), path
+    Exit Sub
+Fail:
+    LogLine "save project as failed " & prjName & ": " & Err.Number & ": " & Err.Description
+End Sub
+
+' Each never-saved component goes to <folder>\<name>.<ext> first (VBComponent.SaveAs; spike 31: Save Project stops at
+' a Save File As dialog for those), then the .vbp (VBProject.SaveAs). Nothing is overwritten: an existing target file
+' stops the save before anything is written. Errors go up to the caller's log line.
+Private Sub SaveProjectTo(ByVal prj As VBIDE.VBProject, ByVal path As String)
+    Dim folder As String, c As Long, cmp As VBIDE.VBComponent, target As String
+    folder = Left$(path, InStrRev(path, "\"))
+    For c = 1 To prj.VBComponents.Count
+        Set cmp = prj.VBComponents(c)
+        If NeverSaved(cmp) Then
+            target = folder & cmp.Name & ComponentExtension(cmp.Type)
+            If Len(Dir$(target)) > 0 Then Err.Raise E_CONFLICT, , "the file already exists: " & target
+        End If
+    Next
+    For c = 1 To prj.VBComponents.Count
+        Set cmp = prj.VBComponents(c)
+        If NeverSaved(cmp) Then
+            target = folder & cmp.Name & ComponentExtension(cmp.Type)
+            cmp.SaveAs target
+            LogLine "saved component " & prj.Name & "." & cmp.Name & " to " & target
+        End If
+    Next
+    prj.SaveAs path
+    LogLine "saved project " & prj.Name & " as " & VbpOf(prj) & ", dirty " & prj.IsDirty & ", group file '" & GroupFile() & "'"
+End Sub
+
+' A component that has never been saved: a new project's own (Form1, Class1) reports FileCount 1 with an empty
+' FileNames(1), not FileCount 0 (spike 43).
+Public Function NeverSaved(ByVal cmp As VBIDE.VBComponent) As Boolean
+    If cmp.FileCount = 0 Then NeverSaved = True Else NeverSaved = (Len(cmp.FileNames(1)) = 0)
+End Function
+
+Private Function ComponentList(ByVal prj As VBIDE.VBProject) As String
+    Dim c As Long
+    For c = 1 To prj.VBComponents.Count
+        ComponentList = ComponentList & IIf(c > 1, ", ", "") & prj.VBComponents(c).Name & " (type " & prj.VBComponents(c).Type & ", files " & prj.VBComponents(c).FileCount & ")"
+    Next
+End Function
+
+Private Function GroupFile() As String
+    On Error Resume Next
+    GroupFile = g_VBE.VBProjects.FileName
+End Function
+
+Private Function ComponentExtension(ByVal t As Long) As String
+    Select Case t
+    Case vbext_ct_StdModule: ComponentExtension = ".bas"
+    Case vbext_ct_ClassModule: ComponentExtension = ".cls"
+    Case vbext_ct_VBForm, vbext_ct_VBMDIForm: ComponentExtension = ".frm"
+    Case vbext_ct_UserControl: ComponentExtension = ".ctl"
+    Case vbext_ct_PropPage: ComponentExtension = ".pag"
+    Case vbext_ct_DocObject: ComponentExtension = ".dob"
+    Case Else: ComponentExtension = ".dsr"
+    End Select
 End Function
 
 Public Sub SaveComponent(ByVal prjName As String, ByVal cmpName As String, ByVal path As String)

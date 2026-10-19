@@ -64,6 +64,8 @@ Public Function Dispatch(ByVal verb As String, args() As String) As String
     Case "PRJGET":     NeedArgs args, 1, 1: payload = GetProjectProps(args(0))
     Case "PRJSET":     NeedArgs args, 3, 3: payload = SetProjectProp(args(0), args(1), args(2))
     Case "SAVECOMP":   NeedArgs args, 2, 3: Dispatch = QueueSaveComponent(args): Exit Function
+    Case "PRJNEW":     NeedArgs args, 4, 4: Dispatch = QueueNewProject(args): Exit Function
+    Case "PRJSAVEAS":  NeedArgs args, 2, 2: Dispatch = QueueSaveProjectAs(args(0), args(1)): Exit Function
     Case Else:         Err.Raise E_BADREQUEST, , "unknown verb " & verb
     End Select
     Dispatch = "OK" & US() & payload

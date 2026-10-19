@@ -158,7 +158,7 @@ The hook also checks the agent's own **Bash and PowerShell commands** and **asks
 
 ### 3. Use it
 
-Open a project in VB6 (or let the agent call `project_open`), then ask Claude to use the `vb6` tools: `ide_list` first, then whatever the task needs: code, debugging, the running app, builds, forms, references, COM (94 tools). See [docs/tools.md](docs/tools.md).
+Open a project in VB6 (or let the agent call `project_open`, or `project_new` for a new one), then ask Claude to use the `vb6` tools: `ide_list` first, then whatever the task needs: code, debugging, the running app, builds, forms, references, COM (95 tools). See [docs/tools.md](docs/tools.md).
 
 To see what's inside a DLL, OCX or type library (classes, methods, enums in VB syntax), without registering it:
 
@@ -233,4 +233,4 @@ Without `VB6MCP_LOG` the server logs to stderr, which only Claude Code's MCP log
 | Build fails: "Errors during load … could not be loaded" | Read the `<form>.log` next to the form. "license not found" means a licensed control (e.g. Desaware SpyWorks) whose developer licence isn't installed on this machine: install the product, not just the OCX (spike 27) |
 | Build fails: "Can't find project or library" or "User-defined type not defined" on a reference's type | `refs_fix_broken` / `com_diagnose`. A .NET COM DLL registered without a type library needs `RegAsm <dll> /tlb` (elevated), then reload the project (spike 27) |
 | `ide_launch` with `normal` says elevation is required | VB6.EXE has a "Run as administrator"/compatibility setting on that path (spike 16); use `auto`/`elevated` or change the setting |
-| Opening a project shows "Add this project to SourceSafe?" | Your source-control add-in; `project_open` reports it and leaves the answer to you |
+| Opening or creating a project shows "Add this project to SourceSafe?" | Your source-control add-in; `project_open` and `project_new` report it and leave the answer to you (No still leaves a read-only `MSSCCPRJ.SCC` in the folder) |

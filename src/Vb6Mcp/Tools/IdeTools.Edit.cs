@@ -53,10 +53,12 @@ public sealed partial class IdeTools
             (a, _) => ProcReplaceAsync(a)),
         new("project_save",
             "Save a project like File > Save Project (all unsaved components and the .vbp). Explicit only: edits are never " +
-            "saved automatically. Refused for a never-saved project. Dialogs shown while saving are reported, not answered. " +
+            "saved automatically. A never-saved project (File > New Project) needs path: the new .vbp under the workspace roots, " +
+            "its components saved next to it. Dialogs shown while saving are reported, not answered. " +
             "components: save only these components, without the .vbp (which File > Save Project rewrites, e.g. reference versions). " +
             "Code changed in the IDE by anything but these tools (stray typing, the user) is refused with its diff unless outside_edits=true.",
             Schema.Object(("project", "string", ProjectDesc, false), ("components", "array", "Save only these components (not the .vbp).", false),
+                          ("path", "string", "New .vbp for a project that has never been saved.", false),
                           ("outside_edits", "boolean", "Save even code changes no vb6-mcp tool made (refused by default, with the diff).", false),
                           ("pid", "integer", PidDesc, false)),
             (a, ct) => SaveAsync(a, ct)),
@@ -259,10 +261,19 @@ public sealed partial class IdeTools
         RequireDesignMode(inst);
         var (client, project) = await ResolveProjectAsync(a);
         bool acceptOutside = a.Bool("outside_edits") == true;   // hard rule 9: explicit
+        var prj = (await client.ProjectsAsync()).First(p => p.Name.Equals(project, StringComparison.OrdinalIgnoreCase));
+        if (a.Str("path") is { Length: > 0 } newPath)
+        {
+            if (prj.FileName.Length > 0) throw new ToolException($"{project} is already saved as {prj.FileName}; path is only for a project that has never been saved");
+            if (a.List("components") is { Count: > 0 }) throw new ToolException("pass either path or components");
+            return await SaveProjectAsAsync(inst, client, project, newPath, acceptOutside, ct);
+        }
+        // a never-saved project (File > New Project) would stop at a Save As dialog; unchanged, it isn't even dirty
+        if (prj.FileName.Length == 0)
+            throw new ToolException($"{project} has never been saved; pass path: the new .vbp under the workspace roots (its components are saved next to it)");
         if (a.List("components") is { Count: > 0 } only) return await SaveComponentsAsync(inst, client, project, only, acceptOutside, ct);
         var dirtyComps = (await client.ComponentsAsync(project)).Where(c => c.IsDirty).ToList();
         var dirtyBefore = dirtyComps.Select(c => c.Name).ToList();
-        var prj = (await client.ProjectsAsync()).First(p => p.Name.Equals(project, StringComparison.OrdinalIgnoreCase));
         if (dirtyBefore.Count == 0 && !prj.IsDirty)
             return ToolResult.Ok(new { status = "nothing-to-save", project });
         var outside = await OutsideEditsAsync(inst, client, project, dirtyComps);
@@ -302,6 +313,34 @@ public sealed partial class IdeTools
         }
         return ToolResult.Ok(new { status = "pending", project, note = $"components still unsaved after {SaveWait.TotalSeconds:0} s; check ide_status" });
     }
+
+    /// <summary>
+    /// Saves a never-saved project as a new .vbp (PRJSAVEAS, spike 43): its never-saved components go next to it under
+    /// their names, then VBProject.SaveAs writes the .vbp. Nothing is overwritten.
+    /// </summary>
+    private async Task<ToolResult> SaveProjectAsAsync(InstanceInfo inst, AddinClient client, string project, string pathArg, bool acceptOutside, CancellationToken ct)
+    {
+        var path = NewVbpPath(pathArg);
+        var folder = Path.GetDirectoryName(path)!;
+        var comps = await client.ComponentsAsync(project);
+        foreach (var c in comps.Where(c => c.FileName.Length == 0))
+        {
+            var target = Path.Combine(folder, c.Name + ComponentFileExtension(c.Type));
+            if (File.Exists(target)) throw new ToolException($"{target} already exists, and {c.Name} would be saved there; choose another folder");
+        }
+        var outside = await OutsideEditsAsync(inst, client, project, comps.Where(c => c.IsDirty).ToList());
+        if (outside.Count > 0 && !acceptOutside) throw OutsideEditsRefusal(outside);
+        await QueueWithFolderAsync(folder, () => client.SaveProjectAsAsync(project, path));
+        var saved = await WaitForProjectsAsync(inst, client, ps => ps.Any(p => SamePath(p.FileName, path)), ct);
+        if (saved.Dialog is not null) return NewProjectDialog(inst, project, path);
+        if (!saved.Done) return ToolResult.Ok(new { status = "pending", project, path, error = AddinLogSince(inst.Pid, saved.Started, "save project as failed") });
+        return await SavedProjectResultAsync(client, saved.Projects.First(p => SamePath(p.FileName, path)), saved.Projects, "saved");
+    }
+
+    private static string ComponentFileExtension(int type) => type switch
+    {
+        1 => ".bas", 2 => ".cls", 5 or 6 => ".frm", 7 => ".pag", 8 => ".ctl", 9 => ".dob", _ => ".dsr",
+    };
 
     /// <summary>
     /// Saves only the named components (SAVECOMP: VBComponent.SaveAs to its own file), leaving the .vbp alone: File > Save

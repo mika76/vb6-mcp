@@ -162,7 +162,7 @@ VB6 ActiveX DLL, ProgID `VB6McpBridge.Connect`, version 0.1.0, binary-compatible
 | `Sidecar.bas` (registration) | `REGSVR`: 32-bit `regsvr32 /s [/u]` as an elevated child, handle kept for `REGSTATUS` (non-blocking exit code) | path checked on the elevated side too: roots, absolute, no `..`, .dll/.ocx (spike [24](spikes/24-com-registration.md)) |
 | `Refs.bas` | `REFS`, `REFADD` (`AddFromFile`/`AddFromGuid`), `REFDEL`, `TOOLBOX` (`AddToolboxProgID`) | synchronous, design mode for changes; GUIDs only from the registry or a typelib (hard rule 13) |
 | `Sidecar.bas` | starts the watchdog (`App.Path\watchdog\vb6mcp.exe watchdog`) with `CreateProcess`, no wait |
-| `ProjectVerbs.bas` | `CLOSE` (with discard: `IsDirty` cleared, then `VBProjects.Remove`), `COMPADD` (`VBComponents.Add`/`AddFile`), `SAVECOMP` (`VBComponent.SaveAs`), all deferred; `PRJGET`/`PRJSET` (project properties, startup object), synchronous | Phase 7; paths checked against the roots here too |
+| `ProjectVerbs.bas` | `CLOSE` (with discard: `IsDirty` cleared, then `VBProjects.Remove`), `COMPADD` (`VBComponents.Add`/`AddFile`), `SAVECOMP` (`VBComponent.SaveAs`), `PRJNEW`/`PRJSAVEAS` (`VBProjects.Add`, then each never-saved component and the `.vbp` saved with `SaveAs`: spike 43), all deferred; `PRJGET`/`PRJSET` (project properties, startup object), synchronous | Phase 7; paths checked against the roots here too |
 | `Snap.bas` | `PrintWindow` of an own-process window into a 32 bpp BMP under `%LOCALAPPDATA%\vb6mcp\shots\` (temp + rename) |
 | `Status.bas` | "VB6 MCP" toolbar: version, DLL build time, port, request count |
 | `Log.bas` | shared state, `%LOCALAPPDATA%\vb6mcp\addin.log` |

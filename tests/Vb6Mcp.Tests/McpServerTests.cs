@@ -76,7 +76,7 @@ public static class McpServerTests
                                     "bp_toggle", "bp_clear_all", "debug_where", "debug_eval", "debug_immediate", "syntax_check", "debug_locals", "debug_callstack", "debug_output", "debug_error",
                                     "ide_kill", "ide_quit", "recovery_list", "recovery_read", "recovery_restore", "recovery_discard",
                                     "app_windows", "app_tree", "app_click", "app_set_text", "app_mouse", "app_scroll", "app_select", "app_keys", "app_wait", "app_screenshot", "exe_run", "exe_end", "build_make", "build_in_ide", "sync_status", "sync_diff", "sync_take_disk", "sync_take_ide",
-            "form_controls", "form_properties", "form_set_property", "form_set_properties", "form_layout", "form_add_control", "form_screenshot", "form_remove_control", "refs_list", "refs_add", "refs_remove", "refs_add_component", "refs_fix_broken", "project_close", "project_add_component", "project_settings", "project_checkpoint", "project_rollback", "ide_claim", "ide_release" }, names);
+            "form_controls", "form_properties", "form_set_property", "form_set_properties", "form_layout", "form_add_control", "form_screenshot", "form_remove_control", "refs_list", "refs_add", "refs_remove", "refs_add_component", "refs_fix_broken", "project_close", "project_add_component", "project_settings", "project_new", "project_checkpoint", "project_rollback", "ide_claim", "ide_release" }, names);
         var codeRead = r["1"]["result"]!["tools"]!.AsArray().First(t => (string)t!["name"]! == "code_read")!;
         Assert.Equal("component", (string)codeRead["inputSchema"]!["required"]![0]!);
     }

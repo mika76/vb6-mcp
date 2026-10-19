@@ -11,7 +11,7 @@ Tools exposed by `vb6mcp` to Claude Code. Every result is a single JSON text ite
 
 ## Tool index
 
-All 94 tools, generated from the server's tool list (`node scripts/tool-index.js`). Details below, by topic.
+All 95 tools, generated from the server's tool list (`node scripts/tool-index.js`). Details below, by topic.
 
 | Area | Tool | What it does |
 |---|---|---|
@@ -28,6 +28,7 @@ All 94 tools, generated from the server's tool list (`node scripts/tool-index.js
 | Projects | `project_checkpoint` | Save a copy of a project's files (the .vbp, every component, .frx and resource files) as they are on disk, to go back to with project_rollback if a… |
 | Projects | `project_close` | Close a project in the IDE. Refused while it has unsaved changes, unless discard=true, which throws those changes away (recovery copies the watchdo… |
 | Projects | `project_components` | Components of a project in the IDE: name, type, unsaved (dirty) flag, line count, file name |
+| Projects | `project_new` | Create a new project in the IDE and save it: kind exe (Standard EXE), axexe (ActiveX EXE), dll (ActiveX DLL) or ocx (ActiveX control); path: the ne… |
 | Projects | `project_open` | Open a .vbp or .vbg in a running IDE. If the IDE already has projects, pass mode 'add' (adds to a group) or 'replace' (closes them; refused while a… |
 | Projects | `project_rollback` | Put a project's files back as they were at a checkpoint (project_checkpoint) |
 | Projects | `project_save` | Save a project like File > Save Project (all unsaved components and the .vbp) |
@@ -319,11 +320,16 @@ Open a `.vbp` or `.vbg` in a **running** IDE.
 
 ### `project_save`
 
-**Arguments:** `project?`, `components?`, `outside_edits?`, `pid?`.
+**Arguments:** `project?`, `components?`, `path?`, `outside_edits?`, `pid?`.
 
 **Served by:** `SAVE` (deferred File > Save Project), then polling `COMPONENTS` and dialogs for up to 20 s.
 
-**Result** (`status`): `saved` (with the components that were unsaved), `nothing-to-save`, `dialog` (reported, not answered, e.g. a source-control checkout prompt) or `pending`. Refused for a never-saved project (Save would open a Save As dialog).
+**Result** (`status`): `saved` (with the components that were unsaved), `nothing-to-save`, `dialog` (reported, not answered, e.g. a source-control checkout prompt) or `pending`.
+
+**A never-saved project** (File > New Project, the New Project chooser at startup) needs `path`: the new `.vbp`, under the workspace roots, not existing yet (a missing folder is created). Without `path` it is refused: Save would open a Save As dialog, and an unchanged new project isn't even dirty.
+- Served by `PRJSAVEAS`: each never-saved component is saved next to the `.vbp` as `<name>.<ext>`, then `VBProject.SaveAs` writes the `.vbp` (spike 43). A file already there refuses the call before anything is written.
+- The result is `project_new`'s (below), with `status: "saved"`. The project keeps its name (rename it with `project_settings`).
+- `path` for a project that already has a `.vbp` is refused (no Save As to another file).
 
 
 **`components: [...]`** saves only those components (`SAVECOMP`), and the `.vbp` isn't written. Components that were never saved are refused, since they have no file yet.
@@ -337,6 +343,23 @@ Open a `.vbp` or `.vbg` in a **running** IDE.
 - A difference other than the case of identifiers is **refused**, listing each component's diff (at most 40 lines, `sync_diff` for the rest). Stray keystrokes that reach a code pane, or the user's own typing, are caught this way.
 - `outside_edits: true` saves anyway; the result then has `outsideEdits`: `{component, since, changedLines, diff, moreDiffLines}` (`since` is `last vb6-mcp edit` or `disk`).
 - Reads don't update the record, so a `code_read` after a stray keystroke doesn't hide it. Never-saved components and unreadable ones are skipped.
+
+### `project_new`
+
+**Arguments:** `kind` (`exe`, `axexe`, `dll`, `ocx`), `path` (the new `.vbp`), `name?` (default: the file name), `mode?` (`add` or `replace`; required when the IDE has a project), `pid?`. Design mode. Served by `PRJNEW`.
+
+Creates a project in the IDE and saves it, so an agent no longer writes a `.vbp` by script (notes from real use).
+- **Checks first, nothing written on refusal:** the path must be a `.vbp` under the workspace roots that doesn't exist; the name a valid VB name not already open (unless `replace`); the folder must not hold the default component's file. A missing folder is created (and removed again if the add-in refuses).
+- **What VB creates** (`VBProjects.Add`, spike 43): `exe` a `Form1`, `axexe` and `dll` a `Class1`, `ocx` a `UserControl1`. It's saved next to the `.vbp` as `Form1.frm`, `Class1.cls` or `UserControl1.ctl`, then the `.vbp` with `VBProject.SaveAs`.
+- **`mode: add`** puts the new project next to the open ones: the IDE becomes a project group, and VB asks about saving the group (`.vbg`) when the IDE closes. **`mode: replace`** closes the open projects first; refused while any has unsaved changes (closing would save them, spike 31).
+- **Result:** `status` (`created`; `incomplete` when the `.vbp` doesn't list a component or its file is missing, with `notInVbp`), `project`, `path`, `type`, `dirty`, `components` (`name`, `type`, `file`), `projects` when the IDE holds a group.
+- **SourceSafe:** on a machine with Visual SourceSafe, VB's source-control add-in asks "Add this project to SourceSafe?" after the files are written. The result is then `status: "dialog"` with a note; answer it with `ide_dialog_respond` (No keeps it out; it still leaves a read-only `MSSCCPRJ.SCC` in the folder) and check with `project_components`.
+
+```json
+{"kind": "dll", "path": "D:\\src\\Lib\\MyLib.vbp", "mode": "add"}
+-> {"status": "created", "project": "MyLib", "path": "D:\\src\\Lib\\MyLib.vbp", "type": "ActiveXDll", "dirty": false,
+    "components": [{"name": "Class1", "type": "ClassModule", "file": "D:\\src\\Lib\\Class1.cls"}], "projects": ["App", "MyLib"], ...}
+```
 
 ### Closing, adding, settings, checkpoints
 
@@ -1491,6 +1514,7 @@ After a crash: `ide_launch` the project, then `recovery_list`, `recovery_read` a
 - 2026-10-19: live re-test fixes: `app_wait` stops at a dialog already open; a control with less than 4 pixels showing is `clipped: hidden`.
 - 2026-10-19: `markedChangedByRun` names forms whose designer is open (`designerOpen`).
 - 2026-10-19: `com_search` matches at word starts (`match`), `.oca` entries marked.
+- 2026-10-19: `project_new`; `project_save` takes `path` for a never-saved project (add-in verbs `PRJNEW`, `PRJSAVEAS`, spike 43).
 - 2026-10-19: `form_add_control` without a position counts overlaps instead of listing them.
 - 2026-10-19: `com_describe include_hidden` leaves out the IUnknown/IDispatch methods.
 - 2026-10-19: `ide_dialog_respond` presses once more when the first click didn't close the dialog (`retried`).

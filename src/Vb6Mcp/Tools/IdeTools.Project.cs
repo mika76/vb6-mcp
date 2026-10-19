@@ -44,7 +44,131 @@ public sealed partial class IdeTools
                           ("path", "string", "A closed project's .vbp (instead of project).", false),
                           ("project", "string", ProjectDesc, false), ("pid", "integer", PidDesc, false)),
             (a, ct) => ProjectSettingsAsync(a, ct)),
+        new("project_new",
+            "Create a new project in the IDE and save it: kind exe (Standard EXE), axexe (ActiveX EXE), dll (ActiveX DLL) or ocx " +
+            "(ActiveX control); path: the new .vbp under the workspace roots (must not exist; a missing folder is created). VB's " +
+            "default component (Form1, Class1 or UserControl1) is saved next to it. name: the project name (default: the file " +
+            "name). If the IDE already has projects, pass mode 'add' (they become a group) or 'replace' (closes them; refused while " +
+            "any has unsaved changes). Design mode only. A project made with File > New Project is saved with project_save path.",
+            Schema.Object(("path", "string", "Full path of the new .vbp.", true),
+                          ("kind", "string", "exe, axexe, dll or ocx.", true),
+                          ("name", "string", "Project name (default: the .vbp's file name).", false),
+                          ("mode", "string", "add or replace; required when the IDE already has a project.", false),
+                          ("pid", "integer", PidDesc, false)),
+            (a, ct) => NewProjectAsync(a, ct)),
     ];
+
+    // ---------- project_new ----------
+
+    /// <summary>The component VBProjects.Add creates for each kind, and so the file saved next to the .vbp (spike 43).</summary>
+    internal static string DefaultComponentFile(string kind) => kind switch
+    {
+        "exe" => "Form1.frm", "axexe" or "dll" => "Class1.cls", "ocx" => "UserControl1.ctl",
+        _ => throw new ToolException("kind must be exe, axexe, dll or ocx"),
+    };
+
+    private async Task<ToolResult> NewProjectAsync(JsonObject a, CancellationToken ct)
+    {
+        var kind = a.Req("kind").ToLowerInvariant();
+        var defaultFile = DefaultComponentFile(kind);
+        var path = NewVbpPath(a.Req("path"));
+        var name = a.Str("name") ?? Path.GetFileNameWithoutExtension(path);
+        if (!IsVbName(name)) throw new ToolException($"'{name}' isn't a valid project name (a letter, then letters, digits or _, at most 40); pass name");
+        var folder = Path.GetDirectoryName(path)!;
+        // nothing is overwritten (the add-in checks again before it writes): a clash found only there would leave the
+        // new project open and unsaved
+        if (File.Exists(Path.Combine(folder, defaultFile)))
+            throw new ToolException($"{Path.Combine(folder, defaultFile)} already exists, and the new project's {Path.GetFileNameWithoutExtension(defaultFile)} would be saved there; choose another folder");
+
+        var inst = ResolveInstance(a);
+        var client = _env.Client(inst);
+        var before = await client.ProjectsAsync();
+        // An IDE with no project (the New Project chooser cancelled) has no [design] tag in its title (spike 43); the
+        // add-in still checks design mode itself (End disabled)
+        if (before.Count > 0 || _env.ReadWindows(inst.Pid) is not { Mode: IdeMode.Unknown, Dialogs.Count: 0 }) RequireDesignMode(inst);
+        var mode = a.Str("mode")?.ToLowerInvariant();
+        if (before.Count > 0 && mode is not ("add" or "replace"))
+            throw new ToolException($"the IDE already has {string.Join(", ", before.Select(p => p.Name))} open; pass mode 'add' (a group) or 'replace' (closes them)");
+        bool replace = before.Count > 0 && mode == "replace";
+        if (!replace && before.FirstOrDefault(p => p.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) is { } same)
+            throw new ToolException($"a project named {same.Name} is already open; pass another name");
+        if (replace && before.FirstOrDefault(p => p.IsDirty) is { } dirty)
+            throw new ToolException($"project {dirty.Name} has unsaved changes; save or close it first");
+
+        await QueueWithFolderAsync(folder, () => client.NewProjectAsync(kind, name, path, replace));
+        var made = await WaitForProjectsAsync(inst, client, ps => ps.Any(p => SamePath(p.FileName, path)), ct);
+        if (made.Dialog is not null) return NewProjectDialog(inst, name, path);
+        if (!made.Done)
+            return ToolResult.Ok(new { status = "pending", path, error = AddinLogSince(inst.Pid, made.Started, "new project failed"),
+                                       projects = made.Projects.Select(p => new { name = p.Name, file = p.FileName.Length > 0 ? p.FileName : null }) });
+        return await SavedProjectResultAsync(client, made.Projects.First(p => SamePath(p.FileName, path)), made.Projects, "created");
+    }
+
+    /// <summary>
+    /// Creates the project folder if needed (the add-in requires it to exist), queues the add-in call, and removes the
+    /// folder again if the add-in refuses and it was created here and is still empty.
+    /// </summary>
+    private static async Task QueueWithFolderAsync(string folder, Func<Task> queue)
+    {
+        bool created = !Directory.Exists(folder);
+        Directory.CreateDirectory(folder);
+        try { await queue(); }
+        catch (AddinErrorException ex) when (ex.Code is 400 or 404 or 409)
+        {
+            if (created) try { if (!Directory.EnumerateFileSystemEntries(folder).Any()) Directory.Delete(folder); } catch (IOException) { }
+            throw new ToolException(ex.AddinMessage);
+        }
+    }
+
+    /// <summary>
+    /// A dialog while a new project is saved. On a machine with Visual SourceSafe, VB's source-control add-in asks "Add this
+    /// project to SourceSafe?" after the .vbp and the component files are written (spike 43); it is reported, not answered.
+    /// </summary>
+    private ToolResult NewProjectDialog(InstanceInfo inst, string project, string path)
+    {
+        var w = _env.ReadWindows(inst.Pid);
+        bool scc = w.Dialogs.Any(d => d.Caption.Contains("Source Code Control", StringComparison.OrdinalIgnoreCase));
+        return ToolResult.Ok(new
+        {
+            status = "dialog", project, path, dialogs = Dialogs(w),
+            note = scc
+                ? "VB's source-control add-in asks whether to add the project to SourceSafe; the .vbp and its components are already written. " +
+                  "Answer with ide_dialog_respond (No keeps it out of SourceSafe), then project_components shows the files"
+                : "VB6 is showing a dialog while saving the new project; it was not answered. After answering, project_components shows what was saved",
+        });
+    }
+
+    /// <summary>A new .vbp: normalized, under the roots, not existing yet.</summary>
+    private string NewVbpPath(string arg)
+    {
+        var path = PathKey.Normalize(arg);
+        if (!path.EndsWith(".vbp", StringComparison.OrdinalIgnoreCase)) throw new ToolException("path must be a .vbp file");
+        if (Roots.Count == 0 || !ProjectMap.IsUnderRoots(path, Roots)) throw new ToolException($"{path} is outside the workspace roots");
+        if (File.Exists(path)) throw new ToolException($"{path} already exists; open it with project_open");
+        return path;
+    }
+
+    private static async Task<ToolResult> SavedProjectResultAsync(AddinClient client, ProjectInfo prj, IReadOnlyList<ProjectInfo> all, string status)
+    {
+        var comps = await client.ComponentsAsync(prj.Name);
+        // Check the outcome on disk (spike 43): VBProject.SaveAs left out a component that had no file yet, and VB then
+        // counted the project as saved, so nothing it does later writes the missing line.
+        var listed = VbpFile.Load(prj.FileName).Members.Select(m => m.FullPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var missing = comps.Where(c => c.FileName.Length == 0 || !File.Exists(c.FileName) || !listed.Contains(Path.GetFullPath(c.FileName))).Select(c => c.Name).ToList();
+        return ToolResult.Ok(new
+        {
+            status = missing.Count > 0 ? "incomplete" : status, project = prj.Name, path = prj.FileName, type = ProjectType(prj.Type),
+            dirty = prj.IsDirty || comps.Any(c => c.IsDirty),
+            components = comps.Select(c => new { name = c.Name, type = ComponentType(c.Type), file = c.FileName.Length > 0 ? c.FileName : null }),
+            notInVbp = missing.Count > 0 ? missing : null,
+            projects = all.Count > 1 ? all.Select(p => p.Name) : null,
+            note = missing.Count > 0 ? $"the .vbp doesn't list {string.Join(", ", missing)}, or its file is missing; check project_components and the .vbp"
+                 : all.Count > 1 ? "the IDE now holds a project group; VB6 asks for a .vbg file when the group is saved or the IDE closes" : null,
+        });
+    }
+
+    /// <summary>A VB name as the add-in checks it: a letter, then letters, digits or _, at most 40.</summary>
+    internal static bool IsVbName(string s) => System.Text.RegularExpressions.Regex.IsMatch(s, "^[A-Za-z][A-Za-z0-9_]{0,39}$");
 
     // ---------- project_close ----------
 

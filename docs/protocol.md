@@ -362,7 +362,7 @@ COM (un)registration (Phase 5, spike 24).
 - **Errors:** 400 for a refused path, 404 file not found, 409 if regsvr32 couldn't start.
 - **Server side:** the server audits the call, polls `REGSTATUS`, and verifies the result in the registry.
 
-### Projects: `CLOSE`, `COMPADD`, `SAVECOMP` (deferred), `PRJGET`, `PRJSET` (Phase 7, `ProjectVerbs.bas`)
+### Projects: `CLOSE`, `COMPADD`, `SAVECOMP`, `PRJNEW`, `PRJSAVEAS` (deferred), `PRJGET`, `PRJSET` (Phase 7, `ProjectVerbs.bas`)
 
 All need design mode (409), except `PRJGET`.
 - **`CLOSE <project> <0|1>`** queues `VBProjects.Remove`.
@@ -382,6 +382,16 @@ All need design mode (409), except `PRJGET`.
 - **`PRJSET <project> <property> <value>`** sets one of `name`, `description`, `helpfile`, `helpcontextid`, `startmode` (0/1), `buildfilename`, `startup`, and returns the `PRJGET` record.
   - Synchronous: no user code runs.
   - `startup` sets `VBComponents.StartUpObject`: `vbext_so_SubMain`, `vbext_so_None`, or the component (falling back to its name). Which form VB accepts is checked live.
+- **`PRJNEW <kind> <name> <path> <add|replace>`** (deferred) creates a project and saves it as `path` (spike 43).
+  - kind: `exe`, `axexe`, `dll`, `ocx` (`vbext_pt_StandardExe`, `ActiveXExe`, `ActiveXDll`, `ActiveXControl`). The name must be a valid VB name (400).
+  - path: a new `.vbp`, absolute, without `..`, under the roots (400), not existing (409), in an existing folder (404).
+  - `replace` is refused while any open project or component is dirty (409), because `VBProjects.Remove` saves them (spike 31).
+  - The deferred action: `replace` removes the open projects; `VBProjects.Add(type, Exclusive)` with `Exclusive` only when nothing is open; sets the name; then saves as below. It logs `new project <VB's name> (<kind>), components: ...` and `saved project ...`, or `new project failed <name>: <error>`.
+- **`PRJSAVEAS <project> <path>`** (deferred) saves a project that has no `.vbp` yet as `path` (same checks; a project that has one is 409). Logs `saved project ...` or `save project as failed ...`.
+- **Saving a new project** (both verbs): every component that was never saved goes to `<folder>\<name>.<ext>` with `VBComponent.SaveAs`, then `VBProject.SaveAs path`.
+  - A never-saved component of a new project reports `FileCount = 1` with an empty `FileNames(1)`, not 0. `VBProject.SaveAs` alone writes a `.vbp` without it, and VB then counts the project as saved (spike 43).
+  - An existing target file stops the save before anything is written (logged as the failure).
+  - Outcome: the caller watches `PROJECTS` for the new `fileName`, then reads the `.vbp` to check every component is listed.
 - **Not here: conditional compilation constants and command-line arguments.** VBIDE has no property for them; the server edits them in the `.vbp` of a closed project.
 
 ## Watchdog (`vb6mcp watchdog`)
@@ -433,4 +443,5 @@ Breaking changes bump the magic (`VB6MCP2`) and the discovery `protocol` field. 
 - v1, 2026-10-14: added `DESIGN` (deferred, with request ids) and `RESULT`, `REFS`, `REFADD`, `REFDEL`, `TOOLBOX` (Phase 5). New verbs only; against an older add-in the server says to rebuild it.
 - v1, 2026-10-15: added `REGSVR`, `REGSTATUS` (Phase 5 round 2). New verbs only.
 - v1, 2026-10-17: added `CLOSE`, `COMPADD`, `SAVECOMP`, `PRJGET`, `PRJSET`; `MAKE` takes an optional `defines` (Phase 7). New verbs and an optional argument only; against an older add-in the server says to rebuild it.
+- v1, 2026-10-19: added `PRJNEW`, `PRJSAVEAS` (spike 43). New verbs only; against an older add-in the server says to rebuild it.
 - v1, 2026-10-15: `REFDEL` accepts `#<n>`; `DESIGN SET` accepts `@picture:<path>` and indexed properties; `DESIGN PROPS` returns indexed items (spike 25). Older servers never send these forms.

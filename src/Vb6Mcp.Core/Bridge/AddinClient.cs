@@ -250,6 +250,16 @@ public sealed class AddinClient(InstanceInfo instance, TimeSpan? timeout = null)
     public async Task SaveComponentAsync(string project, string component, string? path = null)
         => await (path is null ? QueuedAsync("SAVECOMP", project, component) : QueuedAsync("SAVECOMP", project, component, path)).ConfigureAwait(false);
 
+    /// <summary>
+    /// Queues creating a project (PRJNEW: VBProjects.Add) and saving it as <paramref name="vbpPath"/>, a new .vbp, with its
+    /// components next to it (spike 43). kind: exe, axexe, dll, ocx. <paramref name="replace"/> closes the open projects first.
+    /// </summary>
+    public async Task NewProjectAsync(string kind, string name, string vbpPath, bool replace)
+        => await QueuedAsync("PRJNEW", kind, name, vbpPath, replace ? "replace" : "add").ConfigureAwait(false);
+
+    /// <summary>Queues saving a never-saved project as <paramref name="vbpPath"/> (PRJSAVEAS), its never-saved components next to it.</summary>
+    public async Task SaveProjectAsAsync(string project, string vbpPath) => await QueuedAsync("PRJSAVEAS", project, vbpPath).ConfigureAwait(false);
+
     /// <summary>The project properties VBIDE exposes (PRJGET).</summary>
     public async Task<ProjectProps> ProjectPropsAsync(string project) => ProjectProps.From(await SendAsync("PRJGET", project).ConfigureAwait(false));
 

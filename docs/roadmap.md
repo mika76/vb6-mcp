@@ -4,7 +4,7 @@ Version 1.0.0 (2026-10-19): 94 tools, everything in [PLAN.md](../PLAN.md) phases
 
 ## Soon
 
-- **Create a project:** `project_save {path}` for a project that was never saved, or a `project_new` tool. Today an agent that starts a new project has to write the `.vbp` itself.
+- Nothing queued. The last item, creating a project, is done since 1.0.0: `project_new`, and `project_save path` for a never-saved project (spike 43).
 
 ## v2
 

@@ -178,7 +178,7 @@ public static class Program
         });
         // The tray icon (the user's view of it: running, elevated or not, Restart as administrator, Stop)
         string logPath = Path.Combine(baseDir, "watchdog.log");
-        using var trayIcon = tray ? new WatchdogTray(actions.Elevated, stay, logPath, () => RestartElevated(Log), () => { Log("stopped from the tray"); cts.Cancel(); }) : null;
+        using var trayIcon = tray ? new WatchdogTray(actions.Elevated, stay, logPath, () => { if (RestartElevated(Log)) cts.Cancel(); }, () => { Log("stopped from the tray"); cts.Cancel(); }) : null;
         Log($"watchdog {WatchdogHost.Version} started, elevated={actions.Elevated}, parent={actions.ParentPid}, exe={Environment.ProcessPath}{(stay ? ", --stay" : "")}");   // an elevated process's path is hidden from medium ones: log it (spike 26)
         await host.RunAsync(cts.Token);
         Log("watchdog stopped");
@@ -189,11 +189,12 @@ public static class Program
     /// <summary>
     /// "Restart as administrator": starts this exe as an elevated --stay watchdog through a UAC prompt (ShellExecute
     /// runas). True when it started, and then this watchdog stops so the new one gets the mutex (--handover). A
-    /// declined prompt (ERROR_CANCELLED) keeps this one running.
+    /// declined prompt (ERROR_CANCELLED) keeps this one running. Hidden window: vb6mcp.exe is a console program, and
+    /// ShellExecute gave the elevated copy a visible console that stayed open (tested 2026-10-19).
     /// </summary>
     private static bool RestartElevated(Action<string> log)
     {
-        var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!, "watchdog --stay --handover") { UseShellExecute = true, Verb = "runas" };
+        var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!, "watchdog --stay --handover") { UseShellExecute = true, Verb = "runas", WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden };
         try { System.Diagnostics.Process.Start(psi); log("restarting as administrator (an elevated watchdog takes over)"); return true; }
         catch (System.ComponentModel.Win32Exception ex) { log(ex.NativeErrorCode == 1223 ? "restart as administrator: the UAC prompt was declined" : "restart as administrator failed: " + ex.Message); return false; }
     }

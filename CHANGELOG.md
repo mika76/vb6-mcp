@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Watchdog tray: Restart as administrator no longer leaves a console window open, and the log no longer calls the restart "stopped from the tray". The restart is now verified live.
+
 ## 1.1.0 (2026-10-19)
 
 New projects, VB6 without administrator rights, and a watchdog you can see. One new tool (`project_new`, 95 in all). Details per tool: [docs/tools.md](docs/tools.md).

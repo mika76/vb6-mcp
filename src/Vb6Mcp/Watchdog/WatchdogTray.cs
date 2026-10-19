@@ -22,9 +22,9 @@ public sealed class WatchdogTray : IDisposable
     /// <param name="elevated">Whether this watchdog runs elevated: the shield and the menu depend on it.</param>
     /// <param name="stay">Started with --stay (by the user) rather than by an add-in: shown in the tooltip.</param>
     /// <param name="logPath">watchdog.log, for "Open log".</param>
-    /// <param name="restartElevated">Starts an elevated copy (UAC prompt); true when it started, so this one should stop.</param>
+    /// <param name="restartElevated">Starts an elevated copy (UAC prompt) and, when it started, stops this one.</param>
     /// <param name="stop">Stops this watchdog.</param>
-    public WatchdogTray(bool elevated, bool stay, string logPath, Func<bool> restartElevated, Action stop)
+    public WatchdogTray(bool elevated, bool stay, string logPath, Action restartElevated, Action stop)
     {
         _thread = new Thread(() => Run(elevated, stay, logPath, restartElevated, stop)) { IsBackground = true, Name = "tray" };
         _thread.SetApartmentState(ApartmentState.STA);
@@ -32,7 +32,7 @@ public sealed class WatchdogTray : IDisposable
         _ready.Wait(TimeSpan.FromSeconds(5));
     }
 
-    private void Run(bool elevated, bool stay, string logPath, Func<bool> restartElevated, Action stop)
+    private void Run(bool elevated, bool stay, string logPath, Action restartElevated, Action stop)
     {
         try
         {
@@ -43,7 +43,7 @@ public sealed class WatchdogTray : IDisposable
             _menu.Items.Add(new ToolStripSeparator());
             _menu.Items.Add("Open log", null, (_, _) => Open(logPath));
             if (!elevated)
-                _menu.Items.Add("Restart as administrator", null, (_, _) => { if (restartElevated()) stop(); });
+                _menu.Items.Add("Restart as administrator", null, (_, _) => restartElevated());
             _menu.Items.Add("Stop watchdog", null, (_, _) => stop());
             _icon = new NotifyIcon
             {

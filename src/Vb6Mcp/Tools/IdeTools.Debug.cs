@@ -109,11 +109,59 @@ public sealed partial class IdeTools
         RequireMode(inst, IdeMode.Design);
         bool full = a["full_compile"]?.GetValue<bool>() == true;
         await RememberDirtyBeforeRunAsync(inst);   // spike 32: a run marks forms dirty
+        var missingDlls = await MissingDllsAsync(inst);
         await _env.Client(inst).CommandAsync(full ? "fullcompile" : CmdStart);
         var w = await WaitForAsync(inst, s => s.Mode is IdeMode.Run or IdeMode.Break || s.Dialogs.Count > 0, ct);
         if (w.Mode is IdeMode.Run or IdeMode.Break) _runsWeStarted.Add(inst.Pid);
         else if (w.Dialogs.Count > 0) _pendingStarts.Add(inst.Pid);
-        return ToolResult.Ok(State("started", w));
+        return ToolResult.Ok(State("started", w)).With("missingDlls", missingDlls);
+    }
+
+    /// <summary>Per .vbp (path, write time): when it was checked and what was missing. Walking the DLLs takes a moment, so repeated runs reuse it.</summary>
+    private readonly Dictionary<(string Vbp, DateTime Written), (DateTime At, IReadOnlyList<(string Name, Core.Files.MissingDll Missing)> Missing)> _dllChecks = [];
+
+    /// <summary>
+    /// Improvement notes 55 / spike 39: a control or reference whose DLL needs a DLL that isn't installed. Loaded at
+    /// start-up it fails with error 48/429; delay-loaded, it ends the IDE (0xc06d007e, unsaved work lost) the moment
+    /// the program first uses it. The run still starts (that code path may never run), but the agent hears about it
+    /// first. Null when nothing is missing or the check can't run.
+    /// </summary>
+    private async Task<JsonNode?> MissingDllsAsync(InstanceInfo inst)
+    {
+        try
+        {
+            var projects = await _env.Client(inst).ProjectsAsync();
+            var appFolders = new List<string>();
+            if (Core.Vb6Install.FindExe() is { } vb6) appFolders.Add(Path.GetDirectoryName(vb6)!);
+            IReadOnlyList<Core.Files.RegisteredTypeLib>? registered = null;
+            var found = new List<(string Project, string Name, Core.Files.MissingDll Missing)>();
+            foreach (var p in projects.Where(p => File.Exists(p.FileName)))
+            {
+                var key = (Core.Files.PathKey.Normalize(p.FileName), File.GetLastWriteTimeUtc(p.FileName));
+                if (!_dllChecks.TryGetValue(key, out var c) || DateTime.UtcNow - c.At > TimeSpan.FromMinutes(10))
+                {
+                    registered ??= Core.Files.TypeLibRegistry.All();
+                    var folders = appFolders.Append(Path.GetDirectoryName(key.Item1)!).ToList();
+                    c = (DateTime.UtcNow, Core.Files.ProjectPreflight.MissingDlls(Core.Files.VbpFile.Load(key.Item1), registered, folders));
+                    _dllChecks[key] = c;
+                }
+                found.AddRange(c.Missing.Select(m => (p.Name, m.Name, m.Missing)));
+            }
+            if (found.Count == 0) return null;
+            bool delay = found.Any(f => f.Missing.Delay);
+            bool unsaved = projects.Any(p => p.IsDirty);
+            return JsonSerializer.SerializeToNode(new
+            {
+                dlls = found.Take(10).Select(f => new { project = f.Project, component = f.Name, chain = string.Join(" -> ", f.Missing.Chain), delayLoaded = f.Missing.Delay }),
+                more = found.Count > 10 ? found.Count - 10 : (int?)null,
+                hint = (delay
+                    ? "A delay-loaded DLL is missing: when the program first uses that component, the IDE process ends (exception 0xc06d007e, spike 39)" +
+                      (unsaved ? ", and unsaved changes are lost: project_save before going near that code" : "") + ". "
+                    : "Loading these components fails with error 48 or 429. ") +
+                    "Install the missing DLLs or avoid the code that uses the component; com_diagnose project=... has the details.",
+            }, McpServer.Json);
+        }
+        catch (Exception ex) when (ex is AddinBusyException or AddinUnreachableException or AddinErrorException or IOException or UnauthorizedAccessException) { return null; }
     }
 
     private async Task<ToolResult> RunEndAsync(JsonObject a, CancellationToken ct)

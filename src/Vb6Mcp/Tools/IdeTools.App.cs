@@ -503,14 +503,16 @@ public sealed partial class IdeTools
                 var now = AppWindows.Text(new IntPtr(h));
                 if ((text != null && now == text) || (contains != null && now.Contains(contains, StringComparison.Ordinal))) seen = $"text '{now}'";
             }
-            // improvement notes 32: a MsgBox that blocks the program won't let the awaited window appear: stop waiting
-            var blocking = seen is null && !dialog ? dialogs.FirstOrDefault(d => !dialogsAtStart.Contains(d.Hwnd)) : null;
+            // improvement notes 32: a MsgBox that blocks the program won't let the awaited window appear: stop waiting.
+            // Also one that was already open when the wait began (live re-test 2026-10-19: app_click returned with the
+            // MsgBox open, and app_wait then waited out its 15 s because it only stopped for new dialogs).
+            var blocking = seen is null && !dialog ? dialogs.FirstOrDefault() : null;
             if (seen != null || blocking != null || (DateTime.UtcNow - start).TotalSeconds >= timeout)
                 return ToolResult.Ok(new
                 {
                     met = seen != null, seen, waitedMs = (int)(DateTime.UtcNow - start).TotalMilliseconds,
                     mode = t.IsIde ? Mode(w.Mode) : null, dialogs = dialogs.Select(d => new { caption = d.Caption, text = string.Join("\n", d.Texts), buttons = d.Buttons.Select(b => b.Caption) }),
-                    note = blocking != null ? $"stopped waiting: dialog '{blocking.Caption}' appeared, and the program waits for it to be answered"
+                    note = blocking != null ? $"stopped waiting: dialog '{blocking.Caption}' {(dialogsAtStart.Contains(blocking.Hwnd) ? "is open" : "appeared")}, and the program waits for it to be answered (ide_dialog_respond)"
                          : seen is null ? $"not seen within {timeout} s" : null,
                 });
             await Task.Delay(200, ct);

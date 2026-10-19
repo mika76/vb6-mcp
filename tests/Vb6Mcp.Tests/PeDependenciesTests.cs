@@ -56,4 +56,31 @@ public static class PeDependenciesTests
         }
         finally { try { Directory.Delete(dir, true); } catch (IOException) { } }
     }
+
+    [Test]
+    public static void ProjectMissingDllsNamesTheComponent()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "vb6mcp-pe-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            Guid ocx = Guid.NewGuid(), dll = Guid.NewGuid(), tlb = Guid.NewGuid();
+            File.WriteAllBytes(Path.Combine(dir, "Grid.ocx"), MakePe(["kernel32.dll"], ["nosuch_vb6mcp_c.dll"]));
+            File.WriteAllBytes(Path.Combine(dir, "Fine.dll"), MakePe(["kernel32.dll"], []));
+            File.WriteAllBytes(Path.Combine(dir, "Types.tlb"), MakePe(["nosuch_vb6mcp_d.dll"], []));
+            var vbp = Path.Combine(dir, "P.vbp");
+            File.WriteAllText(vbp, "Type=Exe\r\n" +
+                $"Reference=*\\G{{{dll}}}#1.0#0#Fine.dll#Fine Library\r\n" +
+                $"Reference=*\\G{{{tlb}}}#1.0#0#Types.tlb#Types\r\n" +
+                $"Object={{{ocx}}}#2.0#0; Grid.ocx\r\nModule=M; M.bas\r\n");
+            RegisteredTypeLib[] reg = [new(ocx, 2, 0, "Grid", Path.Combine(dir, "Grid.ocx")), new(dll, 1, 0, "Fine", Path.Combine(dir, "Fine.dll")),
+                                       new(tlb, 1, 0, "Types", Path.Combine(dir, "Types.tlb"))];
+            var p = VbpFile.Load(vbp);
+            Assert.Equal("Grid.ocx,Fine Library", string.Join(",", ProjectPreflight.Binaries(p, reg).Select(b => b.Name)));   // no .tlb
+            var missing = ProjectPreflight.MissingDlls(p, reg, [dir]);
+            Assert.Equal("Grid.ocx: Grid.ocx>nosuch_vb6mcp_c.dll", string.Join("|", missing.Select(m => m.Name + ": " + string.Join(">", m.Missing.Chain))));
+            Assert.True(missing[0].Missing.Delay, "delay-loaded");
+        }
+        finally { try { Directory.Delete(dir, true); } catch (IOException) { } }
+    }
 }

@@ -85,14 +85,20 @@ public static class AppWindows
         return (p.X - r.L, p.Y - r.T);
     }
 
+    /// <summary>Less of a control than this many pixels across or down counts as hidden: too small to see or click.</summary>
+    public const int MinVisiblePixels = 4;
+
     /// <summary>
     /// null when <paramref name="rect"/> lies inside <paramref name="clip"/>, "partly" when part of it is cut off, "hidden"
-    /// when nothing of it shows (or it has no area). Rectangles are left, top, right, bottom (right/bottom exclusive).
+    /// when nothing of it shows (or it has no area), or less than <see cref="MinVisiblePixels"/> in either direction.
+    /// Rectangles are left, top, right, bottom (right/bottom exclusive).
     /// </summary>
     public static string? ClipState((int L, int T, int R, int B) rect, (int L, int T, int R, int B) clip)
     {
         var i = Intersect(rect, clip);
-        if (i.R <= i.L || i.B <= i.T) return "hidden";
+        // improvement notes 52, live re-test: a button in a 2 x 2-pixel PictureBox was "partly" clipped and app_click
+        // clicked it, though nobody could see or click those 4 pixels
+        if (i.R - i.L < MinVisiblePixels || i.B - i.T < MinVisiblePixels) return "hidden";
         return i == rect ? null : "partly";
     }
 

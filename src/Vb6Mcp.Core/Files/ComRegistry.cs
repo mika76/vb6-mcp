@@ -118,12 +118,16 @@ public static class ComRegistry
 
     /// <summary>ProgIDs whose name contains <paramref name="text"/> (case-insensitive) and that have a CLSID, up to <paramref name="limit"/>.</summary>
     public static IReadOnlyList<(string ProgId, Guid Clsid)> FindProgIds(string text, int limit = 50)
+        => FindProgIds(name => name.Contains(text, StringComparison.OrdinalIgnoreCase), limit);
+
+    /// <summary>ProgIDs whose name <paramref name="match"/> accepts and that have a CLSID, up to <paramref name="limit"/>.</summary>
+    public static IReadOnlyList<(string ProgId, Guid Clsid)> FindProgIds(Func<string, bool> match, int limit = 50)
     {
         var found = new List<(string, Guid)>();
         using var root = Root();
         foreach (var name in root.GetSubKeyNames())
         {
-            if (name.StartsWith('.') || name.StartsWith('{') || !name.Contains(text, StringComparison.OrdinalIgnoreCase)) continue;
+            if (name.StartsWith('.') || name.StartsWith('{') || !match(name)) continue;
             using var c = root.OpenSubKey(name + @"\CLSID");
             if (c?.GetValue(null) is string s && Guid.TryParse(s, out var g)) found.Add((name, g));
             if (found.Count >= limit) break;

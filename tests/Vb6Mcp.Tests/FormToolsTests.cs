@@ -247,4 +247,29 @@ public static class FormToolsTests
         Assert.True((bool)props[0]!["ok"]! && (bool)props[1]!["ok"]!, r.ToJsonString());
         Assert.True(!(bool)props[2]!["ok"]! && ((string)props[2]!["error"]!).Contains("no ForeColor"), r.ToJsonString());
     }
+
+    /// <summary>
+    /// Improvement notes 43: a control added without left/top sits at the default position with the others still to be
+    /// arranged; its overlaps are counted, not listed (they grew with the form). With a position they're listed.
+    /// </summary>
+    [Test]
+    public static async Task AddControlListsOverlapsOnlyWhenPlaced()
+    {
+        async Task<JsonObject> Add(JsonObject extra)
+        {
+            using var fake = DesignerFake([]);
+            var args = new JsonObject { ["component"] = "Form1", ["project"] = "P", ["prog_id"] = "VB.CommandButton", ["name"] = "cmdRefund", ["container"] = "Frame3" };
+            foreach (var (k, v) in extra) args[k] = v?.DeepClone();
+            var res = (await new IdeTools(new Env(fake)).All().First(t => t.Name == "form_add_control").InvokeAsync(args, CancellationToken.None)).ToJson();
+            return JsonNode.Parse((string)res["content"]![0]!["text"]!)!.AsObject();
+        }
+        var unplaced = await Add([]);
+        Assert.True(unplaced["overlaps"] is null, unplaced.ToJsonString());
+        Assert.True(unplaced["hints"]!.AsArray().Any(h => ((string)h!).Contains("overlaps 1 other control(s) (not listed")), unplaced.ToJsonString());
+
+        var placed = await Add(new JsonObject { ["left"] = 8250.0, ["top"] = 300.0 });
+        Assert.Equal(1, placed["overlaps"]!.AsArray().Count);
+        var byProperty = await Add(new JsonObject { ["properties"] = new JsonObject { ["Left"] = "8250" } });
+        Assert.Equal(1, byProperty["overlaps"]?.AsArray().Count, byProperty.ToJsonString());
+    }
 }

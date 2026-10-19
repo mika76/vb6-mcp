@@ -64,7 +64,7 @@ public sealed partial class IdeTools
             "VB.CommandButton, VB.TextBox, VB.Label, VB.Frame, or for ActiveX controls e.g. MSComctlLib.ListView (not the registered ProgID " +
             "MSComctlLib.ListViewCtrl.2; add the component first with refs_add_component, which takes that one). Optional name, container (a Frame or " +
             "PictureBox to put it in), position/size and properties ({Caption: ..., Font.Bold: True}, set like form_set_properties). For a group of " +
-            "controls, give sizes only and arrange them afterwards with form_layout. The result lists overlaps with sibling controls. Unsaved; save with project_save.",
+            "controls, give sizes only and arrange them afterwards with form_layout. With left/top, the result lists overlaps with sibling controls. Unsaved; save with project_save.",
             Schema.Object(("component", "string", ComponentDesc, true), ("prog_id", "string", "Class name as in a .frm: VB.CommandButton, MSComctlLib.ListView.", true),
                           ("name", "string", "Control name (default: VB's, e.g. Command1).", false),
                           ("container", "string", "Container control to add it to (default: the form).", false),
@@ -282,7 +282,7 @@ public sealed partial class IdeTools
     ///   button that way). One CONTROLS read, only when geometry changed or a control was added.
     /// </summary>
     private async Task<(bool Dirty, List<string> Hints, List<object> Overlaps)> ReviewAsync(AddinClient client, string project, string component, bool dirty,
-        IReadOnlyList<(string Control, string Property, string Value)> done, string? added, bool byLayout = false)
+        IReadOnlyList<(string Control, string Property, string Value)> done, string? added, bool byLayout = false, bool listOverlaps = true)
     {
         var hints = new List<string>();
         var overlaps = new List<object>();
@@ -360,6 +360,14 @@ public sealed partial class IdeTools
                 });
                 if (overlaps.Count >= 20) break;
             }
+        if (overlaps.Count > 0 && !listOverlaps)
+        {
+            // Improvement notes 43: thirty adds at the default position listed every overlap with the controls still
+            // waiting to be arranged, so the results grew with the form (O(n²) tokens). The count is enough there.
+            hints.Add($"The new control overlaps {(overlaps.Count >= 20 ? "20 or more" : overlaps.Count.ToString(CultureInfo.InvariantCulture))} other control(s) (not listed: no left/top was given). " +
+                      "Arrange the controls with form_layout once they're all added; it reports what still overlaps.");
+            overlaps.Clear();
+        }
         if (overlaps.Count > 0)
             hints.Add("Some controls overlap (see overlaps): the one in front hides the other. Move them apart, unless they're never visible at the same time. Code may show controls that are hidden at design time.");
         // not after form_layout itself: it placed them (improvement notes 38)
@@ -431,7 +439,9 @@ public sealed partial class IdeTools
             }
             catch (ToolException ex) { set.Add(new { property = name, ok = false, error = ex.Message + ExplainSetError(name, ex.Message) }); }
         }
-        var review = await ReviewAsync(client, project, component, dirty, done, added);
+        bool placed = Num("left").Length > 0 || Num("top").Length > 0 ||
+                      done.Any(d => d.Property.Equals("Left", StringComparison.OrdinalIgnoreCase) || d.Property.Equals("Top", StringComparison.OrdinalIgnoreCase));
+        var review = await ReviewAsync(client, project, component, dirty, done, added, listOverlaps: placed);
         return ToolResult.Ok(new
         {
             source = "ide", project, component, dirty = review.Dirty, added = ControlJson(rec), properties = set.Count > 0 ? set : null,

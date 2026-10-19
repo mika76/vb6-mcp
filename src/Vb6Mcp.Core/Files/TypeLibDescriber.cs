@@ -61,12 +61,19 @@ public static class TypeLibDescriber
     public static TlbMember? DefaultMember(TlbType t)
         => t.Kind is "interface" or "dispinterface" ? t.Members.FirstOrDefault(m => m.MemId == 0 && m.Kind != "const") : null;
 
+    private static readonly HashSet<string> s_comPlumbing = new(StringComparer.OrdinalIgnoreCase)
+        { "QueryInterface", "AddRef", "Release", "GetTypeInfoCount", "GetTypeInfo", "GetIDsOfNames", "Invoke" };
+
     /// <summary>
     /// Renders types as compact VB-like declarations, one member per line (what an agent reads best).
     /// <paramref name="filter"/> keeps types whose name contains it (case-insensitive); hidden members are left out unless asked.
     /// </summary>
     public static string Render(TlbDescription d, string? filter = null, bool includeHidden = false)
     {
+        // Improvement notes 45: every dispinterface lists IUnknown's and IDispatch's seven methods as restricted
+        // members; include_hidden showed them each time, and VB code can never call them. A visible member of the
+        // same name (a class's own Release method) stays.
+        static bool IsComPlumbing(TlbMember m) => m.Hidden && s_comPlumbing.Contains(m.Name);
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"' {d.Info.Name} {{{d.Info.LibId.ToString().ToUpperInvariant()}}} v{d.Info.Major}.{d.Info.Minor}{(d.Doc is null ? "" : " - " + d.Doc)}");
         // VB marks a class's own interface hidden (_clsTax, events __clsTax): without these a VB DLL showed only
@@ -94,7 +101,7 @@ public static class TypeLibDescriber
             foreach (var i in t.Implements) sb.AppendLine("    Implements " + i);
             var deflt = DefaultMember(t);
             // the default member is listed even when hidden (it is often a hidden _Default or Value)
-            foreach (var m in t.Members.Where(m => includeHidden || !m.Hidden || m.MemId == deflt?.MemId))
+            foreach (var m in t.Members.Where(m => (includeHidden && !IsComPlumbing(m)) || !m.Hidden || m.MemId == deflt?.MemId))
             {
                 string ps = string.Join(", ", m.Params.Select(p =>
                     (p.Optional ? "Optional " : "") + (p.ParamArray ? "ParamArray " : "") + (p.ByRef ? "" : "ByVal ") + p.Name + " As " + p.Type + (p.Default is null ? "" : " = " + p.Default)));

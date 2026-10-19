@@ -29,9 +29,10 @@ public sealed partial class WorkspaceTools
                           ("filter", "string", "Only types whose name contains this.", false), ("include_hidden", "boolean", "Also hidden types and members.", false)),
             (a, _) => Task.FromResult(ComDescribe(a))),
         new("com_search",
-            "Find registered COM components: type libraries whose description or name contains the text, and ProgIDs containing it " +
-            "(32-bit registry, as VB6 sees it). Each with its file and whether that file exists.",
-            Schema.Object(("text", "string", "Text to find, e.g. 'ADO', 'Scripting', a company prefix.", true)),
+            "Find registered COM components: type libraries whose description or file name, and ProgIDs whose name, has a word starting with " +
+            "the text (32-bit registry, as VB6 sees it). Each with its file and whether that file exists.",
+            Schema.Object(("text", "string", "Text to find, e.g. 'ADO', 'Scripting', a company prefix.", true),
+                          ("match", "string", "'word' (default: the text starts a word) or 'substring' (anywhere).", false)),
             (a, _) => Task.FromResult(ComSearch(a))),
         new("com_where",
             "Where a component is registered: give one of prog_id, clsid, libid or file. Lists the registered versions and server files, " +
@@ -329,16 +330,40 @@ public sealed partial class WorkspaceTools
     private ToolResult ComSearch(JsonObject a)
     {
         var text = a.Req("text");
-        var libs = TypeLibRegistry.All().Where(t => t.Description.Contains(text, StringComparison.OrdinalIgnoreCase) || (t.Win32Path ?? "").Contains(text, StringComparison.OrdinalIgnoreCase))
-            .OrderBy(t => t.Description, StringComparer.OrdinalIgnoreCase).ThenBy(t => t.Major).ThenBy(t => t.Minor).Take(50)
-            .Select(t => new { libId = t.LibId.ToString("B").ToUpperInvariant(), version = $"{t.Major}.{t.Minor}", description = t.Description, file = t.Win32Path, fileExists = t.FileExists }).ToList();
-        var progIds = ComRegistry.FindProgIds(text).Select(p =>
+        var mode = a.Str("match") ?? "word";
+        if (mode is not ("word" or "substring")) throw new ToolException("match is 'word' (default) or 'substring'");
+        // Improvement notes 44: a company's two-letter prefix drowned in MSXML. By default the text must start a word of the
+        // description, file name or ProgID; whole words come first. Nothing found that way: substrings, said so.
+        var all = TypeLibRegistry.All();
+        var min = mode == "word" ? WordMatch.Rank.WordPrefix : WordMatch.Rank.Substring;
+        string? fallback = null;
+        WordMatch.Rank LibRank(RegisteredTypeLib t) => WordMatch.Of(text, t.Description, Path.GetFileName(t.Win32Path ?? ""));
+        if (mode == "word" && !all.Any(t => LibRank(t) >= min) && ComRegistry.FindProgIds(p => WordMatch.Of(text, p) >= min, 1).Count == 0)
         {
-            var c = ComRegistry.Class(p.Clsid);
-            return new { progId = p.ProgId, clsid = p.Clsid.ToString("B").ToUpperInvariant(), file = c?.ServerFile, fileExists = c?.ServerExists ?? false };
-        }).ToList();
-        return ToolResult.Ok(new { text, typeLibs = libs, progIds, note = "at most 50 of each; 32-bit registry view" });
+            min = WordMatch.Rank.Substring;
+            fallback = $"nothing starts a word with '{text}'; these contain it anywhere";
+        }
+        var libs = all.Select(t => (T: t, Rank: LibRank(t))).Where(x => x.Rank >= min)
+            // VB writes an .oca next to an .ocx it loads (its cache of the control's type information) and may register it
+            // as a typelib of its own: list those after the real files, marked
+            .OrderBy(x => IsOca(x.T.Win32Path)).ThenByDescending(x => x.Rank).ThenBy(x => x.T.Description, StringComparer.OrdinalIgnoreCase).ThenBy(x => x.T.Major).ThenBy(x => x.T.Minor)
+            .Take(50)
+            .Select(x => new
+            {
+                libId = x.T.LibId.ToString("B").ToUpperInvariant(), version = $"{x.T.Major}.{x.T.Minor}", description = x.T.Description, file = x.T.Win32Path, fileExists = x.T.FileExists,
+                note = IsOca(x.T.Win32Path) ? "VB's cache of a control's type information (.oca, written next to the .ocx): the control itself is the .ocx" : null,
+            }).ToList();
+        var progIds = ComRegistry.FindProgIds(p => WordMatch.Of(text, p) >= min, 200)
+            .OrderByDescending(p => WordMatch.Of(text, p.ProgId)).ThenBy(p => p.ProgId, StringComparer.OrdinalIgnoreCase).Take(50)
+            .Select(p =>
+            {
+                var c = ComRegistry.Class(p.Clsid);
+                return new { progId = p.ProgId, clsid = p.Clsid.ToString("B").ToUpperInvariant(), file = c?.ServerFile, fileExists = c?.ServerExists ?? false };
+            }).ToList();
+        return ToolResult.Ok(new { text, match = fallback is null ? mode : "substring", typeLibs = libs, progIds, note = (fallback is null ? "" : fallback + "; ") + "at most 50 of each; 32-bit registry view" });
     }
+
+    private static bool IsOca(string? path) => path?.EndsWith(".oca", StringComparison.OrdinalIgnoreCase) == true;
 
     private ToolResult ComWhere(JsonObject a)
     {

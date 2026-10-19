@@ -50,6 +50,9 @@ public static class OutsideEditsTests
         Assert.Equal("hidden", AppWindows.ClipState((10, 120, 50, 160), clip));
         Assert.Equal("hidden", AppWindows.ClipState((10, 10, 10, 50), clip));   // no area
         Assert.Equal("hidden", AppWindows.ClipState((10, 10, 50, 50), (5, 5, 5, 5)));   // a zero-size container (2 x 2 PictureBox: item 52)
+        // live re-test of 52: an 80 x 32 button at (-31, -7) in a 2 x 2 PictureBox shows 2 x 2 pixels: hidden, not partly
+        Assert.Equal("hidden", AppWindows.ClipState((-31, -7, 49, 25), (0, 0, 2, 2)));
+        Assert.Equal("partly", AppWindows.ClipState((96, 10, 150, 50), clip));   // 4 pixels wide still shows
     }
 
     sealed class Env(FakeAddin addin) : IIdeEnvironment

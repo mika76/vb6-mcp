@@ -10,13 +10,39 @@ An MCP server that lets AI agents (Claude Code) work **inside the Visual Basic 6
 - **Experiments that back the design:** [docs/spikes/](docs/spikes/)
 - **What changed in each release:** [CHANGELOG.md](CHANGELOG.md)
 
-> Status: **version 0.2.0. Phases 1-7 built** (live code, debugging, UI automation, watchdog, builds and sync, forms, references and COM, packaging, and the improvements from real use and benchmarks). The spike code under `spikes/` is throwaway and is never referenced by `src/`.
+- **What's next:** [docs/roadmap.md](docs/roadmap.md)
+
+> Status: **version 1.0.0.** All planned phases are built: live code, debugging, UI automation, the watchdog, builds and sync, forms, references and COM, packaging, and the improvements from real use and benchmarks. The spike code under `spikes/` is throwaway and is never referenced by `src/`.
+
+## What it does
+
+The agent works on what the developer sees in the IDE, not just on the files:
+
+- **Code:** read and edit the code as the IDE holds it, unsaved edits included; symbols and every use of a name across projects; save explicitly.
+- **Run and debug:** start, break, step, breakpoints, the current line, locals, call stack, Immediate window, run-time errors, compile errors from memory.
+- **The running program:** list its forms and controls, click, type, select, press keys, wait for windows, take screenshots (also of a compiled EXE).
+- **Forms:** read and set designer properties, add controls, lay them out in rows and columns, screenshot the designer.
+- **Builds and COM:** build in the IDE or from disk, what to rebuild after a change, references, registration, binary compatibility, why a component won't load.
+- **Safety:** unsaved work is never thrown away without being asked; edits are refused when the code changed since it was read; the elevated add-in accepts only a fixed list of commands; a hook stops the agent from going around the tools.
+
+A typical session: `ide_list` (which IDEs and projects are open), `symbol_refs` (where a procedure is used), `proc_get` and `proc_replace` (change it), `syntax_check` (does it compile, as it is in memory), `run_start`, `app_click` and `app_screenshot` (try it in the running program), `run_end`, `project_save`.
+
+## Limits
+
+- **Windows 10/11 only.** The server is .NET 10, which doesn't run on Windows 7. Running Claude on another machine is planned for v2 ([docs/roadmap.md](docs/roadmap.md)).
+- **Claude Code first.** The server speaks plain MCP over stdio, but the instructions and the hook that keeps agents on the tools are written for Claude Code.
+- **VB6 has no debugger API.** Debugging works through IDE commands and by reading the IDE's windows. Breakpoints the user sets by hand aren't known, and lightweight controls (Label, Image) only show in screenshots.
+- **One machine.** The server, VB6 and the add-in run on the same Windows machine.
 
 ## Requirements
 
 - Windows 10/11, **Visual Basic 6.0 (SP6)**, normally run **as Administrator**
 - .NET 10 SDK (development only; the package needs no .NET)
 - Claude Code (desktop app or CLI)
+
+## License
+
+MIT, see [LICENSE](LICENSE).
 
 ## Repository layout
 

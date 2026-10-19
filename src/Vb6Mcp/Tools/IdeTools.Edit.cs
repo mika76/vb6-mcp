@@ -428,6 +428,25 @@ public sealed partial class IdeTools
         await Task.Delay(500, ct);
         var after = _env.ReadWindows(targetPid);
         bool gone = after.Dialogs.All(d => d.Hwnd != dlg.Hwnd);
+        // Improvement notes 11: the first click on "Continue Loading Project?" sometimes didn't take, and the same call a
+        // minute later did (a dialog that had only just appeared, or an IDE still busy loading). Give it two more seconds
+        // to close, then press once more: it is the same window, so the same answer.
+        bool retried = false;
+        for (var until = DateTime.UtcNow.AddSeconds(2); !gone && DateTime.UtcNow < until; gone = after.Dialogs.All(d => d.Hwnd != dlg.Hwnd))
+        {
+            await Task.Delay(250, ct);
+            after = _env.ReadWindows(targetPid);
+        }
+        if (!gone && after.Dialogs.FirstOrDefault(d => d.Hwnd == dlg.Hwnd)?.Buttons.FirstOrDefault(b => b.Hwnd == btn.Hwnd) is { } again)
+        {
+            via = await Click(again.Hwnd);
+            retried = true;
+            for (var until = DateTime.UtcNow.AddSeconds(2); DateTime.UtcNow < until && !gone; gone = after.Dialogs.All(d => d.Hwnd != dlg.Hwnd))
+            {
+                await Task.Delay(250, ct);
+                after = _env.ReadWindows(targetPid);
+            }
+        }
 
         // repeat: the same message for form after form (a missing reference or control: one "Errors during load" per form,
         // spike 36; the owner: "click ok until it stops"). Keep pressing the same button while the next dialog is the same
@@ -471,6 +490,12 @@ public sealed partial class IdeTools
             if (after.Mode is IdeMode.Run or IdeMode.Break) { _runsWeStarted.Add(targetPid); _pendingStarts.Remove(targetPid); }
             else if (after.Dialogs.Count == 0) _pendingStarts.Remove(targetPid);
         }
-        return ToolResult.Ok(new { clicked = btn.Caption, dialog = dlg.Caption, text = string.Join("\n", dlg.Texts), dialogClosed = gone, dialogsNow = Dialogs(after), via });
+        return ToolResult.Ok(new
+        {
+            clicked = btn.Caption, dialog = dlg.Caption, text = string.Join("\n", dlg.Texts), dialogClosed = gone, retried = retried ? true : (bool?)null,
+            dialogsNow = Dialogs(after), via,
+            note = gone ? null : "the dialog is still open after two presses. It may be waiting behind another window of the IDE (a dialog the user opened), " +
+                                 "or the IDE is busy: check dialogsNow and ide_status, then try again",
+        });
     }
 }

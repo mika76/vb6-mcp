@@ -20,6 +20,7 @@ public static class EditToolsTests
         public List<string[]> Replaces = [];
         public bool FailAfterDelete;   // like an InsertLines error after DeleteLines in the add-in
         public long ClickedHwnd;
+        public int Clicks, DroppedClicks;   // the first DroppedClicks clicks leave the dialog open (improvement notes 11)
         public IdeWindowState Window;
         public FakeAddin Addin;
 
@@ -50,7 +51,12 @@ public static class EditToolsTests
             return ("OK", $"{lines.Count}{US}1");
         }
 
-        (string, string) Click(string hex) { ClickedHwnd = Convert.ToInt64(hex, 16); Window = Window with { Dialogs = [] }; return ("OK", "clicked"); }
+        (string, string) Click(string hex)
+        {
+            ClickedHwnd = Convert.ToInt64(hex, 16);
+            if (++Clicks > DroppedClicks) Window = Window with { Dialogs = [] };
+            return ("OK", "clicked");
+        }
 
         public IReadOnlyList<Tool> Tools() => new IdeTools(new Env(this)).All();
         public void Dispose() => Addin.Dispose();
@@ -216,5 +222,23 @@ public static class EditToolsTests
         Assert.Equal(false, (bool)r["isError"]!, (string?)r["text"]);
         Assert.Equal(0x1002L, ide.ClickedHwnd);
         Assert.Equal(true, (bool)r["json"]!["dialogClosed"]!);
+        Assert.True(r["json"]!["retried"] is null, "one click was enough");
+    }
+
+    [Test]
+    public static async Task DialogRespondPressesAgainWhenTheFirstClickDidntTake()
+    {
+        var dlg = new DialogInfo(0x1000, "Microsoft Visual Basic", ["Continue Loading Project?"], [new DialogButton("Yes", 0x1001), new DialogButton("No", 0x1002)]);
+        using var ide = new FakeIde(IdeMode.Design, dlg) { DroppedClicks = 1 };
+        var r = await Call(ide.Tools(), "ide_dialog_respond", new JsonObject { ["button"] = "Yes" });
+        Assert.Equal(2, ide.Clicks);
+        Assert.Equal(true, (bool)r["json"]!["dialogClosed"]!);
+        Assert.Equal(true, (bool)r["json"]!["retried"]!);
+
+        using var stuck = new FakeIde(IdeMode.Design, dlg) { DroppedClicks = 5 };
+        r = await Call(stuck.Tools(), "ide_dialog_respond", new JsonObject { ["button"] = "Yes" });
+        Assert.Equal(2, stuck.Clicks, "two presses, no more");
+        Assert.Equal(false, (bool)r["json"]!["dialogClosed"]!);
+        Assert.True(((string?)r["json"]!["note"])?.Contains("still open") == true, "says so");
     }
 }

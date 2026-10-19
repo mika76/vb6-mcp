@@ -30,6 +30,7 @@ public static class DebugToolsTests
         public IdeMode Mode = IdeMode.Design;
         public List<string> Commands = [];
         public FakeAddin Addin;
+        public DialogInfo[] Dialogs = [];
 
         public FakeDebugIde(IdeMode mode)
         {
@@ -64,7 +65,7 @@ public static class DebugToolsTests
         {
             public DiscoveryResult Scan() => new([ide.Addin.Instance], [], []);
             public int DeleteStale(DiscoveryResult result) => 0;
-            public IdeWindowState ReadWindows(int pid) => new(pid, true, $"Basic - Microsoft Visual Basic [{ide.Mode.ToString().ToLowerInvariant()}]", ide.Mode, true, false, []);
+            public IdeWindowState ReadWindows(int pid) => new(pid, true, $"Basic - Microsoft Visual Basic [{ide.Mode.ToString().ToLowerInvariant()}]", ide.Mode, true, false, ide.Dialogs);
             public AddinClient Client(InstanceInfo instance) => new(instance, TimeSpan.FromSeconds(2));
         }
     }
@@ -172,6 +173,19 @@ public static class DebugToolsTests
         Assert.True(keys.IsError && keys.Text.Contains("run mode") || keys.Text.Contains("break mode"), keys.Text);
     }
 
+    /// <summary>Improvement notes 32, live re-test: a MsgBox already open when the wait starts stops it at once, not after the timeout.</summary>
+    [Test]
+    public static async Task WaitStopsAtADialogThatIsAlreadyOpen()
+    {
+        using var ide = new FakeDebugIde(IdeMode.Run) { Dialogs = [new DialogInfo(0x10, "Retest", ["Blocking before frmKeys"], [new DialogButton("OK", 0x11)])] };
+        var started = DateTime.UtcNow;
+        var r = await Call(ide.Tools(), "app_wait", new JsonObject { ["mode"] = "design", ["timeout"] = 10 });
+        Assert.True((DateTime.UtcNow - started).TotalSeconds < 3, "returned at once");
+        Assert.True(r.Text.Contains("\"met\":false") && r.Text.Contains("dialog 'Retest' is open"), r.Text);
+        var forDialog = await Call(ide.Tools(), "app_wait", new JsonObject { ["dialog"] = true, ["timeout"] = 2 });
+        Assert.True(forDialog.Text.Contains("\"met\":true"), "waiting for a dialog is met by it: " + forDialog.Text);
+    }
+
     [Test]
     public static async Task ExeRunChecksRootsAndExeTargetsMustBeOurs()
     {
@@ -184,5 +198,14 @@ public static class DebugToolsTests
         Assert.True(r.IsError && r.Text.Contains("isn't under the workspace roots"), r.Text);
         r = await Call(rooted, "app_click", new JsonObject { ["exe"] = Environment.ProcessId, ["text"] = "OK" });
         Assert.True(r.IsError && r.Text.Contains("wasn't started with exe_run"), r.Text);
+    }
+
+    /// <summary>Open designers for markedChangedByRun (improvement notes 46): designer captions only (spike 28), not code windows or panes.</summary>
+    [Test]
+    public static void DesignerWindowsAreRecognisedByCaption()
+    {
+        var names = IdeTools.DesignerNames(["frmSlide (Form)", "Ui - ucGrid (UserControl)", "Basic - frmMain (Code)", "Immediate", "Project - Basic",
+                                            "Properties - frmSlide", "Basic - Microsoft Visual Basic [design]", "Form Layout"]);
+        Assert.Equal("frmSlide,ucGrid", string.Join(",", names.Order()));
     }
 }

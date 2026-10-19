@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.0.0 (2026-10-19)
+
+The first public release. Nothing new to learn compared with 0.2.0: the same 94 tools, with the bugs and surprises found in six more benchmark tasks (T13-T18: a change shared by a DLL and two EXEs, debugging a reported wrong total, binary compatibility, a cause hidden in a compiled DLL, breakpoints, stepping) and in real use fixed. Every fix of the last round was re-tested in a live IDE. Details per tool: [docs/tools.md](docs/tools.md); what's next: [docs/roadmap.md](docs/roadmap.md).
+
+**Upgrading:** run `install.ps1` from the new package (roots are kept), then restart VB6 and Claude Code. The add-in reports version 1.0.0; its ProgID, CLSIDs and the wire protocol are unchanged.
+
+### Safety
+- `project_save` refuses code that no tool edited (stray keystrokes in a code window, someone else's edit) and shows the diff; `outside_edits: true` saves it anyway. `syntax_check` reports such edits too.
+- `app_keys` never types into the IDE: without `control`, keys go to the program's focused control or its form, not to the Immediate window or a code pane.
+- `app_tree` marks controls the user can't see (`clipped`: outside a container's visible area, or less than 4 pixels showing), and `app_click` refuses them unless `force: true`.
+- `run_start` warns about DLLs the project's controls and references need that aren't installed (`missingDlls`). A missing delay-loaded DLL ends the IDE process the moment the program uses it, unsaved work included (spike 39). `com_diagnose` names the missing chain too.
+- The hook also catches the agent ending VB6 through pipelines, `wmic`, CIM and `.Kill()`: a non-elevated process can end the elevated IDE (spike 38).
+
+### Fewer surprises
+- `server_restart` hands the session's IDEs and the runs it started to the next server, so `ide_quit` and `run_end` don't ask for `ide_claim` or `force` afterwards.
+- Dialogs: `ide_launch` and `project_open` wait for the follow-up dialogs VB shows after loading and report them; `app_wait` stops as soon as a dialog blocks the program; `batch_run` stops at a dialog even with `continue_on_error`; `ide_dialog_respond` presses once more when the first click didn't take (`retried`).
+- The program's own InputBox can be typed into (`app_set_text` / `app_keys` with `window` naming it).
+- `app_click` says when nothing changed after the click (`changed: false`); lists of a program in the IDE are read through the add-in.
+- `app_screenshot` returns `clientOrigin` and `imageScale`, so image positions convert to `app_mouse` coordinates.
+- `app_keys`: a form with only Labels takes the keys itself; `control` may be a form; `real_input` types characters as their keys, so `KeyDown` sees the real `KeyCode`.
+- Editing: an edit with `""` no longer reports an error after it was applied; a failed edit says what state the module is in; a fresh module's trailing line is addressable.
+- `debug_locals` survives private user-defined types; `debug_locals` and `debug_eval` close the compile error their own line caused.
+- Step results say where they stopped (`at`); `bp_toggle` works while the program runs.
+- `app_set_text` `index` follows reading order; `app_tree` shows each text box's `index` and flags a Locked one (`readOnly`).
+- `app_select` without `control` picks the only list or combo box (or the only one with the item).
+- Missing required arguments are named all at once, with the right names.
+- `markedChangedByRun` names listed forms whose designer is open (`designerOpen`).
+
+### Shorter results
+- `symbol_refs` returns each file's hash, so edits need no `file_read` first.
+- `form_add_control` without a position counts overlaps instead of listing them.
+- `com_search` matches at word starts (`match: substring` for the old way) and marks VB's `.oca` cache files.
+- `com_describe` lists the methods of VB-built classes without `include_hidden`, and leaves out the IUnknown/IDispatch methods even with it.
+
+### Development
+- Benchmarks T13-T18 with their fixtures, generators, replays and scoring (`bench/`, `docs/benchmarks`).
+
 ## 0.2.0 (2026-10-17)
 
 Everything learned from real use on two production projects and eight benchmark rounds of an agent redesigning a whole application (docs/benchmarks). 94 tools (0.1.0 had 78). Details per tool: [docs/tools.md](docs/tools.md).

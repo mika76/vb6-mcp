@@ -29,6 +29,42 @@ public static class ProjectPreflight
         return missing;
     }
 
+    /// <summary>
+    /// The registered DLL/OCX files behind a .vbp's controls and references, by display name (not .tlb/.olb: those
+    /// hold no code; not the project typelibs the IDE's debugger registers).
+    /// </summary>
+    public static IReadOnlyList<(string Name, string Path)> Binaries(VbpFile vbp, IReadOnlyList<RegisteredTypeLib> registered)
+    {
+        var list = new List<(string, string)>();
+        void Add(string raw, string kind)
+        {
+            if (ComDependency.Parse(raw) is not { } d) return;
+            var path = registered.Where(t => t.LibId == d.LibId && t.Major == d.Major && !ComRegistry.IsProjectTypeLib(t))
+                                 .Select(t => t.Win32Path).OfType<string>().Where(File.Exists).FirstOrDefault();
+            if (path is null || path.EndsWith(".tlb", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".olb", StringComparison.OrdinalIgnoreCase)) return;
+            list.Add((NameOf(raw, kind), path));
+        }
+        foreach (var o in vbp.Objects) Add(o, "control");
+        foreach (var r in vbp.References) Add(r, "reference");
+        return list;
+    }
+
+    /// <summary>
+    /// The DLLs that the 32-bit controls and references of a .vbp need and Windows wouldn't find (spike 39: a missing
+    /// delay-loaded DLL ended the IDE with 0xc06d007e while the program ran, unsaved work included). run_start reports
+    /// them; com_diagnose project=... does the same check with every other one.
+    /// </summary>
+    public static IReadOnlyList<(string Name, MissingDll Missing)> MissingDlls(VbpFile vbp, IReadOnlyList<RegisteredTypeLib> registered, IReadOnlyList<string> appFolders)
+    {
+        var list = new List<(string, MissingDll)>();
+        foreach (var (name, path) in Binaries(vbp, registered))
+        {
+            if (ComRegistry.Bitness(path) is not "x86") continue;   // a 64-bit server can't load at all: com_diagnose says so
+            foreach (var m in PeDependencies.Missing(path, appFolders)) list.Add((name, m));
+        }
+        return list;
+    }
+
     // Object: {guid}#2.0#0; cappro.dll        Reference: *\G{guid}#1.0#0#C:\x\lib.dll#Description
     private static string NameOf(string raw, string kind)
         => kind == "control" ? (raw.Contains(';') ? raw[(raw.IndexOf(';') + 1)..].Trim() : raw)

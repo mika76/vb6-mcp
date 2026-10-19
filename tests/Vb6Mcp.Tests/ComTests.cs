@@ -63,6 +63,11 @@ public static class ComTests
         var text = TypeLibDescriber.Render(TypeLibDescriber.Describe(dll));
         Assert.True(text.Contains("Function PriceText(ByVal net As Currency, ByVal taxRate As Double) As String"), text);
         Assert.True(!text.Contains("QueryInterface"), "IDispatch plumbing stays hidden: " + text);
+        // improvement notes 45: not even with include_hidden; the hidden class interface itself still shows
+        var all = TypeLibDescriber.Render(TypeLibDescriber.Describe(dll), includeHidden: true);
+        foreach (var m in new[] { "QueryInterface", "AddRef", "Release(", "GetTypeInfoCount", "GetTypeInfo(", "GetIDsOfNames", "Invoke(" })
+            Assert.True(!all.Contains(m), $"{m} with include_hidden: " + all);
+        Assert.True(all.Contains("Function PriceText("), all);
     }
 
     /// <summary>

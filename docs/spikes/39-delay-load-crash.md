@@ -22,5 +22,5 @@
 - The Application log's `KERNELBASE` names no DLL. A tool that walks a referenced DLL's imports **and delay imports** and tries `LoadLibraryEx` on each would have named `DPSCApi.dll` before the run.
 - **Built 2026-10-19:** `PeDependencies` in `Vb6Mcp.Core` (BCL only) and the dependency checks of `com_diagnose`. Live on a production project's 33 references and controls: one error, `DPFPDevX.dll -> DPFPApi.DLL -> DPSCApi.DLL: not found`, flagged as delay-loaded; nothing else reported.
 - A first version walked nothing under the Windows folder and missed it: `DPFPApi.dll` is third-party but sits in SysWOW64. Now only DLLs whose version info names Microsoft are skipped.
-- Not done: running the check from `run_start` (it would need the project's startup path to know which libraries the run uses).
+- **Built 2026-10-19 (improvement notes 55):** `run_start` runs the same check over every control and reference of the open projects (it can't know which ones the run will use) and reports `missingDlls` without refusing to start.
 - Item 25 (2026-10-16, a production project, also `0xc06d007e`) happened while the IDE was idle, so it had another trigger. That entry had the .NET runtime loaded in the process. Not investigated.

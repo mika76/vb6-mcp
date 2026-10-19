@@ -3,6 +3,7 @@
 #   vb6mcp.exe         MCP server and watchdog: one self-contained single-file win-x86 exe (no .NET needed on the
 #                      target; ~48 MB compressed; spike 26)
 #   install.ps1, uninstall.ps1, INSTALL.txt
+#   LICENSE, CHANGELOG.md
 # Runs non-elevated. Usage:  .\scripts\package.ps1
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -29,7 +30,7 @@ if ($LASTEXITCODE) { throw 'dotnet publish failed' }
 Move-Item (Join-Path $out 'publish\vb6mcp.exe') $out
 Remove-Item -LiteralPath (Join-Path $out 'publish') -Recurse -Force
 Copy-Item $dll $out
-Copy-Item (Join-Path $root 'installer\install.ps1'), (Join-Path $root 'installer\uninstall.ps1'), (Join-Path $root 'installer\INSTALL.txt') $out
+Copy-Item (Join-Path $root 'installer\install.ps1'), (Join-Path $root 'installer\uninstall.ps1'), (Join-Path $root 'installer\INSTALL.txt'), (Join-Path $root 'LICENSE'), (Join-Path $root 'CHANGELOG.md') $out
 
 if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force }
 Compress-Archive -Path (Join-Path $out '*') -DestinationPath $zip

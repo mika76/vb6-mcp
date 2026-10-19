@@ -88,7 +88,7 @@ All 94 tools, generated from the server's tool list (`node scripts/tool-index.js
 | COM | `com_diagnose` | Checks behind a COM runtime error (429 can't create object, 430 class doesn't support the expected interface, 48 error loading DLL, or any other) f… |
 | COM | `com_orphans` | Broken COM registrations, report only (nothing is changed): classes whose server file is missing, typelibs whose file is missing, and VB6 debugger … |
 | COM | `com_register` | Register a DLL/OCX under the workspace roots (regsvr32, elevated through the VB6 add-in, audited) |
-| COM | `com_search` | Find registered COM components: type libraries whose description or name contains the text, and ProgIDs containing it (32-bit registry, as VB6 sees… |
+| COM | `com_search` | Find registered COM components: type libraries whose description or file name, and ProgIDs whose name, has a word starting with the text (32-bit re… |
 | COM | `com_unregister` | Unregister a DLL/OCX under the workspace roots (regsvr32 /u, elevated through the VB6 add-in, audited), then check the registry |
 | COM | `com_where` | Where a component is registered: give one of prog_id, clsid, libid or file |
 | COM | `compat_status` | Binary compatibility state of ActiveX projects under the roots: mode, compatibility file, the typelib IDs of the compatibility file and the build o… |
@@ -260,6 +260,7 @@ When an IDE this server saw running has crashed (its discovery file is left behi
 **Served by:** add-in `COMPONENTS`.
 
 **`markedChangedByRun`** (spike 32): running the program in the IDE marks the forms it loaded as changed, though nothing changed (saving writes identical bytes). When a run was started through this server (`run_start`, a step or run-to-cursor from design mode, `syntax_check`) and the IDE is back in design mode, `project_components`, `run_end` and `syntax_check` list the components that became dirty only during that run and whose code equals the file: `{components: ["P.frmMain", ...], note}` with the `project_save components=[...]` call that clears them (only those files, not the `.vbp`). Never saved automatically (hard rule 4). `build_make`'s "unsaved changes" refusal names them too. Both T12 rerun agents saved, tested the running program and left exactly such forms behind, so the build from disk refused.
+- **`designerOpen`** (improvement notes 46): the listed components whose designer window is open, found by its caption: `frmSlide (Form)` when maximized (spike 28), `Ui - frmSlide (Form)` when not (live re-test 2026-10-19). A form the run didn't load was once listed, and its designer was open: VB probably re-initialises the UserControls of open designers when the mode changes. That cause isn't confirmed live yet, so the result only names them and the note says why they may be there.
 
 **Result:**
 ```json
@@ -503,6 +504,8 @@ Read one procedure or property, with the comment lines above it.
 ```
 The button must always be named explicitly (hard rule 9). An unknown button lists the available ones.
 
+**A click that doesn't take** (improvement notes 11: the first click on "Continue Loading Project?" left it open, the same call a minute later worked). When the dialog is still open half a second after the click, the tool waits up to 2 s more, then presses the same button of the same window once more and waits again. The result then has `retried: true`. If the dialog is still there after that, `dialogClosed: false` comes with a `note`: it may be waiting behind another IDE window (a dialog the user opened), or the IDE is busy.
+
 ---
 
 ## Editing
@@ -561,7 +564,7 @@ VB6 has no debugger API. These tools run IDE commands (deferred in the add-in, p
 
 | Tool | Arguments | Needs mode | What it does |
 |------|-----------|------------|--------------|
-| `run_start` | `full_compile?`, `pid?` | design | F5, or Start With Full Compile (Ctrl+F5) |
+| `run_start` | `full_compile?`, `pid?` | design | F5, or Start With Full Compile (Ctrl+F5). Warns about DLLs the project's controls and references need that aren't installed (`missingDlls`, below) |
 | `run_break` | `pid?` | run | Break. If the program is in a busy loop the IDE can't take the command (the add-in shares its thread); the watchdog will inject Ctrl+Break (Phase 2b) |
 | `run_continue` | `pid?` | break | Continue |
 | `run_end` | `force?`, `pid?` | run, break | End. **Needs `force: true` if the agent didn't start the run** (hard rule 11) |
@@ -666,6 +669,13 @@ No user code runs. Example (DebugFixture, stopped in `Inner`):
 - When there were any, the result has `reloads: {applied, stillPending?, note}`.
 - `stillPending` means the IDE still has the previous text of those files.
 
+### Missing DLLs before a run
+
+`run_start` checks the 32-bit DLLs and OCXs behind the open projects' `Object=` and `Reference=` lines for DLLs they need that Windows wouldn't find, imports and delay imports (spike 39, improvement notes 55; the same check as `com_diagnose project=...`). A missing delay-loaded DLL ends the IDE process (exception `0xc06d007e`) the moment the program first uses that component, unsaved work included.
+- The run still starts: the code that uses the component may never run.
+- When something is missing, the result has `missingDlls: {dlls: [{project, component, chain, delayLoaded}], more?, hint}`. The hint says to `project_save` first when the IDE has unsaved changes.
+- The result is kept per `.vbp` (path and write time) for 10 minutes, so repeated runs don't walk the DLLs again.
+
 ## The running program
 
 Drive the program being debugged, the way a user would. The program runs **inside `VB6.EXE`**, so its windows belong to the IDE process.
@@ -677,7 +687,7 @@ Drive the program being debugged, the way a user would. The program runs **insid
 | Tool | Arguments | Needs mode | What it does |
 |------|-----------|------------|--------------|
 | `app_windows` | `pid?` | any | the program's top-level windows: `hwnd` (hex), `kind` (Form, MDIForm, Dialog), caption, class, position, size, enabled |
-| `app_tree` | `window?`, `pid?` | run, break | the controls of a form: `hwnd`, `kind` (CommandButton, TextBox, CheckBox, ...), text, position relative to the form's client area; for text boxes their `index` for `app_set_text` (reading order) and `readOnly` for a Locked one; `depth`, `hidden`, `clipped` (`partly` or `hidden`: outside an ancestor's visible area, e.g. buttons parked below a panel's edge or inside a 2 x 2 PictureBox), `disabled` only when they apply (compact, see the token breakdown) |
+| `app_tree` | `window?`, `pid?` | run, break | the controls of a form: `hwnd`, `kind` (CommandButton, TextBox, CheckBox, ...), text, position relative to the form's client area; for text boxes their `index` for `app_set_text` (reading order) and `readOnly` for a Locked one; `depth`, `hidden`, `clipped` (`partly` or `hidden`: outside an ancestor's visible area, e.g. buttons parked below a panel's edge or inside a 2 x 2 PictureBox; less than 4 pixels showing across or down counts as `hidden`), `disabled` only when they apply (compact, see the token breakdown) |
 | `app_click` | `control?` or `text?`, `window?`, `force?`, `pid?` | run | clicks a command button, check box or option button. `text` matches the caption without `&`, case-insensitive; when it matches several, the only one a user can see wins. A control the user can't see (window hidden, or `clipped: "hidden"`) is refused unless `force: true` |
 | `app_set_text` | `text`, `control?` or `index?`, `window?`, `pid?` | run, no dialog | sets a text box's text (fires `Change`); returns `textNow` and `applied`. `index` counts the form's text boxes in reading order (top to bottom, left to right). A read-only (Locked) box is set but flagged (`readOnly`, with a note): a user couldn't type there (benchmark T18) |
 | `app_mouse` | `action` (click, double_click, right_click, drag), `x`, `y`, `to_x?`, `to_y?`, `real_input?`, `window?`, `pid?` | run, no dialog | mouse input at a point relative to the form's client area. By default it posts messages to the deepest window under the point without touching the user's mouse, and a drag goes entirely to the window it starts in. **Labels and Images need `real_input: true`** (spike 17) |
@@ -694,7 +704,7 @@ Drive the program being debugged, the way a user would. The program runs **insid
 - Input only goes to programs the agent started with `exe_run` (hard rule 8).
 - Posted keys can't be deferred inside the program's thread from outside. The server attaches to the program's input thread to set modifiers, and pauses 60 ms after each key down so the generated character arrives first.
 - `mode` in `app_wait` is IDE-only.
-- `app_wait` returns early (`met: false`, note `stopped waiting: dialog ... appeared`) when a dialog that wasn't there at the start appears (a MsgBox blocks the program, so the wait could never succeed). Waiting for a dialog (`dialog`) is exempt (improvement notes 32).
+- `app_wait` returns early (`met: false`, note `stopped waiting: dialog ... appeared` or `... is open`) while a dialog is open, including one that was already open when the wait began (a MsgBox blocks the program, so the wait could never succeed). Waiting for a dialog (`dialog`) is exempt (improvement notes 32; the live re-test found the first version only stopped for new dialogs, after `app_click` had returned with the MsgBox open).
 - `app_set_text` and `app_keys` are refused while a dialog is open, unless `window` names that dialog (caption or hex handle) or `control` is a child of it: that is how a program's own InputBox is answered (improvement notes 36).
 
 | Tool | Arguments | What it does |
@@ -910,6 +920,7 @@ Verified on this machine (spike [29](spikes/29-designer-rules.md)). The tools ac
   - A Label overlapping a windowed control (frame, button, text box) is reported, with a note: VB draws labels behind windowed controls, so the overlapped part is hidden. A Label that wholly contains the other control is a background (a coloured header band or status strip with buttons on it) and isn't reported.
   - Not checked: label on label; Images, Shapes, Lines and Timers; members of one control array (often stacked on purpose); overlaps under 30 twips (2 pixels).
   - Controls that are never visible at the same time may overlap on purpose. The hint says so.
+  - `form_add_control` without `left`/`top` (and without `Left`/`Top` in `properties`) puts the control at the default position, among others still waiting to be arranged. Its overlaps are only counted in a hint that points to `form_layout`, not listed (improvement notes 43: adding 30 controls that way made every result longer than the last).
   - This costs one extra `CONTROLS` read, only after such changes.
 - After any move or added control, a hint says to check the layout with `form_screenshot`.
 - `hints` and `overlaps` are left out when empty. A check that couldn't run (a dialog, a busy IDE) is reported in `hints`.
@@ -1052,7 +1063,7 @@ GUIDs are only ever read, never typed in (hard rule 13).
 The type library as VB-like declarations:
 - `Class X` with its `Implements` lines (`[default]`, `[source]` = events). Marked `' control` for ActiveX controls, `' not creatable` for PublicNotCreatable classes.
 - Interfaces with `Sub`/`Function`/`Property Get|Let|Set` and parameters: `ByVal`, `Optional`, defaults, `ParamArray`, VB types.
-- Hidden types are left out (`include_hidden` shows them), except interfaces a visible class implements. VB marks every class's own interface hidden (`_clsTax`, events `__clsTax`), so a VB-built DLL used to show only `Implements _clsTax` (benchmark T15). Hidden and restricted members such as the `IDispatch` plumbing stay out.
+- Hidden types are left out (`include_hidden` shows them), except interfaces a visible class implements. VB marks every class's own interface hidden (`_clsTax`, events `__clsTax`), so a VB-built DLL used to show only `Implements _clsTax` (benchmark T15). Hidden and restricted members stay out unless `include_hidden` is set. The seven restricted `IUnknown`/`IDispatch` methods (`QueryInterface` … `Invoke`) stay out even then, since VB code can't call them (improvement notes 45).
 - `Enum`s with values, and `Type`s.
 - Help strings as comments.
 - **Default members** (improvement notes 14, PLAN.md C1): the member with `DISPID_VALUE` (memid 0) is marked `' default member`, and listed even when hidden. A class line names its default interface's default member: `Class MSComm ' control ... ' default member: CommPort (as hidden _CommPort)`. That's what VB uses when code names the object itself (`x = MSComm1`, `If MSComm1 Then`). A hidden `_X` alias of a visible `X` is reported as `X`.
@@ -1068,9 +1079,12 @@ The same text is available on the command line: `vb6mcp describe <file> [filter]
 
 ### `com_search`
 
-**Arguments:** `text`.
-- **Typelibs:** registered ones whose description or file path contains the text (libId, version, description, file, fileExists).
-- **ProgIDs:** registered ones containing it (progId, clsid, server file, fileExists).
+**Arguments:** `text`, `match?` (`word`, the default, or `substring`).
+- **Typelibs:** registered ones whose description or file name matches (libId, version, description, file, fileExists).
+- **ProgIDs:** registered ones whose name matches (progId, clsid, server file, fileExists).
+- **`word`** (improvement notes 44): the text must start a word. Words split at anything that isn't a letter or digit, and where a lower-case letter is followed by an upper-case one: `Ml` matches `MlText.ocx` and `Ml Controls`, not `MSXML6`. A text with spaces or dots counts when it starts at a word (`Common Cont`, `ADODB.Rec`). Whole words come first. When nothing matches that way, the result falls back to substrings and says so (`match: "substring"`, `note`).
+- **`.oca` files:** VB writes an `.oca` next to an `.ocx` it loads (its cache of the control's type information), and may register it as a typelib. Those entries come after the real files, with a `note`.
+- Live on this machine: a company's two-letter prefix gave 21 typelibs (its controls, then their `.oca` files) and 10 ProgIDs. As a substring it hit the 50-ProgID limit with MSXML.
 
 At most 50 of each.
 
@@ -1445,6 +1459,13 @@ After a crash: `ide_launch` the project, then `recovery_list`, `recovery_read` a
 - 2026-10-18: `com_describe` lists the methods of VB-built classes (their hidden default interfaces) without `include_hidden`.
 - 2026-10-17: `symbol_refs` returns each file's `hash` (the `expected_hash` for `file_replace_lines`; benchmark T13).
 - 2026-10-17: `batch_run` references to earlier results (`"$1.hash"`).
+- 2026-10-19: `run_start` warns about missing DLL dependencies (`missingDlls`).
+- 2026-10-19: live re-test fixes: `app_wait` stops at a dialog already open; a control with less than 4 pixels showing is `clipped: hidden`.
+- 2026-10-19: `markedChangedByRun` names forms whose designer is open (`designerOpen`).
+- 2026-10-19: `com_search` matches at word starts (`match`), `.oca` entries marked.
+- 2026-10-19: `form_add_control` without a position counts overlaps instead of listing them.
+- 2026-10-19: `com_describe include_hidden` leaves out the IUnknown/IDispatch methods.
+- 2026-10-19: `ide_dialog_respond` presses once more when the first click didn't close the dialog (`retried`).
 - 2026-10-17: `project_checkpoint`, `project_rollback`.
 - 2026-10-17: `form_layout` (arrange controls as a grid).
 - 2026-10-17: `batch_run` (several tool calls in one).

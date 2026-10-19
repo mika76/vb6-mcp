@@ -1,6 +1,6 @@
 # VB6 MCP Server: Analysis & Plan
 
-Status: design; spikes 10 + 11 done. Last updated 2026-10-13 (rev 8: + COM/GUID handling, §9.2).
+Status: **1.0.0 built** (2026-10-19): phases 0-7 below are done. What comes next is in [docs/roadmap.md](docs/roadmap.md). This file keeps the design and the reasons behind it; rev 8 (2026-10-13) added COM/GUID handling, §9.2.
 
 ## 0. Principles
 
@@ -317,7 +317,7 @@ Installer: add-in registration (regsvr32 + `HKCU\...\Addins` + `vbaddin.ini`), c
 - **Roots** are machine policy in `Program Files\vb6mcp\roots.txt`, read by both the add-in and the server, so ordinary processes can't widen what the elevated side may touch.
 - **Verified live:** install, use, uninstall and reinstall, all with VB6 and Claude Code holding the files.
 
-### Phase 7: Improvements from real use (planned 2026-10-17)
+### Phase 7: Improvements from real use (planned 2026-10-17) — **done for 1.0** (2026-10-19; E6 moved to the v2 roadmap)
 
 Source: the owner's notes from real use (not published) (numbers in brackets are its items), benchmarks on a production project and spike 27. This replaces the earlier "Backlog from real use".
 
@@ -402,7 +402,7 @@ From the T9–T12 benchmark runs (docs/benchmarks/2026-10-15-t9-opus-redesign.md
 | E5 | `debug_eval` side-effect policy (owner, 2026-10-17: "security should be taken seriously") | Refuse, before typing, expressions with side effects: database writes, process starts (Shell, WScript.Shell, WMI), file and registry changes, network, scripts, keystrokes. `VB6MCP_EVAL=open` (`-EvalOpen`) allows them, flagged and audited. Text matching: a guard rail, not a sandbox. | **done** (2026-10-17): refused by default |
 | E5b | Shell commands of the agent (owner, 2026-10-17) | The T12 rerun agents changed the test database with `sqlcmd`, outside every vb6 tool. The Claude Code hook (`vb6mcp hook`) now also checks Bash/PowerShell: database writes through CLI clients and scripts, writes to VB6 source files, COM registration and registry edits, ending or building with VB6 directly. `VB6MCP_SHELL_GUARD=off` turns it off. Asks the user instead of refusing (hook `permissionDecision: ask`, owner's choice): checked in the app (prompt; Deny rejects the call) and headless (counts as denied), spike 33. `debug_eval` side effects: `allow_side_effect: true` with the hook installed. | **done** (2026-10-17) |
 | E7 | Restart the server without restarting Claude (owner's question, 2026-10-17) | The desktop app's MCP dialog shows Reconnect only for a failed server, so a reinstall needs a session restart. Spike: a `server_restart` tool (or exit when `install-server.ps1` publishes a newer build) ends the process after answering; does the server then show as failed with Reconnect, and does Reconnect start the newly registered exe? | **done** (2026-10-17): no Reconnect, but the app restarts an ended server on the next call from the session-start command, so `install-server.ps1` installs into a fixed `build\server\current\` (files in use renamed aside); `server_restart` then loads the new build |
-| E6 | Replayable UI scripts | `app_script_run`: a stored list of `app_*` steps (with `app_wait` and screenshot checkpoints) replayed in one call, stopping at the first failed step. Agents re-test the same clicks after every change; scripts also become regression tests for forms. Overlaps with `batch_run`; the difference is a named, saved script plus expected results. | planned |
+| E6 | Replayable UI scripts | `app_script_run`: a stored list of `app_*` steps (with `app_wait` and screenshot checkpoints) replayed in one call, stopping at the first failed step. Agents re-test the same clicks after every change; scripts also become regression tests for forms. Overlaps with `batch_run`; the difference is a named, saved script plus expected results. | **moved to v2** ([docs/roadmap.md](docs/roadmap.md)) |
 
 The phase order follows the principle that the IDE is the main workspace: live code first, then debugging, then UI testing. The disk-centric pieces come after.
 

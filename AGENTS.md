@@ -205,7 +205,14 @@ dotnet run --project tests/Vb6Mcp.Tests -- --cat Build,IDE,Launch
 
 - **Public repo.** This repository is public (MIT). The owner tests vb6-mcp on private production projects, and nothing about them goes into commits, commit messages, docs, tests or code comments: no project, form, module or control names, folder paths, database names or schemas, user names, or the company's own components. Write "a production project", "a real form", `D:\src\App`, `AppDb` instead, and keep test data generic.
   - Notes from real use (what happened on which project) go to `notes/`, which is git-ignored and stays on the owner's machine. Docs refer to them as "notes from real use", without a link.
-  - On the owner's machine, local git hooks (`pre-commit`, `commit-msg`) refuse commits that name a private term. Don't work around them: reword the text, or move it to `notes/`.
+  - On the owner's machine, local git hooks (`pre-commit`, `commit-msg`, `pre-push`) refuse commits that name a private term, commits by an author other than the public identity, `Co-Authored-By` trailers, commits directly on `main`, and pushes of anything but `main` and tags. Don't work around them: reword the text, or move it to `notes/`.
+- **Branches.** Never commit directly to `main`.
+  - Work on a local branch per piece of work (`feature/…`, `fix/…`, `spike/…`, `docs/…`), and commit there as often as you like (see "Commit often").
+  - Branches stay on this machine: nothing work-in-progress is pushed.
+  - When the work is done and the tests pass, squash it onto `main` as one commit that says what the whole change is: `git switch main`, `git merge --squash <branch>`, `git commit`. Then delete the branch.
+  - Pushing `main` publishes it, so ask the owner first.
+  - GitHub refuses force-pushes to `main` and its deletion (a repository ruleset).
+  - Sessions working in parallel each use their own branch, or their own worktree.
 - **Keep everything documented in detail.** Documentation is part of every change, never a follow-up. In the same commit as the code:
   - **`docs/architecture.md`**: components, processes, data flow, and *why* (link the spike that proved it).
   - **`docs/protocol.md`**: the exact wire format between the MCP server, the add-in and the watchdog. Every verb, its arguments, results and errors.
@@ -214,7 +221,7 @@ dotnet run --project tests/Vb6Mcp.Tests -- --cat Build,IDE,Launch
   - **`docs/spikes/NN-*.md`**: every experiment, including failures and surprises.
   - **Code comments explain *why***, especially VB6/Win32 quirks and the spike that found them. Public types and members in C# get XML doc comments.
   - **When behaviour changes, update the docs that describe it**, including PLAN.md and this file. Stale docs count as a bug.
-- **Commit often.** Small, working commits are preferred over large ones. Each commit does one thing and leaves the repo in a working state: it builds and the unit tests pass. A spike plus its write-up, or a single tool plus its tests, is a good commit size. Don't bundle unrelated changes.
+- **Commit often, on the branch.** Small, working commits are preferred on a branch. Each commit does one thing and leaves the branch in a working state: it builds and the unit tests pass. A spike plus its write-up, or a single tool plus its tests, is a good commit size. Don't bundle unrelated changes. On `main`, each commit is one squashed piece of work (see "Branches").
 - Phase 0 work goes in `spikes/`, with a write-up in `docs/spikes/NN-name.md` (what you tried, what happened, the decision) before production code depends on it.
 - When a finding contradicts PLAN.md, update PLAN.md in the same change.
 - Don't change `addin/compat/`, the add-in ProgID/CLSIDs, the discovery-file format or the wire protocol without calling it out. These break installed machines.

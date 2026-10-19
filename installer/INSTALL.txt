@@ -1,7 +1,10 @@
 vb6-mcp: lets AI agents (Claude Code) work inside the Visual Basic 6 IDE.
 
 REQUIREMENTS
-  - Windows 10/11 with Visual Basic 6.0 (SP6) installed.
+  - Windows 10 or later with the Visual Basic 6.0 IDE installed (tested: Windows 11, English VB6 SP6).
+    VB6 in another language and sources in a DBCS code page (Japanese, Chinese, Korean) aren't
+    supported yet: see the README's Requirements.
+  - Administrator rights for the install (one UAC prompt). VB6 doesn't have to run as administrator.
   - Claude Code (the "claude" command) for the automatic registration; otherwise register by hand (below).
   - No .NET installation is needed: vb6mcp.exe carries its own runtime.
 

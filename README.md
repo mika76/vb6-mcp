@@ -33,7 +33,8 @@ A typical session: `ide_list` (which IDEs and projects are open), `symbol_refs` 
 
 ## Limits
 
-- **Windows 10/11 only.** The server is .NET 10, which doesn't run on Windows 7. Running Claude on another machine is planned for v2 ([docs/roadmap.md](docs/roadmap.md)).
+- **Windows 10 or later.** The server is .NET 10, which doesn't run on Windows 7. Running Claude on another machine is planned for v2 ([docs/roadmap.md](docs/roadmap.md)).
+- **English VB6 and Windows-1252 sources** are assumed; see [Requirements](#requirements).
 - **Best in Claude Code; other agents work with less protection.** The server speaks plain MCP over stdio. GitHub Copilot CLI and OpenCode have been tested ([spike 40](docs/spikes/40-other-harnesses.md)): all 94 tools load, and `debug_eval`'s approval for side effects works there through MCP elicitation.
   - **Only in Claude Code:** the hook that stops an agent from editing VB6 files with its own edit tools (which can break their encoding and hidden lines) and asks before risky shell commands. Copilot edited a `.frm` with its built-in edit tool.
   - **The server instructions** don't reach the model in those clients by default. A line in your project's `AGENTS.md` telling the agent to use the vb6 tools for VB6 files helps.
@@ -45,9 +46,19 @@ A typical session: `ide_list` (which IDEs and projects are open), `symbol_refs` 
 
 ## Requirements
 
-- Windows 10/11, **Visual Basic 6.0 (SP6)**, normally run **as Administrator**
-- .NET 10 SDK (development only; the package needs no .NET)
-- Claude Code (desktop app or CLI)
+**Needed:**
+- **Windows 10 or later** (what .NET 10 runs on). The package carries its own runtime; the .NET 10 SDK is needed only to build from source.
+- **The Visual Basic 6.0 IDE on the same machine** as the agent.
+- **An interactive desktop session:** screenshots, dialogs and input into the running program need one. A Remote Desktop session works; a service or a locked session doesn't.
+- **An MCP client over stdio:** Claude Code (desktop app or CLI) is the main one, others work with less protection (see [Limits](#limits)).
+- **Administrator rights** only to install the package (one UAC prompt) and to register components. VB6 itself doesn't have to run as administrator ([Elevated or not?](#elevated-or-not)).
+
+**Tested on:** Windows 11 (64-bit, also over Remote Desktop), English VB6 SP6, with VB6 elevated and not elevated.
+
+**Known limits, not tested:**
+- **VB6 in another language:** some commands are found by their English menu captions (e.g. "Start With Full Compile"), so a localized VB6 will probably fail at those.
+- **Sources in a DBCS code page** (Japanese, Chinese, Korean): files are read and written as Windows-1252. The bytes on disk survive byte-exact, but non-ASCII text the agent reads or writes comes out wrong.
+- **Windows 10, 32-bit Windows, and VB6 before SP6** are expected to work, but nobody has tried them.
 
 ## License
 
@@ -137,6 +148,10 @@ From an **Administrator** PowerShell (building an ActiveX DLL registers it machi
   - installed: `& "${env:ProgramFiles(x86)}\vb6mcp\vb6mcp.exe" watchdog --stay`.
 
   It then keeps running with no VB6 open, and `ide_launch` starts elevated IDEs through it without a UAC prompt each time. Only one watchdog runs per user session: start it when none is running.
+
+  **Tray icon:** a running watchdog shows a "VB" tile in the notification area. A blue and yellow shield on it, and the tooltip, say it runs as administrator. Right-click it for **Open log**, **Restart as administrator** (only when it isn't elevated: a UAC prompt, then an elevated `--stay` watchdog takes over) and **Stop watchdog**. `--no-tray` starts it without the icon.
+
+  ![The watchdog's tray icon and menu: a plain "VB" tile when it isn't elevated (with Restart as administrator), and the tile with a shield when it runs as administrator](docs/media/watchdog-tray.png)
 
 **Restart VB6** (as Administrator): VB6 reads its add-in list only at startup. You should see a **"VB6 MCP" toolbar** showing `VB6 MCP <version> · built <time> · :<port> · <n> req`.
 

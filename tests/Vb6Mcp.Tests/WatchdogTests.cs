@@ -93,6 +93,21 @@ public static class WatchdogTests
         }
     }
 
+    /// <summary>The tray icons: 32x32, and the elevated one differs (the shield) so the state shows without hovering.</summary>
+    [Test]
+    public static void TrayIconsShowElevation()
+    {
+        using var plain = WatchdogTray.MakeIcon(false);
+        using var admin = WatchdogTray.MakeIcon(true);
+        using var a = plain.ToBitmap();
+        using var b = admin.ToBitmap();
+        Assert.True(a.Width == 32 && b.Height == 32, $"{a.Width}x{b.Height}");
+        // the shield's yellow half sits in the lower right corner
+        var px = b.GetPixel(27, 22);
+        Assert.True(px.R > 200 && px.G > 150 && px.B < 100, "yellow shield: " + px);
+        Assert.True(a.GetPixel(27, 22) != px, "no shield on the plain icon");
+    }
+
     /// <summary>The real action checks the file before starting anything elevated: absolute, no '..', .dll/.ocx, under the roots.</summary>
     [Test]
     public static void RegsvrChecksTheFile()

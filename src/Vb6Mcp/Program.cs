@@ -3,6 +3,7 @@
 //        vb6mcp watchdog    elevated sidecar, started by the VB6 add-in (PLAN.md §3.1)
 //        vb6mcp watchdog --stay   the same, started by the user (elevated) and kept running with no VB6, so sessions
 //                                 can start their own IDEs through it (ide_launch) without a UAC prompt each
+//        vb6mcp watchdog ... --no-tray   without the notification-area icon (WatchdogTray)
 //        vb6mcp hook        Claude Code PreToolUse hook: blocks Edit/Write on VB6 source files
 //        vb6mcp install-hook [settings.json] [--no-idle-timeout]  registers this exe as that hook and sets Claude Code's idle timeout (install scripts)
 //        vb6mcp uninstall-hook [settings.json] removes that hook again (used by uninstall.ps1)
@@ -22,7 +23,11 @@ public static class Program
     public static async Task<int> Main(string[] args)
     {
         string mode = args.Length > 0 ? args[0].ToLowerInvariant() : "mcp";
-        if (mode == "watchdog") return await WatchdogMainAsync(args.Skip(1).Any(x => x.Equals("--stay", StringComparison.OrdinalIgnoreCase)));
+        if (mode == "watchdog")
+        {
+            bool Flag(string f) => args.Skip(1).Any(x => x.Equals(f, StringComparison.OrdinalIgnoreCase));
+            return await WatchdogMainAsync(Flag("--stay"), tray: !Flag("--no-tray"), handover: Flag("--handover"));
+        }
         if (mode == "hook") return Hook.Run(Console.In, Console.Error);
         if (mode == "install-hook")
             return Hook.Install(args.Skip(1).FirstOrDefault(x => !x.StartsWith("--", StringComparison.Ordinal)) ?? Hook.UserSettingsPath, Environment.ProcessPath!, Console.Out,
@@ -108,7 +113,7 @@ public static class Program
     /// The add-in starts it with CreateProcess (not VB Shell, which blocked the IDE ~9 s, spike 12),
     /// so it inherits VB6's elevation without a UAC prompt and keeps running if VB6 crashes.
     /// </summary>
-    private static async Task<int> WatchdogMainAsync(bool stay)
+    private static async Task<int> WatchdogMainAsync(bool stay, bool tray, bool handover)
     {
         string baseDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "vb6mcp");
         Directory.CreateDirectory(baseDir);
@@ -116,6 +121,13 @@ public static class Program
         void Log(string m) => logWriter.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} [{Environment.ProcessId}] {m}");
 
         using var mutex = new Mutex(true, @"Local\VB6McpWatchdog", out bool first);
+        // --handover: started by "Restart as administrator" of the running watchdog, which stops once this one has
+        // started; take the mutex when it's gone (abandoned when its main thread ends, which still hands it over)
+        if (!first && handover)
+        {
+            try { first = mutex.WaitOne(TimeSpan.FromSeconds(20)); }
+            catch (AbandonedMutexException) { first = true; }
+        }
         if (!first) { Log("another watchdog is running; exiting"); return 0; }
         SetProcessDPIAware();                       // window rectangles and captures in physical pixels
 
@@ -164,11 +176,26 @@ public static class Program
                 try { await Task.Delay(2_000, cts.Token); } catch (OperationCanceledException) { }
             }
         });
+        // The tray icon (the user's view of it: running, elevated or not, Restart as administrator, Stop)
+        string logPath = Path.Combine(baseDir, "watchdog.log");
+        using var trayIcon = tray ? new WatchdogTray(actions.Elevated, stay, logPath, () => RestartElevated(Log), () => { Log("stopped from the tray"); cts.Cancel(); }) : null;
         Log($"watchdog {WatchdogHost.Version} started, elevated={actions.Elevated}, parent={actions.ParentPid}, exe={Environment.ProcessPath}{(stay ? ", --stay" : "")}");   // an elevated process's path is hidden from medium ones: log it (spike 26)
         await host.RunAsync(cts.Token);
         Log("watchdog stopped");
         GC.KeepAlive(mutex);
         return 0;
+    }
+
+    /// <summary>
+    /// "Restart as administrator": starts this exe as an elevated --stay watchdog through a UAC prompt (ShellExecute
+    /// runas). True when it started, and then this watchdog stops so the new one gets the mutex (--handover). A
+    /// declined prompt (ERROR_CANCELLED) keeps this one running.
+    /// </summary>
+    private static bool RestartElevated(Action<string> log)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!, "watchdog --stay --handover") { UseShellExecute = true, Verb = "runas" };
+        try { System.Diagnostics.Process.Start(psi); log("restarting as administrator (an elevated watchdog takes over)"); return true; }
+        catch (System.ComponentModel.Win32Exception ex) { log(ex.NativeErrorCode == 1223 ? "restart as administrator: the UAC prompt was declined" : "restart as administrator failed: " + ex.Message); return false; }
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool SetProcessDPIAware();

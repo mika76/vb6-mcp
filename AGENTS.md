@@ -203,6 +203,9 @@ dotnet run --project tests/Vb6Mcp.Tests -- --cat Build,IDE,Launch
 
 ## Workflow for agents
 
+- **Public repo.** This repository is public (MIT). The owner tests vb6-mcp on private production projects, and nothing about them goes into commits, commit messages, docs, tests or code comments: no project, form, module or control names, folder paths, database names or schemas, user names, or the company's own components. Write "a production project", "a real form", `D:\src\App`, `AppDb` instead, and keep test data generic.
+  - Notes from real use (what happened on which project) go to `notes/`, which is git-ignored and stays on the owner's machine. Docs refer to them as "notes from real use", without a link.
+  - On the owner's machine, local git hooks (`pre-commit`, `commit-msg`) refuse commits that name a private term. Don't work around them: reword the text, or move it to `notes/`.
 - **Keep everything documented in detail.** Documentation is part of every change, never a follow-up. In the same commit as the code:
   - **`docs/architecture.md`**: components, processes, data flow, and *why* (link the spike that proved it).
   - **`docs/protocol.md`**: the exact wire format between the MCP server, the add-in and the watchdog. Every verb, its arguments, results and errors.

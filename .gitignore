@@ -59,3 +59,8 @@ dist/
 
 # Benchmark runs: transcripts and raw results (the report goes to docs/benchmarks)
 bench/results/
+
+# Private notes and tooling of the owner (never published)
+notes/
+# The benchmark harness is wired to the owner's machine and projects
+bench/run-bench.ps1

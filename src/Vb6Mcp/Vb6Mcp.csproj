@@ -3,7 +3,7 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <AssemblyName>vb6mcp</AssemblyName>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <UseWindowsForms>true</UseWindowsForms>   <!-- the watchdog's tray icon (Windows Desktop SDK, principle 1) -->
   </PropertyGroup>
   <ItemGroup>

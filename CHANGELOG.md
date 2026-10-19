@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.1.0 (2026-10-19)
+
+New projects, VB6 without administrator rights, and a watchdog you can see. One new tool (`project_new`, 95 in all). Details per tool: [docs/tools.md](docs/tools.md).
+
+**Upgrading:** run `install.ps1` from the new package (roots are kept), then restart VB6 and Claude Code. The add-in reports version 1.1.0 and has two new verbs (`PRJNEW`, `PRJSAVEAS`); its ProgID, CLSIDs and the existing wire format are unchanged. A running `--stay` watchdog keeps the old version until you restart it.
+
+### New
+- **`project_new`** creates an EXE, ActiveX EXE, ActiveX DLL or ActiveX control project at a new `.vbp` path under the roots, also in an IDE with no project open. `project_save` takes `path` for a project that was never saved, such as the New Project chooser's `Project1` (spike 43). VB writes a new project's `.vbp` without its never-saved components, and still counts it as saved. So each component is saved first, and the server checks that the `.vbp` lists them all.
+- **VB6 without elevation is supported and tested** (spike 41): everything works except registering components, and the README's "Elevated or not?" table says what changes.
+- **Registration without an elevated VB6:** `com_register` / `com_unregister` run through an elevated VB6's add-in, else the elevated watchdog (no IDE needed), else with `elevate: true` through a UAC prompt you answer. Otherwise they refuse before running anything. `build_make` hands a build to an elevated watchdog when the running VB6 isn't elevated, so ActiveX builds still register.
+- **Watchdog tray icon:** a "VB" tile in the notification area, with a shield when the watchdog runs as administrator. Its menu has Open log, Restart as administrator and Stop watchdog; `--no-tray` leaves the icon out.
+
+### Fewer surprises
+- **Slow vs dead:** during calls longer than 5 s the server sends a progress heartbeat every 10 s, and the installers set Claude Code's idle timeout to 2 minutes. A frozen or dead server now shows up as an error within 2 minutes instead of a 30-minute wait (spike 42). After `server_restart`, new calls are refused at once with "restarting".
+- **A non-elevated VB6's startup dialogs** (another add-in's error before ours loads) are answered by the server itself.
+
+### Other agents
+- Tested in GitHub Copilot CLI and OpenCode (spike 40): all tools load. In clients other than Claude Code, `debug_eval`'s approval for side effects now asks through MCP elicitation, and is refused where the client can't ask. Before, such a client could run a side-effect expression with no prompt. The README lists what works where.
+
+### Docs
+- README: requirements as needed, tested on, and known untested limits (VB6 in another language, DBCS code pages); a screenshot of the tray icon.
+
 ## 1.0.0 (2026-10-19)
 
 The first public release. Nothing new to learn compared with 0.2.0: the same 94 tools, with the bugs and surprises found in six more benchmark tasks (T13-T18: a change shared by a DLL and two EXEs, debugging a reported wrong total, binary compatibility, a cause hidden in a compiled DLL, breakpoints, stepping) and in real use fixed. Every fix of the last round was re-tested in a live IDE. Details per tool: [docs/tools.md](docs/tools.md); what's next: [docs/roadmap.md](docs/roadmap.md).

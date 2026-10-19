@@ -64,7 +64,39 @@ public static class HookTests
             Hook.Install(settings, @"C:\a\vb6mcp.exe", TextWriter.Null);
             Hook.Uninstall(settings, TextWriter.Null);
             var root = JsonNode.Parse(File.ReadAllText(settings))!.AsObject();
-            Assert.True(!root.ContainsKey("hooks") && (string)root["model"]! == "x", root.ToJsonString());
+            Assert.True(!root.ContainsKey("hooks") && !root.ContainsKey("env") && (string)root["model"]! == "x", root.ToJsonString());
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    /// <summary>
+    /// Spike 42: the install sets Claude Code's idle timeout to 2 minutes, keeps a value the user chose, and the uninstall
+    /// removes only its own value; --no-idle-timeout leaves it alone.
+    /// </summary>
+    [Test]
+    public static void InstallSetsTheIdleTimeoutUnlessTheUserDid()
+    {
+        var dir = Directory.CreateTempSubdirectory("vb6mcp-hook-").FullName;
+        try
+        {
+            var settings = Path.Combine(dir, "settings.json");
+            File.WriteAllText(settings, """{"env":{"OTHER":"1"}}""");
+            Hook.Install(settings, @"C:\a\vb6mcp.exe", TextWriter.Null);
+            var env = JsonNode.Parse(File.ReadAllText(settings))!["env"]!;
+            Assert.Equal("120000", (string)env[Hook.IdleTimeoutVariable]!);
+            Assert.Equal("1", (string)env["OTHER"]!, "other variables kept");
+            Hook.Uninstall(settings, TextWriter.Null);
+            env = JsonNode.Parse(File.ReadAllText(settings))!["env"]!;
+            Assert.True(env[Hook.IdleTimeoutVariable] is null && (string)env["OTHER"]! == "1", env.ToJsonString());
+
+            File.WriteAllText(settings, """{"env":{"CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT":"600000"}}""");
+            Hook.Install(settings, @"C:\a\vb6mcp.exe", TextWriter.Null);
+            Hook.Uninstall(settings, TextWriter.Null);
+            Assert.Equal("600000", (string)JsonNode.Parse(File.ReadAllText(settings))!["env"]![Hook.IdleTimeoutVariable]!, "the user's value stays through install and uninstall");
+
+            File.WriteAllText(settings, "{}");
+            Hook.Install(settings, @"C:\a\vb6mcp.exe", TextWriter.Null, setIdleTimeout: false);
+            Assert.True(JsonNode.Parse(File.ReadAllText(settings))!["env"] is null, "--no-idle-timeout");
         }
         finally { Directory.Delete(dir, true); }
     }

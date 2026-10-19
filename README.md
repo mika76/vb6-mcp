@@ -97,7 +97,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Roots "D:\src;E
 - **Your part, without elevation:**
   - VB6's add-in entry (HKCU);
   - `claude mcp add --scope user vb6`;
-  - the Claude Code hook.
+  - the Claude Code hook;
+  - Claude Code's idle timeout for tool calls, set to 2 minutes (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` in `~/.claude/settings.json`; default 30 minutes), unless you set it already. A dead or frozen server then shows as an error within 2 minutes; slow vb6 calls send a heartbeat and keep running. It applies to all MCP servers; `-NoIdleTimeout` skips it.
 - **Then restart VB6 and Claude Code.**
 
 **Changing things later:**
@@ -218,6 +219,7 @@ Without `VB6MCP_LOG` the server logs to stderr, which only Claude Code's MCP log
 | "VB6 MCP Bridge" missing from Add-In Manager | Restart VB6 (list read at startup); re-run `scripts\register-addin.ps1` |
 | Tools say "no VB6 IDE with the vb6-mcp add-in is running" | Discovery files in `%LOCALAPPDATA%\vb6mcp\instances\`; is the add-in loaded? |
 | Tools say the IDE is busy | The debugged program is running a loop, or a dialog is open: `ide_status` |
+| A vb6 call seems stuck, or fails with "sent no response or progress" | The server process ended or froze (slow calls send a heartbeat every 10 s, so silence means trouble). Check that a `vb6mcp.exe` is running and the end of its log (`server.log`; each line starts with its pid), then reconnect the vb6 server or restart the session. After `server_restart`, wait for its answer before the next call (spike 42) |
 | Build fails with "Permission denied" | The add-in DLL is loaded in VB6: unload it first |
 | `vb6` isn't in the app's Connectors list | Expected: Connectors shows claude.ai account connectors and desktop extensions. Claude Code's own MCP servers (like `vb6`) are listed under `/mcp` in the session |
 | New tools don't show up after `install-server.ps1` | Ask the agent to call `server_restart`: the app starts the server again on the next vb6 call, from `build\server\current\` (the `/mcp` dialog has no Reconnect button for it). A session started before `install-server.ps1` used the fixed folder needs one restart first (PLAN.md E7) |

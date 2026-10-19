@@ -15,11 +15,12 @@
 #
 # -Roots: workspace folders for the disk tools (ws_projects, ws_file_projects, file_read), stored as
 # VB6MCP_ROOTS. Paths outside them are refused (AGENTS.md hard rule 8).
+# -NoIdleTimeout: don't set CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT (2 minutes) in Claude Code's settings env (spike 42).
 # -NoHook: don't register the Claude Code PreToolUse hook (it blocks Edit/Write on VB6 source files in
 # every project, so agents use the vb6 tools; registered in the user's ~/.claude/settings.json).
 # -EvalOpen: let debug_eval run expressions with side effects (database writes, Shell, files, registry...), flagged and
 # audited (VB6MCP_EVAL=open). By default they are refused (PLAN.md E5).
-param([string]$Name = 'vb6', [string[]]$Roots = @(), [switch]$NoHook, [switch]$EvalOpen)
+param([string]$Name = 'vb6', [string[]]$Roots = @(), [switch]$NoHook, [switch]$EvalOpen, [switch]$NoIdleTimeout)
 $ErrorActionPreference = 'Stop'
 $root    = Split-Path -Parent $PSScriptRoot
 $servers = Join-Path $root 'build\server'
@@ -92,5 +93,6 @@ Get-ChildItem $servers -Directory | Where-Object { $_.FullName -ne $out } | ForE
     try { Remove-Item -LiteralPath $old.FullName -Recurse -ErrorAction Stop; Write-Host "removed old install $($old.Name)" }
     catch { Write-Host "kept old install $($old.Name) (in use)" }
 }
-if (-not $NoHook) { & $exe install-hook }
+# the hook step also sets Claude Code's idle timeout to 2 minutes, unless set already or -NoIdleTimeout (spike 42)
+if (-not $NoHook) { if ($NoIdleTimeout) { & $exe install-hook --no-idle-timeout } else { & $exe install-hook } }
 Write-Host "Installed $exe as MCP server '$Name'. To use it: ask the agent to call server_restart (the next vb6 call starts the new build), or restart the Claude session."

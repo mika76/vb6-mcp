@@ -122,6 +122,11 @@ All 94 tools, generated from the server's tool list (`node scripts/tool-index.js
 
 **Modes:** reads work in **design, run and break** mode (spike 3: indexed VBIDE access). While the debugged program runs a loop, the add-in can't answer; tools then fail with *"VB6 (pid …) didn't answer … the IDE is busy or blocked"* after 5 s (hard rule 6). Use `ide_status` to see why.
 
+**Slow calls and a dead server** (spike 42):
+- **Heartbeat:** a call that runs longer than 5 s (`ide_launch`, builds, `app_wait`) sends MCP progress notifications every 10 s (`<tool>: still working (N s)`) when the client gave a `progressToken`. Claude Code and Copilot CLI do.
+- **Idle timeout:** Claude Code resets its idle timeout on each notification. The installers set that timeout to 2 minutes (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=120000`; default 30 minutes). A server that died or froze then shows up as "sent no response or progress for 120s" within 2 minutes, while slow calls keep running.
+- **Recovering:** after such an error, reconnect the vb6 server or restart the session.
+
 ---
 
 ## IDEs and sessions
@@ -232,6 +237,8 @@ Several IDEs always worked (a discovery file per pid, `pid` on every tool), but 
 **Arguments:** `confirm` (must be true).
 
 Answers, then ends the server process a second later (exit code 3), so a newly installed build can take over without restarting the Claude session. Calls still running then are finished first (at most 2 minutes): an `ide_launch` the client sent right after it was once cut off ("Connection closed") while VB6 had already started. IDEs, the watchdog and unsaved code are not touched. Not allowed in `batch_run`. Served by the server itself (`Program.cs`).
+
+**Wait for its answer before the next vb6 call** (spike 42): once `server_restart` has run, every new call is answered at once with "the vb6 server is restarting … call again in a few seconds", instead of going to the exiting process. In the incident that led to this, an `ide_launch` batched with the restart ran in the dying server; the call after it was never answered, and the session's vb6 connection didn't recover.
 
 What the desktop app does (tested 2026-10-17):
 - The MCP servers dialog never showed Reconnect: it kept saying "Connected · 90 tools" after the process ended.

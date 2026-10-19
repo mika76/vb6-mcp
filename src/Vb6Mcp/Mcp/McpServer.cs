@@ -168,18 +168,74 @@ public sealed class McpServer(TextReader input, TextWriter output, TextWriter lo
             case "tools/call":
                 var name = (string?)p?["name"] ?? "";
                 var args = p?["arguments"] as JsonObject ?? [];
+                // Spike 42: a call sent right after server_restart went to the exiting process, nothing answered it, and
+                // the client waited 30 minutes. Once restarting, every new call is answered at once, so none is left hanging.
+                if (Restarting)
+                    return Result(id, ToolResult.Fail("the vb6 server is restarting (server_restart) and takes no more calls; call again in a few seconds, when the client has started the new server").ToJson());
                 Interlocked.Increment(ref s_inFlight);
-                try
+                using (var beat = new CancellationTokenSource())
                 {
-                    var result = _tools.TryGetValue(name, out var tool)
-                        ? await tool.InvokeAsync(args, ct).ConfigureAwait(false)
-                        : ToolResult.Fail($"Unknown tool: {name}");
-                    return Result(id, result.ToJson());
+                    var heartbeat = p?["_meta"]?["progressToken"] is { } token ? HeartbeatAsync(token.DeepClone(), name, beat.Token) : Task.CompletedTask;
+                    try
+                    {
+                        var result = _tools.TryGetValue(name, out var tool)
+                            ? await tool.InvokeAsync(args, ct).ConfigureAwait(false)
+                            : ToolResult.Fail($"Unknown tool: {name}");
+                        return Result(id, result.ToJson());
+                    }
+                    finally
+                    {
+                        beat.Cancel();
+                        await heartbeat.ConfigureAwait(false);
+                        Interlocked.Decrement(ref s_inFlight);
+                    }
                 }
-                finally { Interlocked.Decrement(ref s_inFlight); }
             default:
                 return null;
         }
+    }
+
+    /// <summary>
+    /// Set by server_restart: the process ends as soon as running calls are done, and new calls are refused at once
+    /// (spike 42).
+    /// </summary>
+    public static volatile bool Restarting;
+
+    /// <summary>When the first heartbeat of a slow call goes out, and how often after that (tests shorten them).</summary>
+    public static TimeSpan HeartbeatAfter { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <inheritdoc cref="HeartbeatAfter"/>
+    public static TimeSpan HeartbeatEvery { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Progress notifications while a call runs (spike 42). Claude Code aborts a call whose server sends nothing for its
+    /// idle timeout (CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT, 30 minutes by default, 30 s at the least), and every progress
+    /// notification resets that timer. With a heartbeat every 10 s, the idle timeout can be short (the installers set
+    /// 2 minutes): a slow call (ide_launch, builds, app_wait) stays alive, and a dead or frozen server shows up as an
+    /// error within that time instead of a call that waits half an hour.
+    /// </summary>
+    private async Task HeartbeatAsync(JsonNode token, string tool, CancellationToken ct)
+    {
+        var started = DateTime.UtcNow;
+        try
+        {
+            await Task.Delay(HeartbeatAfter, ct).ConfigureAwait(false);
+            for (int n = 1; !ct.IsCancellationRequested; n++)
+            {
+                await SendAsync(new JsonObject
+                {
+                    ["jsonrpc"] = "2.0", ["method"] = "notifications/progress",
+                    ["params"] = new JsonObject
+                    {
+                        ["progressToken"] = token.DeepClone(), ["progress"] = n,
+                        ["message"] = $"{tool}: still working ({(int)(DateTime.UtcNow - started).TotalSeconds} s)",
+                    },
+                }).ConfigureAwait(false);
+                await Task.Delay(HeartbeatEvery, ct).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) { }       // the call finished
+        catch (IOException) { }                      // the client is gone; the call itself will notice
     }
 
     private async Task SendAsync(JsonObject reply)
@@ -197,7 +253,9 @@ public sealed class McpServer(TextReader input, TextWriter output, TextWriter lo
 
     private void Log(string message)
     {
-        lock (log) { log.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {message}"); log.Flush(); }
+        // the pid: several servers (one per Claude session) append to the same log, and without it their lines can't be
+        // told apart (spike 42: another session's requests were taken for this one's)
+        lock (log) { log.WriteLine($"{DateTime.Now:HH:mm:ss.fff} [{Environment.ProcessId}] {message}"); log.Flush(); }
     }
 
     /// <summary>

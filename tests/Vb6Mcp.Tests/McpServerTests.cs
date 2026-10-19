@@ -251,4 +251,50 @@ public static class McpServerTests
         public IdeWindowState ReadWindows(int pid) => new(pid, true, "Project1 - Microsoft Visual Basic [design]", IdeMode.Design, true, false, []);
         public AddinClient Client(InstanceInfo instance) => new(instance, TimeSpan.FromSeconds(2));
     }
+
+    /// <summary>
+    /// Spike 42: a slow call sends progress notifications with the client's token (Claude Code resets its idle timeout on
+    /// each), numbered upwards, and none once the result is out; a call without a token gets none.
+    /// </summary>
+    [Test]
+    public static async Task SlowCallsSendAHeartbeat()
+    {
+        var (after, every) = (McpServer.HeartbeatAfter, McpServer.HeartbeatEvery);
+        McpServer.HeartbeatAfter = TimeSpan.FromMilliseconds(50);
+        McpServer.HeartbeatEvery = TimeSpan.FromMilliseconds(100);
+        try
+        {
+            var slow = new Tool("slow", "", Schema.Object(), async (_, ct) => { await Task.Delay(450, ct); return ToolResult.Text("done"); });
+            var output = new StringWriter();
+            await new McpServer(new StringReader(
+                """{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow","arguments":{},"_meta":{"progressToken":"tok-7"}}}""" + "\n" +
+                """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow","arguments":{}}}""" + "\n"), output, TextWriter.Null, [slow]).RunAsync();
+            var lines = output.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => (JsonObject)JsonNode.Parse(l)!).ToList();
+            var beats = lines.Where(l => (string?)l["method"] == "notifications/progress").ToList();
+            Assert.True(beats.Count >= 3, $"heartbeats: {beats.Count}");
+            Assert.True(beats.All(b => (string?)b["params"]!["progressToken"] == "tok-7"), "the client's token, only for the call that sent one");
+            Assert.Equal(string.Join(",", Enumerable.Range(1, beats.Count)), string.Join(",", beats.Select(b => (int)b["params"]!["progress"]!)));
+            Assert.True(((string?)beats[0]["params"]!["message"])?.StartsWith("slow: still working") == true, beats[0].ToJsonString());
+            int result1 = lines.FindIndex(l => l["id"]?.ToJsonString() == "1");
+            Assert.True(result1 > lines.IndexOf(beats[^1]), "no heartbeat after the result");
+            Assert.True(lines.Any(l => l["id"]?.ToJsonString() == "2" && l["result"] is not null), "the call without a token answered");
+        }
+        finally { (McpServer.HeartbeatAfter, McpServer.HeartbeatEvery) = (after, every); }
+    }
+
+    /// <summary>Spike 42: once server_restart has run, a new call is answered at once with "restarting", not left to the exiting process.</summary>
+    [Test]
+    public static async Task CallsWhileRestartingAreRefusedAtOnce()
+    {
+        bool ran = false;
+        var tool = new Tool("ide_list", "", Schema.Object(), (_, _) => { ran = true; return Task.FromResult(ToolResult.Text("ok")); });
+        McpServer.Restarting = true;
+        try
+        {
+            var r = await Run([tool], """{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"ide_list","arguments":{}}}""");
+            var res = r["5"]["result"]!;
+            Assert.True((bool)res["isError"]! && ((string)res["content"]![0]!["text"]!).Contains("restarting") && !ran, res.ToJsonString());
+        }
+        finally { McpServer.Restarting = false; }
+    }
 }

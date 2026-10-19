@@ -21,6 +21,8 @@ param(
     [string[]]$Roots = @(),
     [string]$Name = 'vb6',
     [switch]$NoHook,
+    # don't set Claude Code's idle timeout (CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT, 2 minutes; spike 42)
+    [switch]$NoIdleTimeout,
     [switch]$NoClaude,
     # let debug_eval run expressions with side effects, flagged and audited (VB6MCP_EVAL=open); refused by default
     [switch]$EvalOpen,
@@ -164,7 +166,7 @@ if (-not $NoClaude) {
         Write-Warning "Claude Code CLI not found. Register the server yourself: claude mcp add --scope user $Name -- `"$exe`""
     }
 }
-if (-not $NoHook) { & $exe install-hook | ForEach-Object { Write-Output "  $_" } }
+if (-not $NoHook) { $hookArgs = @('install-hook'); if ($NoIdleTimeout) { $hookArgs += '--no-idle-timeout' }; & $exe @hookArgs | ForEach-Object { Write-Output "  $_" } }
 
 Write-Output ''
 Write-Output "vb6-mcp installed in $dest. Restart VB6 (the add-in loads at startup) and Claude Code (it starts the server)."

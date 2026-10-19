@@ -195,6 +195,11 @@ dotnet run --project tests/Vb6Mcp.Tests -- --cat Build,IDE,Launch
 - **Other add-ins can block VB6 startup** with a dialog before ours loads (spike 19: Visual Component Manager, "Method '~' of object '~' failed"). `ide_launch` reports it; the watchdog clicks it.
 - The watchdog is a child of whichever VB6 started it. Don't put it in a job object that kills children; it has to survive VB6 crashing.
 - **Restarting the server inside a session** (PLAN.md E7): after `server_restart` ends the process, the desktop app starts it again on the next tool call, from the command it read at session start (a new registration is ignored; the MCP dialog shows no Reconnect for it). That's why `install-server.ps1` installs into the fixed `build\server\current\` and renames files in use aside. The tool **list** isn't fetched again: changed tools work at once, new tools only appear after a session restart.
+  - **Never batch other vb6 calls with `server_restart`; wait for its answer.** On 2026-10-19 an `ide_launch` batched with it ran in the exiting server, and the session's vb6 connection never recovered. New calls are now refused with "restarting" (spike 42).
+- **Slow vs dead** (spike 42):
+  - **Idle timeout:** Claude Code aborts a call whose server sends nothing for `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`. The default is 30 minutes and the minimum 30 s. Every `notifications/progress` resets it.
+  - **Heartbeat:** the server sends one every 10 s during calls longer than 5 s, and the installers set the timeout to 2 minutes. A per-server `"timeout"` is a total limit that progress doesn't extend, so don't use it for vb6.
+  - **When a call is silent for ~30 s,** check from outside: is a `vb6mcp.exe` alive, the last lines of its log (each line carries the pid, since servers of all sessions share it), and the IDE's title.
 - **Claude Code loads MCP tools lazily** (`ToolSearch`), so an agent doesn't know the vb6 tools until it looks for them. The server's `instructions` (initialize result) tell it up front.
   - Without them, the benchmark agent tried Edit on VB6 files first (hook-blocked) and once rewrote a `.frm` through Python in Bash.
   - Keep the instructions short: they cost tokens on every request (docs/benchmarks).

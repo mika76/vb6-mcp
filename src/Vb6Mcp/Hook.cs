@@ -110,7 +110,7 @@ public static class Hook
     /// matcher <see cref="Matcher"/> running "&lt;exe&gt; hook". Other settings and other hooks are kept; a
     /// previous vb6mcp entry is replaced. A backup of the file is written first.
     /// </summary>
-    public static int Install(string settingsPath, string exe, TextWriter output)
+    public static int Install(string settingsPath, string exe, TextWriter output, bool setIdleTimeout = true)
     {
         JsonObject root;
         if (File.Exists(settingsPath))
@@ -130,10 +130,34 @@ public static class Hook
             ["matcher"] = Matcher,
             ["hooks"] = new JsonArray(new JsonObject { ["type"] = "command", ["command"] = $"\"{exe}\" hook" }),
         });
+        string? idleNote = setIdleTimeout ? SetIdleTimeout(root) : null;
         Directory.CreateDirectory(Path.GetDirectoryName(settingsPath)!);
         File.WriteAllText(settingsPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), new UTF8Encoding(false));
         output.WriteLine($"PreToolUse hook registered in {settingsPath}: \"{exe}\" hook");
+        if (idleNote is not null) output.WriteLine(idleNote);
         return 0;
+    }
+
+    /// <summary>The Claude Code setting for how long a tool call may stay silent (spike 42).</summary>
+    public const string IdleTimeoutVariable = "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT";
+
+    /// <summary>The value the installers set: 2 minutes, in milliseconds.</summary>
+    public const string IdleTimeoutValue = "120000";
+
+    /// <summary>
+    /// Spike 42: Claude Code aborts a tool call whose server sends nothing (no result, no progress) for this long; the
+    /// default is 30 minutes, so a dead server once kept a call waiting half an hour. The server sends a heartbeat every
+    /// 10 s during slow calls, so 2 minutes is plenty for vb6 and catches a dead or frozen server quickly. The setting is
+    /// global (every MCP server of the user), so a value the user set is kept.
+    /// </summary>
+    private static string SetIdleTimeout(JsonObject root)
+    {
+        var env = root["env"] as JsonObject ?? new JsonObject();
+        root["env"] = env;
+        if (env[IdleTimeoutVariable] is { } existing)
+            return $"{IdleTimeoutVariable} is already set ({existing.ToJsonString()} ms); kept";
+        env[IdleTimeoutVariable] = IdleTimeoutValue;
+        return $"{IdleTimeoutVariable}={IdleTimeoutValue} set in env: Claude Code now aborts a tool call of any MCP server that sends nothing for 2 minutes (default 30 minutes); vb6 sends a heartbeat during slow calls";
     }
 
     /// <summary>Removes our PreToolUse entry (any install folder) from a settings file; everything else is kept, a backup written.</summary>
@@ -148,6 +172,13 @@ public static class Hook
         foreach (var e in ours) pre.Remove(e);
         if (pre.Count == 0) root["hooks"]!.AsObject().Remove("PreToolUse");
         if (root["hooks"] is JsonObject h && h.Count == 0) root.Remove("hooks");
+        // the idle timeout the installer set (only our exact value: one the user chose stays)
+        if (root["env"] is JsonObject env && (string?)env[IdleTimeoutVariable] == IdleTimeoutValue)
+        {
+            env.Remove(IdleTimeoutVariable);
+            if (env.Count == 0) root.Remove("env");
+            output.WriteLine($"{IdleTimeoutVariable} removed");
+        }
         File.WriteAllText(settingsPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), new UTF8Encoding(false));
         output.WriteLine($"PreToolUse hook removed from {settingsPath}");
         return 0;

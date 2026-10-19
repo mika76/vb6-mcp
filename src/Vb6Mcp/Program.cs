@@ -4,7 +4,7 @@
 //        vb6mcp watchdog --stay   the same, started by the user (elevated) and kept running with no VB6, so sessions
 //                                 can start their own IDEs through it (ide_launch) without a UAC prompt each
 //        vb6mcp hook        Claude Code PreToolUse hook: blocks Edit/Write on VB6 source files
-//        vb6mcp install-hook <settings.json>   registers this exe as that hook (used by install-server.ps1)
+//        vb6mcp install-hook [settings.json] [--no-idle-timeout]  registers this exe as that hook and sets Claude Code's idle timeout (install scripts)
 //        vb6mcp uninstall-hook [settings.json] removes that hook again (used by uninstall.ps1)
 //        vb6mcp describe <file> [filter]       prints a typelib (DLL/OCX/TLB/OLB) as VB-like declarations
 //        vb6mcp windows <pid>                   prints the IDE's window tree (diagnosis)
@@ -24,7 +24,9 @@ public static class Program
         string mode = args.Length > 0 ? args[0].ToLowerInvariant() : "mcp";
         if (mode == "watchdog") return await WatchdogMainAsync(args.Skip(1).Any(x => x.Equals("--stay", StringComparison.OrdinalIgnoreCase)));
         if (mode == "hook") return Hook.Run(Console.In, Console.Error);
-        if (mode == "install-hook") return Hook.Install(args.Length > 1 ? args[1] : Hook.UserSettingsPath, Environment.ProcessPath!, Console.Out);
+        if (mode == "install-hook")
+            return Hook.Install(args.Skip(1).FirstOrDefault(x => !x.StartsWith("--", StringComparison.Ordinal)) ?? Hook.UserSettingsPath, Environment.ProcessPath!, Console.Out,
+                               setIdleTimeout: !args.Contains("--no-idle-timeout"));
         if (mode == "uninstall-hook") return Hook.Uninstall(args.Length > 1 ? args[1] : Hook.UserSettingsPath, Console.Out);
         if (mode == "windows" && args.Length > 1 && int.TryParse(args[1], out var wpid))
         {
@@ -73,7 +75,8 @@ public static class Program
         tools.Add(new Tool("server_restart",
             "End this vb6 MCP server process (after answering), e.g. after scripts\\install-server.ps1 installed a newer build. " +
             "The vb6 tools are then unavailable until the user reconnects the server (the MCP servers dialog, /mcp) or restarts the " +
-            "session. IDEs, the watchdog and unsaved code are not affected. Only when the user asks for it.",
+            "session. IDEs, the watchdog and unsaved code are not affected. Only when the user asks for it. Wait for its answer before " +
+            "the next vb6 call: calls that arrive while it ends are refused with 'restarting'.",
             Schema.Object(("confirm", "boolean", "Required: true.", true)),
             (a, _) =>
             {
@@ -81,6 +84,7 @@ public static class Program
                 // the next server of this session takes over this one's IDEs (improvement notes 53)
                 IReadOnlyList<int> handed;
                 try { handed = IdeOwnership.WriteHandover(IdeOwnership.SessionKey(), runs: ideTools.RunsStarted); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { handed = []; }
+                McpServer.Restarting = true;   // new calls get "restarting, call again" right away (spike 42)
                 log.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} server_restart: exiting pid {Environment.ProcessId}; handing over IDEs [{string.Join(", ", handed)}] (session {(IdeOwnership.SessionKey() is null ? "unknown" : "set")})");
                 // after the reply is written, and after any call that is still running (at most 2 minutes)
                 Task.Run(async () =>

@@ -51,8 +51,21 @@ public sealed partial class IdeTools(IIdeEnvironment env)
     /// <summary>VB6MCP_EVAL=open: debug_eval runs expressions with side effects (flagged, audited); by default it refuses them (PLAN.md E5).</summary>
     public bool EvalOpen { get; init; }
 
-    /// <summary>Whether the Claude Code hook guards debug_eval, so an allow_side_effect call was approved by the user (tests replace it).</summary>
+    /// <summary>Whether the Claude Code hook is installed and guards debug_eval (tests replace it). It counts only for Claude Code (spike 40).</summary>
     public Func<bool> EvalGuarded { get; init; } = () => Hook.GuardsEval();
+
+    /// <summary>The client's clientInfo.name (tests replace it).</summary>
+    public Func<string> EvalClientId { get; init; } = () => Mcp.McpServer.ClientId;
+
+    /// <summary>Whether the client offers form elicitation (tests replace it).</summary>
+    public Func<bool> EvalClientElicits { get; init; } = () => Mcp.McpServer.ClientElicits && Mcp.McpServer.Current is not null;
+
+    /// <summary>Sends elicitation/create (message, requestedSchema) and returns the client's result (tests replace it).</summary>
+    public Func<string, System.Text.Json.Nodes.JsonObject, CancellationToken, Task<System.Text.Json.Nodes.JsonObject>> EvalElicit { get; init; } =
+        (message, schema, ct) => Mcp.McpServer.Current!.ElicitAsync(message, schema, EvalElicitTimeout, ct);
+
+    /// <summary>How long the user has to answer the approval form; then it counts as declined.</summary>
+    public static readonly TimeSpan EvalElicitTimeout = TimeSpan.FromMinutes(5);
 
     private IdeOwner MyOwner() => IdeOwnership.Me(Mcp.McpServer.ClientName);
 

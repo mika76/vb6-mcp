@@ -408,6 +408,20 @@ The elevated sidecar (PLAN.md §3.1, spike 12) speaks the **same protocol**: fra
 - Otherwise the watchdog brings the IDE forward, attaching to the foreground thread's input as in spike 17. It **never attaches to a VB6 thread**. In the first live test the program's form was in front; attaching to its busy thread and calling `SetForegroundWindow` blocked the watchdog. The foreground change also runs on its own thread with a 1 s timeout.
 - Afterwards the previous foreground window is restored, unless it was VB6.
 
+## MCP side: requests the server sends to the client
+
+The MCP connection (stdio, JSON-RPC 2.0, one message per line; spike [1](spikes/01-mcp-handshake.md)) is client to server, with one exception. `debug_eval` asks the user through **elicitation** before it runs a side effect for a client other than Claude Code (spike [40](spikes/40-other-harnesses.md)):
+
+- From `initialize`, the server keeps `clientInfo.name` and whether `capabilities.elicitation` offers form mode: `{}` (2025-06-18, and "form" in 2025-11-25), or an object with a `form` key. A client offering only `url` counts as no elicitation.
+- Request, sent while the `tools/call` is still open. Ids are strings `vb6mcp-<n>`, so they can't clash with the client's ids:
+  ```json
+  {"jsonrpc":"2.0","id":"vb6mcp-1","method":"elicitation/create","params":{
+    "message":"An agent wants to run this in the VB6 IDE's Immediate window. ...\n\n? <expression>\n\nIt looks like it has a side effect (<category>). Run it?",
+    "requestedSchema":{"type":"object","properties":{"approve":{"type":"boolean","title":"Run it","description":"..."}},"required":["approve"]}}}
+  ```
+- Response: `{"jsonrpc":"2.0","id":"vb6mcp-1","result":{"action":"accept","content":{"approve":true}}}`. Any other `action` (`decline`, `cancel`), `approve` not `true`, a JSON-RPC error, or no response within 5 minutes refuses the expression.
+- A message without `method` is a response. It is matched to the waiting request by `id`; a response with an unknown id is logged and dropped. The read loop keeps reading while a tool waits, so `ping` and other calls are still answered.
+
 ## Versioning
 
 Breaking changes bump the magic (`VB6MCP2`) and the discovery `protocol` field. A server talking to an add-in with a different protocol version reports it and doesn't send requests.

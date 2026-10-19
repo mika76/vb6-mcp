@@ -590,7 +590,23 @@ VB6 has no debugger API. These tools run IDE commands (deferred in the add-in, p
 - **scripts and code:** `ScriptControl`, `.AddCode`/`.ExecuteStatement`, `CallByName`, the VBIDE object model;
 - **keystrokes and system:** `SendKeys`, `AppActivate`, `keybd_event`, `SendInput`, shutdown and privilege APIs.
 
-The refusal is audited and tells the agent to test through the program's UI. **Asking the user** (spike 33): with the vb6-mcp Claude Code hook installed (its matcher includes `mcp__vb6__debug_eval`), the agent can call again with `allow_side_effect: true`; the hook shows the user a permission prompt with the expression and what it does, and only an approved call reaches the server, which then runs it (audited as approved). Without the hook the flag is refused, since an agent could pass it itself; in headless runs nobody can approve, so it doesn't run. **`VB6MCP_EVAL=open`** (installers: `-EvalOpen`) lets such expressions run; the result then has `sideEffect` and a note to undo it, and `audit.log` gets a line before it. A guard rail, not a sandbox: a procedure of the project that writes (`UpdateCard(184)`) isn't recognised, since only the expression's text is checked. The agent's own shell commands are covered by the Claude Code hook (`ShellPolicy`, README). Reading the Immediate window uses the clipboard; the user's clipboard **text** is restored.
+The refusal is audited and tells the agent to test through the program's UI. **Asking the user** (spikes 33, 40): the agent can call again with `allow_side_effect: true`, and the user is asked by the client. Who asks depends on the client that connected (`clientInfo.name` and `capabilities` from `initialize`):
+- **Claude Code** (`claude-code`) with the vb6-mcp hook installed (its matcher includes `mcp__vb6__debug_eval`): the hook shows a permission prompt with the expression and what it does, and only an approved call reaches the server, which runs it. Audit: `approved by the user (Claude Code hook prompt)`.
+- **Any other client that offers form elicitation** (Copilot CLI, OpenCode, Codex; also Claude Code without the hook, if it ever offers it): the server sends `elicitation/create` with the expression, the matched category, and a form with one required boolean `approve`. It runs only on `accept` with `approve: true`; decline, cancel, an unticked box, an error, or no answer within 5 minutes refuse it ("refused: the side effect was not approved ..."). The agent never sees the form. Audit: `approved by the user (MCP elicitation in <client>)`, or `refused, not approved (MCP elicitation in <client>: <action>)`.
+- **Otherwise refused**, since an agent could pass the flag itself. Before spike 40 the hook check was about the machine, not the client: Copilot CLI on a machine with the hook installed ran a `CreateTextFile` with no prompt.
+
+**What the approval protects against, and what it doesn't:**
+- **The client's name is self-reported.** `clientInfo.name` is whatever the client sends. A client that calls itself `claude-code` gets the hook route, though only Claude Code runs the hook.
+  - Checked live (2026-10-19): on this machine, with the hook installed, a scripted client named `claude-code` ran a side effect with no prompt. The audit line claimed the hook's prompt.
+  - Real harnesses send their own name (`copilot-cli`, OpenCode, Codex), and the agent (the model) can't change it.
+- **What it stops:** an agent working through the vb6 tools running a side effect the user didn't approve. That covers accidents and over-eager agents, which is what the benchmarks showed: database writes through `debug_eval`.
+- **What it doesn't stop:** code running as the user. Two reasons:
+  - **Direct access to the add-in.** The elevated add-in serves any process that holds the token from the discovery file, and every process of the user can read that file. The side-effect check runs in the server, not in the add-in. So a program, or an agent with a shell in a harness without the Claude Code hook, can send Immediate input to the add-in directly.
+  - **Editing and running the project.** An agent can edit the project's code and start it (`code_replace_lines`, `run_start`). That code runs with the IDE's administrator rights, and no approval is asked.
+
+  Both follow from VB6 running as administrator (README, "Elevated or not?"). Run VB6 without elevation where you can.
+
+In headless runs nobody can approve, so it doesn't run: `claude -p` counts the hook's "ask" as denied, and `copilot -p` (even with `--allow-all-tools`) declines elicitation by itself. **`VB6MCP_EVAL=open`** (installers: `-EvalOpen`) lets such expressions run; the result then has `sideEffect` and a note to undo it, and `audit.log` gets a line before it. A guard rail, not a sandbox: a procedure of the project that writes (`UpdateCard(184)`) isn't recognised, since only the expression's text is checked. The agent's own shell commands are covered by the Claude Code hook (`ShellPolicy`, README). Reading the Immediate window uses the clipboard; the user's clipboard **text** is restored.
 
 **`syntax_check`** results:
 ```json
@@ -1427,6 +1443,7 @@ After a crash: `ide_launch` the project, then `recovery_list`, `recovery_read` a
 
 ## Change log
 
+- 2026-10-19: `debug_eval allow_side_effect` trusts the hook only for Claude Code; other clients are asked through MCP elicitation, or refused (spike 40).
 - 2026-10-18: IDE edits with `""` no longer fail after being applied; a failed edit says what state the module is in (improvement notes 29, 30).
 - 2026-10-17: `ide_dialog_respond repeat` (click through one load error per form, then sum up the load logs).
 - 2026-10-17: `ide_launch` reports load dialogs instead of failing while VB loads the project (spike 36).

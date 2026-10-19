@@ -52,6 +52,12 @@ The roots decide what the elevated side may build, register and load. With a use
 
 A development build (no `roots.txt` next to the DLL) keeps reading `%LOCALAPPDATA%\vb6mcp\roots.txt`.
 
+**What the token and the approvals don't do.** The token keeps other users and other machines out. It doesn't keep out processes of the same user: they can all read the discovery file, so any of them can talk to the elevated add-in.
+
+The verbs' path checks (roots) still apply to such a process. The Immediate verb (`IMM`), however, takes any single line, so the side-effect check of `debug_eval` and its approval (hook or MCP elicitation, by client name, which the client reports itself) only constrain agents that go through the server. On top of that, the project's own code runs elevated whenever the program is started from the IDE.
+
+So vb6-mcp guards against mistakes by agents using the tools, not against code running as the user. That limit comes from VB6 running as administrator (spike 40, docs/tools.md `debug_eval`).
+
 ## Components in `src/`
 
 ### `Vb6Mcp.Core`
@@ -92,7 +98,7 @@ A development build (no `roots.txt` next to the DLL) keeps reading `%LOCALAPPDAT
 
 | Type | What | Notes |
 |------|------|-------|
-| `Mcp.McpServer` | JSON-RPC loop, initialize/ping/tools | hand-written, no SDK (spike [1](spikes/01-mcp-handshake.md)); unknown methods → -32601 (the desktop client probes `server/discover`); requests handled concurrently |
+| `Mcp.McpServer` | JSON-RPC loop, initialize/ping/tools | hand-written, no SDK (spike [1](spikes/01-mcp-handshake.md)); unknown methods → -32601 (the desktop client probes `server/discover`); requests handled concurrently. Sends one request of its own, `elicitation/create` (`debug_eval` side effects for clients other than Claude Code, spike [40](spikes/40-other-harnesses.md)), and matches the responses by id. Keeps `clientInfo.name` and the elicitation capability from initialize |
 | `Mcp.Tool`, `ToolResult`, `Schema` | tool definitions and results | expected failures → `isError` results |
 | `Tools.IdeTools` | read tools (`IdeTools.cs`), editing tools (`IdeTools.Edit.cs`), `ide_launch` (`IdeTools.Launch.cs`: ShellExecute for auto/elevated, RunAsInvoker for normal), run/debug (`IdeTools.Debug.cs`: command, then observe mode/dialogs; tracks runs it started and breakpoints it toggled), inspection (`IdeTools.Inspect.cs`: locals via declarations + Immediate `TypeName`/`CStr`, call stack via the dialog, runtime errors), compiled programs (`IdeTools.Exe.cs`: `exe_run`/`exe_end`), the running program (`IdeTools.App.cs`: a `Target` is the IDE's program (input via the add-in) or an `exe_run` program (input via `LocalInput`); reads by the server, input and elevated screenshots through the add-in, effect verified afterwards) | [tools.md](tools.md); edits: module hash + old-text guard, design mode only |
 | `Tools.WorkspaceTools` | disk tools over `VB6MCP_ROOTS`: project map, file → projects, `file_read` (with "open in an IDE?" check), `file_replace_lines` (disk edit, header byte-exact via `VbSourceFile.ReplaceCode`; routed to the IDE when the file is open), `ws_affected` (rebuild order, with where each project is open); `WorkspaceTools.Com`: `com_describe/search/where`, `compat_status`, `com_register/unregister` (through the add-in's `REGSVR`, audited, verified in the registry) | paths outside the roots refused (hard rule 8) |

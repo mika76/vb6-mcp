@@ -20,5 +20,6 @@ Exit code 0 and, on stdout:
 
 - Shell commands `ShellPolicy` flags, and `debug_eval` calls with a side effect and `allow_side_effect: true`, get "ask". Edit/Write on VB6 source files stay refused (there is always a right tool for that).
 - The server runs a side-effect expression only with `allow_side_effect: true` **and** the hook installed in the user's settings with `mcp__vb6__debug_eval` in its matcher (`Hook.GuardsEval`). Without the hook an agent could pass the flag itself, so it is refused. `VB6MCP_EVAL=open` still allows everything without asking.
+  - **Changed 2026-10-19 (spike 40):** that check was about the machine, not the client, so other clients (which never run the hook) were trusted too. The hook now counts only when the client is Claude Code; other clients are asked through MCP elicitation, or refused.
 - The reason texts describe what the command does, since the user decides; they no longer say "blocked".
 - Text matching flags commands that only mention a pattern (an `echo` of SQL); with "ask" that costs one click, not a refusal.

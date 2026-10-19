@@ -41,8 +41,33 @@ public static class EvalPolicy
         return null;
     }
 
+    /// <summary>The clientInfo.name Claude Code sends in initialize (2.1.300, from the server log). Only Claude Code runs our hook.</summary>
+    public const string ClaudeCodeClient = "claude-code";
+
+    /// <summary>
+    /// How an allow_side_effect=true call can be approved by the user (spike 40). The Claude Code hook asks the user before
+    /// the call reaches us, but only Claude Code runs it: on a machine with the hook installed, Copilot CLI passed the flag and
+    /// its expression ran with no prompt. So the hook counts only for Claude Code; other clients are asked through MCP
+    /// elicitation when they offer it; anything else is refused.
+    /// </summary>
+    public static EvalApproval Approval(string clientId, bool hookInstalled, bool clientElicits) =>
+        clientId == ClaudeCodeClient && hookInstalled ? EvalApproval.Hook
+        : clientElicits ? EvalApproval.Elicitation
+        : EvalApproval.None;
+
+    /// <summary>
+    /// Whether an elicitation result approves: action "accept" with content.approve = true. The form has one required
+    /// boolean, so an accepted form whose box was left unticked is not an approval.
+    /// </summary>
+    public static bool Approves(System.Text.Json.Nodes.JsonObject? result) =>
+        (string?)result?["action"] == "accept"
+        && result["content"]?["approve"] is System.Text.Json.Nodes.JsonValue v && v.TryGetValue<bool>(out var b) && b;
+
     /// <summary>Kept for callers that only care about databases.</summary>
     public static string? DatabaseWrite(string expression) => SideEffect(expression) is { } s && s.StartsWith("database write", StringComparison.Ordinal) ? s : null;
 
     private static string Collapse(string s) => Regex.Replace(s.Trim(), @"\s+", " ");
 }
+
+/// <summary>Who asks the user before debug_eval runs a side effect: the Claude Code hook, the client through MCP elicitation, or nobody (refused).</summary>
+public enum EvalApproval { None, Hook, Elicitation }

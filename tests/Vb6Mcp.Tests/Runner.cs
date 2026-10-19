@@ -62,6 +62,12 @@ public static class Runner
             .OrderBy(t => t.Method.DeclaringType!.Name).ThenBy(t => t.Method.Name)
             .ToList();
 
+        // Tools write audit lines (input sent, side effects approved or refused). Tests must not put fake entries such
+        // as "side effect approved by the user" into the real %LOCALAPPDATA%\vb6mcp\audit.log, so every test run gets
+        // its own file (review of the spike 40 fix found the eval tests' lines there).
+        var audit = Path.Combine(Path.GetTempPath(), $"vb6mcp-tests-audit-{Environment.ProcessId}.log");
+        Vb6Mcp.Tools.Audit.LogPath = audit;
+
         int failed = 0;
         var total = Stopwatch.StartNew();
         foreach (var (method, category) in tests)
@@ -86,6 +92,7 @@ public static class Runner
             }
         }
         Console.WriteLine($"{tests.Count - failed}/{tests.Count} passed in {total.ElapsedMilliseconds} ms");
+        try { File.Delete(audit); } catch (IOException) { }
         return failed;
     }
 }

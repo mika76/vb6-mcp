@@ -185,6 +185,60 @@ public static class McpServerTests
         finally { File.Delete(vbp); }
     }
 
+    /// <summary>
+    /// The server's own request (elicitation/create, for debug_eval side effects, spike 40): a tool sends it in the middle of
+    /// a call, the read loop keeps going, and the client's response (a line without "method") completes it by id. The
+    /// initialize capabilities decide ClientElicits.
+    /// </summary>
+    [Test]
+    public static async Task ElicitationRequestGetsItsResponseById()
+    {
+        var tool = new Tool("ask", "", Schema.Object(), async (_, ct) =>
+        {
+            var answer = await McpServer.Current!.ElicitAsync("Run it?", new JsonObject { ["type"] = "object" }, TimeSpan.FromSeconds(10), ct);
+            return ToolResult.Text((string)answer["action"]!);
+        });
+        var input = new LineQueue();
+        var output = new LineQueue();
+        var run = new McpServer(input, output, TextWriter.Null, [tool]).RunAsync();
+        input.Add("""{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"elicitation":{"form":{},"url":{}}},"clientInfo":{"name":"test-client","version":"1"}}}""");
+        await output.NextAsync();
+        Assert.True(McpServer.ClientElicits && McpServer.ClientId == "test-client", McpServer.ClientName);
+        input.Add(Call(1, "ask", []));
+        var request = (JsonObject)JsonNode.Parse(await output.NextAsync())!;
+        Assert.Equal("elicitation/create", (string)request["method"]!);
+        Assert.Equal("Run it?", (string)request["params"]!["message"]!);
+        // the read loop still answers while the tool waits
+        input.Add("""{"jsonrpc":"2.0","id":2,"method":"ping"}""");
+        Assert.True((await output.NextAsync()).Contains("\"id\":2"), "ping answered meanwhile");
+        input.Add(new JsonObject { ["jsonrpc"] = "2.0", ["id"] = request["id"]!.DeepClone(), ["result"] = new JsonObject { ["action"] = "decline" } }.ToJsonString());
+        var reply = (JsonObject)JsonNode.Parse(await output.NextAsync())!;
+        Assert.Equal(1, (int)reply["id"]!);
+        Assert.Equal("decline", (string)reply["result"]!["content"]![0]!["text"]!);
+        // a client without elicitation
+        input.Add("""{"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"roots":{}},"clientInfo":{"name":"claude-code","version":"2.1.300"}}}""");
+        await output.NextAsync();
+        Assert.True(!McpServer.ClientElicits && McpServer.ClientId == "claude-code", McpServer.ClientName);
+        input.Complete();
+        await run;
+    }
+
+    /// <summary>A TextReader/TextWriter fed and read line by line from both ends, so a test can talk with a running server.</summary>
+    sealed class LineQueue : TextReader
+    {
+        readonly System.Threading.Channels.Channel<string?> _lines = System.Threading.Channels.Channel.CreateUnbounded<string?>();
+        public void Add(string? line) => _lines.Writer.TryWrite(line);
+        public void Complete() => Add(null);
+        public override async ValueTask<string?> ReadLineAsync(CancellationToken ct) => await _lines.Reader.ReadAsync(ct);
+        public async Task<string> NextAsync() => await _lines.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)) ?? "";
+        public static implicit operator TextWriter(LineQueue q) => new Writer(q);
+        sealed class Writer(LineQueue q) : TextWriter
+        {
+            public override System.Text.Encoding Encoding => System.Text.Encoding.UTF8;
+            public override Task WriteLineAsync(string? value) { q.Add(value); return Task.CompletedTask; }
+        }
+    }
+
     /// <summary>A tools/call request line.</summary>
     static string Call(int id, string tool, JsonObject args)
         => new JsonObject { ["jsonrpc"] = "2.0", ["id"] = id, ["method"] = "tools/call", ["params"] = new JsonObject { ["name"] = tool, ["arguments"] = args } }.ToJsonString();

@@ -292,18 +292,27 @@ public sealed partial class IdeTools
         // Side effects (database writes, processes, files, registry, network, scripts, keystrokes) are refused unless the
         // owner configured VB6MCP_EVAL=open: the IDE runs elevated, so this is code execution with admin rights (PLAN.md E5)
         var effect = EvalPolicy.SideEffect(expr);
-        // allow_side_effect is trusted only when the Claude Code hook guards debug_eval: then the user was asked (owner's choice,
-        // 2026-10-17: ask rather than refuse). Without the hook an agent could pass the flag itself, so it is refused.
-        bool approved = effect is not null && a.Bool("allow_side_effect") == true && EvalGuarded();
-        if (effect is not null && !EvalOpen && !approved)
+        // allow_side_effect needs the user's approval, and who asks depends on the client (spike 40): the Claude Code hook (owner's
+        // choice, 2026-10-17: ask rather than refuse) only for Claude Code, since other clients don't run it; other clients through
+        // MCP elicitation; without either it is refused, since an agent could pass the flag itself.
+        if (effect is not null && !EvalOpen)
         {
-            Audit.Write("debug_eval", inst.Pid, $"refused ({effect}): ? {expr}");
-            throw new ToolException($"refused: this expression looks like it has a side effect ({effect}). Prefer testing through the program's own UI (app_click, app_set_text). " +
-                (EvalGuarded()
-                    ? "If it is really needed, call again with allow_side_effect=true: the user is asked to approve it."
-                    : "Side effects need the user's approval, which needs the vb6-mcp Claude Code hook (install-server.ps1 / install.ps1 install it); or the owner sets VB6MCP_EVAL=open."));
+            var how = EvalPolicy.Approval(EvalClientId(), EvalGuarded(), EvalClientElicits());
+            if (how == EvalApproval.None || a.Bool("allow_side_effect") != true)
+            {
+                Audit.Write("debug_eval", inst.Pid, $"refused ({effect}): ? {expr}");
+                throw new ToolException($"refused: this expression looks like it has a side effect ({effect}). Prefer testing through the program's own UI (app_click, app_set_text). " +
+                    (how != EvalApproval.None
+                        ? "If it is really needed, call again with allow_side_effect=true: the user is asked to approve it."
+                        : "Side effects need the user's approval, which needs the vb6-mcp Claude Code hook (install-server.ps1 / install.ps1 install it) " +
+                          "or a client that can ask the user (MCP elicitation); or the owner sets VB6MCP_EVAL=open."));
+            }
+            if (how == EvalApproval.Elicitation) await AskToEvalAsync(inst, expr, effect, ct);
+            Audit.Write("debug_eval", inst.Pid, how == EvalApproval.Hook
+                ? $"side effect approved by the user (Claude Code hook prompt) ({effect}) follows"
+                : $"side effect approved by the user (MCP elicitation in {Mcp.McpServer.ClientName}) ({effect}) follows");
         }
-        if (effect is not null) Audit.Write("debug_eval", inst.Pid, $"side effect {(approved ? "approved by the user (hook prompt)" : "allowed by VB6MCP_EVAL=open")} ({effect}) follows");
+        else if (effect is not null) Audit.Write("debug_eval", inst.Pid, $"side effect allowed by VB6MCP_EVAL=open ({effect}) follows");
         var (status, result, w) = await EvaluateAsync(inst, expr, "debug_eval", ct);
         var effectNote = effect is null ? null : $"this had a side effect ({effect}); undo it when you are done (e.g. put data back), and mention it in your report";
         if (status == "dialog" && await CloseOwnCompileErrorAsync(inst, w!, ct) is { } compileError)
@@ -317,6 +326,43 @@ public sealed partial class IdeTools
             "dialog" => ToolResult.Ok(new { expression = expr, status, note = "evaluating showed a dialog (e.g. a runtime error); it was not answered", dialogs = Dialogs(w!) }),
             _ => ToolResult.Ok(new { expression = expr, status, note = $"no result after {CommandWait.TotalSeconds:0} s; check debug_immediate and ide_status" }),
         };
+    }
+
+    /// <summary>
+    /// Asks the user to approve a side effect through the client's own form (MCP elicitation). The agent doesn't see the form,
+    /// so it can't answer it; only "accept" with the box ticked runs the expression. Anything else (decline, cancel, an error,
+    /// no answer in <see cref="EvalElicitTimeout"/>) refuses it.
+    /// </summary>
+    private async Task AskToEvalAsync(InstanceInfo inst, string expr, string effect, CancellationToken ct)
+    {
+        var message = $"An agent wants to run this in the VB6 IDE's Immediate window. VB6 runs as administrator, so it runs with admin rights.\n\n? {expr}\n\n" +
+                      $"It looks like it has a side effect ({effect}). Run it?";
+        var schema = new System.Text.Json.Nodes.JsonObject
+        {
+            ["type"] = "object",
+            ["properties"] = new System.Text.Json.Nodes.JsonObject
+            {
+                ["approve"] = new System.Text.Json.Nodes.JsonObject
+                {
+                    ["type"] = "boolean", ["title"] = "Run it",
+                    ["description"] = "Tick to run the expression above in the elevated IDE.",
+                },
+            },
+            ["required"] = new System.Text.Json.Nodes.JsonArray("approve"),
+        };
+        System.Text.Json.Nodes.JsonObject answer;
+        try { answer = await EvalElicit(message, schema, ct); }
+        catch (Mcp.McpRequestException ex)
+        {
+            Audit.Write("debug_eval", inst.Pid, $"refused, no approval ({ex.Message}) ({effect}): ? {expr}");
+            throw new ToolException($"refused: the user couldn't be asked to approve the side effect ({effect}): {ex.Message}");
+        }
+        if (EvalPolicy.Approves(answer)) return;
+        // "not approved" rather than "declined by the user": Copilot CLI with -p (no user) answers decline by itself, within 1 ms
+        var action = (string?)answer["action"] ?? "?";
+        Audit.Write("debug_eval", inst.Pid, $"refused, not approved (MCP elicitation in {Mcp.McpServer.ClientName}: {action}) ({effect}): ? {expr}");
+        throw new ToolException($"refused: the side effect was not approved ({effect}; answer: {action}" +
+                                (action == "accept" ? ", the box wasn't ticked" : "") + "). Don't retry it; test through the program's own UI.");
     }
 
     /// <summary>

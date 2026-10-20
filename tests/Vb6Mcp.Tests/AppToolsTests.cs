@@ -7,6 +7,24 @@ namespace Vb6Mcp.Tests;
 public static class AppToolsTests
 {
     [Test]
+    public static void ScreenshotCropKeepsFullResolutionAndClipsToTheImage()
+    {
+        // improvement notes 48: only the part that matters, unscaled
+        using var bmp = new Bitmap(100, 50);
+        bmp.SetPixel(12, 7, Color.Red);
+        using (var part = Screenshots.Crop(bmp, 10, 5, 20, 10))
+        {
+            Assert.True(part is not null && part.Width == 20 && part.Height == 10, "20 x 10");
+            Assert.Equal(Color.Red.ToArgb(), part!.GetPixel(2, 2).ToArgb());
+        }
+        using (var edge = Screenshots.Crop(bmp, 90, 40, 30, 30))
+            Assert.True(edge is not null && edge.Width == 10 && edge.Height == 10, "clipped to the image");
+        Assert.True(Screenshots.Crop(bmp, 200, 0, 10, 10) is null, "outside: nothing");
+        using var round = Screenshots.FromPng(Screenshots.ToPng(bmp, 0));
+        Assert.Equal(Color.Red.ToArgb(), round.GetPixel(12, 7).ToArgb());
+    }
+
+    [Test]
     public static void ControlKindsFromWindowClasses()
     {
         Assert.Equal("CommandButton", AppWindows.Kind("ThunderCommandButton"));       // in the IDE

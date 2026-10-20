@@ -43,8 +43,9 @@ public sealed partial class IdeTools
             Args(), (a, _) => Task.FromResult(AppWindowsList(a))),
         new("app_tree",
             "Controls of a form of the running program: window handle, kind (CommandButton, TextBox, ...), text, position (relative to the " +
-            "form's client area), visible, enabled. Lightweight controls (Label, Image, Shape, Line) have no window and only show in app_screenshot.",
-            Args(("window", "string", WindowDesc, false)), (a, _) => Task.FromResult(AppTree(a))),
+            "form's client area), visible, enabled; list and combo boxes with their items (the first 20) and selection. Lightweight controls " +
+            "(Label, Image, Shape, Line) have no window and only show in app_screenshot.",
+            Args(("window", "string", WindowDesc, false)), (a, ct) => AppTreeAsync(a, ct)),
         new("app_click",
             "Click a command button, check box or option button of the running program. Address it by control (hex handle from app_tree) " +
             "or by text (its caption, optionally within window). Returns the state afterwards (mode, dialogs, windows). A control the user " +
@@ -103,9 +104,12 @@ public sealed partial class IdeTools
             (a, ct) => AppWaitAsync(a, ct)),
         new("app_screenshot",
             "Screenshot of a window as an image: a form or dialog of the running program (default), or the whole IDE (target 'ide'). " +
-            "Shows what app_tree can't: Labels, Images, drawing, layout. Works when the window is covered.",
+            "Shows what app_tree can't: Labels, Images, drawing, layout. Works when the window is covered. region or control returns only " +
+            "that part, at full resolution: fewer tokens for checking one control or a few pixels.",
             Args(("window", "string", WindowDesc + " Or 'ide' for the IDE main window.", false),
-                 ("max_width", "integer", "Scale down to at most this width (default 1024).", false)),
+                 ("max_width", "integer", "Scale down to at most this width (default 1024).", false),
+                 ("region", "object", "Only this part: {x, y, width, height} in the window's client coordinates (as app_tree and app_mouse use).", false),
+                 ("control", "string", "Only this control (hex handle from app_tree), with a few pixels around it.", false)),
             (a, ct) => AppScreenshotAsync(a, ct)),
     ];
 
@@ -124,13 +128,29 @@ public sealed partial class IdeTools
         });
     }
 
-    private ToolResult AppTree(JsonObject a)
+    /// <summary>Items app_tree shows per list or combo box; app_select reads all of them.</summary>
+    private const int TreeListItems = 20;
+
+    private async Task<ToolResult> AppTreeAsync(JsonObject a, CancellationToken ct)
     {
         var t = ResolveTarget(a);
         var form = ResolveWindow(t, a.Str("window"));
         var controls = AppWindows.Controls(form.Hwnd);
         // each text box's app_set_text index (reading order), so the agent doesn't count them in window order (T18)
         var textIndex = AppWindows.TextBoxes(form.Hwnd).Select((c, i) => (c.Hwnd, i)).ToDictionary(x => x.Hwnd, x => x.i);
+        // List and combo items (improvement notes 41: an event log in a ListBox showed as text ""). Read through the add-in
+        // for a program in the IDE (UIPI blocks LB_*/CB_* from the server), directly for a compiled one.
+        var lists = new Dictionary<long, (IReadOnlyList<string> Items, int Selected)>();
+        foreach (var c in controls.Where(c => c.Kind is "ListBox" or "ComboBox"))
+        {
+            try
+            {
+                var (_, items, selected) = t.Ide is { } inst ? await _env.Client(inst).ListStateAsync(c.Hwnd)
+                                                             : await Task.Run(() => LocalInput.ListState(c.Hwnd, c.Kind == "ComboBox"), ct);
+                lists[c.Hwnd] = (items, selected);
+            }
+            catch (Exception ex) when (ex is AddinErrorException or AddinBusyException or AddinUnreachableException or InvalidOperationException) { }
+        }
         return ToolResult.Ok(new
         {
             window = new { hwnd = Hex(form.Hwnd), form.Kind, form.Caption },
@@ -144,6 +164,12 @@ public sealed partial class IdeTools
                 if (!c.Visible) o["hidden"] = true;
                 if (c.Clipped is { } clip) o["clipped"] = clip;   // "partly" or "hidden": outside a container's visible area
                 if (!c.Enabled) o["disabled"] = true;
+                if (lists.TryGetValue(c.Hwnd, out var l))
+                {
+                    o["itemCount"] = l.Items.Count;
+                    o["items"] = new System.Text.Json.Nodes.JsonArray([.. l.Items.Take(TreeListItems).Select(i => (System.Text.Json.Nodes.JsonNode?)i)]);
+                    if (l.Selected >= 0) o["selected"] = l.Selected;
+                }
                 return o;
             }),
             note = "Labels, Images, Shapes and Lines have no window and aren't listed; use app_screenshot to see them",
@@ -533,6 +559,7 @@ public sealed partial class IdeTools
             caption = _env.ReadWindows(t.Pid).Title;
         }
         else { var w = ResolveWindow(t, which); hwnd = w.Hwnd; caption = w.Caption; }
+        var crop = CropOf(a, t, hwnd);
 
         string method;
         // a compiled EXE and a non-elevated IDE can be captured by the server; an elevated IDE can't (spike 15)
@@ -563,9 +590,28 @@ public sealed partial class IdeTools
             }
             else
             {
-                var viaWd = await SnapViaWatchdogAsync(hwnd, maxWidth, ct)
+                var viaWd = await SnapViaWatchdogAsync(hwnd, crop is null ? maxWidth : 0, ct)
                             ?? throw new ToolException("the IDE didn't produce the screenshot (busy or hung?) and " + NoWatchdog);
-                return ToolResult.Image(viaWd.Png, new { window = caption, hwnd = Hex(hwnd), method = viaWd.Method, clientOrigin = ClientOrigin(hwnd), note = CoordinatesNote });
+                if (crop is null)
+                    return ToolResult.Image(viaWd.Png, new { window = caption, hwnd = Hex(hwnd), method = viaWd.Method, clientOrigin = ClientOrigin(hwnd), note = CoordinatesNote });
+                bmp = Screenshots.FromPng(viaWd.Png);
+                method = viaWd.Method;
+            }
+        }
+        if (crop is { } cr)
+        {
+            // improvement notes 48: a 2-pixel caption colour or one text box's alignment meant reading the whole form
+            using var whole = bmp;
+            var (ox, oy) = AppWindows.ClientOffset(hwnd);
+            bmp = Screenshots.Crop(whole, cr.X + ox, cr.Y + oy, cr.Width, cr.Height)
+                  ?? throw new ToolException($"the region ({cr.X}, {cr.Y}, {cr.Width} x {cr.Height}) is outside the window's {whole.Width - ox} x {whole.Height - oy} client area");
+            using (bmp)
+            {
+                var png = Screenshots.ToPng(bmp, maxWidth);
+                double scale = maxWidth > 0 && bmp.Width > maxWidth ? (double)maxWidth / bmp.Width : 1;
+                return ToolResult.Image(png, new { window = caption, hwnd = Hex(hwnd), crop = new { x = cr.X, y = cr.Y, width = bmp.Width, height = bmp.Height }, method,
+                                                   imageScale = scale < 1 ? Math.Round(scale, 4) : (double?)null,
+                                                   note = "only this part of the window; for app_mouse use x = crop.x + image x / imageScale (same for y)" });
             }
         }
         using (bmp)
@@ -575,6 +621,25 @@ public sealed partial class IdeTools
             return ToolResult.Image(png, new { window = caption, hwnd = Hex(hwnd), width = bmp.Width, height = bmp.Height, method,
                                                clientOrigin = ClientOrigin(hwnd), imageScale = scale < 1 ? Math.Round(scale, 4) : (double?)null, note = CoordinatesNote });
         }
+    }
+
+    /// <summary>region or control as a rectangle in the window's client coordinates, or null for the whole window.</summary>
+    private static (int X, int Y, int Width, int Height)? CropOf(JsonObject a, Target t, long window)
+    {
+        if (a["region"] is JsonObject r)
+        {
+            int Need(string k) => r[k] is JsonValue v && v.TryGetValue(out int n) ? n : throw new ToolException($"region needs integer {k} (x, y, width, height in client coordinates)");
+            if (a.Str("control") is { Length: > 0 }) throw new ToolException("pass region or control, not both");
+            var (x, y, w, h) = (Need("x"), Need("y"), Need("width"), Need("height"));
+            if (w <= 0 || h <= 0) throw new ToolException("region width and height must be positive");
+            return (x, y, w, h);
+        }
+        if (a.Str("control") is not { Length: > 0 } hex) return null;
+        var c = FindControlByHandle(t, ParseHex(hex));
+        var (cx, cy, cw, ch) = AppWindows.RectInWindow(c.Hwnd, window);
+        var (ox, oy) = AppWindows.ClientOffset(window);
+        const int Margin = 4;   // the focus rectangle and a border drawn just outside the control
+        return (cx - ox - Margin, cy - oy - Margin, cw + 2 * Margin, ch + 2 * Margin);
     }
 
     // improvement notes 35: the image is the whole window, app_mouse takes client coordinates; a click read off the

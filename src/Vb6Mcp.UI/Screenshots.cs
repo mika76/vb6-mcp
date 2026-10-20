@@ -36,6 +36,21 @@ public static class Screenshots
         return new Bitmap(tmp);
     }
 
+    /// <summary>A PNG as a bitmap that doesn't depend on the stream (GDI+ keeps reading the stream of an Image).</summary>
+    public static Bitmap FromPng(byte[] png)
+    {
+        using var ms = new MemoryStream(png);
+        using var img = Image.FromStream(ms);
+        return new Bitmap(img);
+    }
+
+    /// <summary>The part of <paramref name="source"/> inside the rectangle, clipped to the image; null when nothing is left.</summary>
+    public static Bitmap? Crop(Bitmap source, int x, int y, int width, int height)
+    {
+        var r = Rectangle.Intersect(new Rectangle(x, y, width, height), new Rectangle(0, 0, source.Width, source.Height));
+        return r.Width <= 0 || r.Height <= 0 ? null : source.Clone(r, source.PixelFormat);
+    }
+
     /// <summary>PNG bytes, scaled down proportionally when wider than <paramref name="maxWidth"/>.</summary>
     public static byte[] ToPng(Bitmap source, int maxWidth)
     {

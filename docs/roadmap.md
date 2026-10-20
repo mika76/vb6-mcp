@@ -20,9 +20,7 @@ Version 1.0.0 (2026-10-19): 94 tools, everything in [PLAN.md](../PLAN.md) phases
 
 ### Agent abilities
 
-- ListBox/ComboBox items of the running program in `app_tree`.
 - UserControls by their VB name and type in `app_tree`, instead of `ThunderRT6UserControlDC`.
-- `app_screenshot` cropped to a region or control, and zoomed.
 - Designer vs running: the same form side by side, or a diff image, to find properties lost on load.
 - A warning before an edit about identifiers VB would re-case project-wide (VB keeps one spelling per name).
 - In-IDE compiles with other conditional constants (decided against for now; `project_settings` with `reopen` and `build_make defines` cover it).

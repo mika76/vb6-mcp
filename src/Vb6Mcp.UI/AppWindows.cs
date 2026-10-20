@@ -75,6 +75,14 @@ public static class AppWindows
         return SendMessageTimeout(new IntPtr(hwnd), msg, IntPtr.Zero, IntPtr.Zero, 2 /*SMTO_ABORTIFHUNG*/, 500, out var r) == IntPtr.Zero ? -1 : (int)r;
     }
 
+    /// <summary>Where <paramref name="control"/>'s window rectangle lies inside <paramref name="window"/>'s (both screen rectangles, so relative to the window's top-left corner).</summary>
+    public static (int X, int Y, int Width, int Height) RectInWindow(long control, long window)
+    {
+        GetWindowRect(new IntPtr(control), out var c);
+        GetWindowRect(new IntPtr(window), out var w);
+        return (c.L - w.L, c.T - w.T, c.R - c.L, c.B - c.T);
+    }
+
     /// <summary>Where a window's client area starts, relative to the window's top-left corner (title bar and border).</summary>
     public static (int X, int Y) ClientOffset(long hwnd)
     {

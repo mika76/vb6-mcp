@@ -56,7 +56,6 @@ public sealed partial class IdeTools
 
     private async Task<ToolResult> LaunchAsync(JsonObject a, CancellationToken ct)
     {
-        var exe = Vb6Install.FindExe() ?? throw new ToolException("VB6.EXE not found (registry ProductDir, .vbp association, default folder); set VB6MCP_VB6_EXE");
         var elevation = (a.Str("elevation") ?? "auto").ToLowerInvariant();
         if (elevation is not ("auto" or "elevated" or "normal")) throw new ToolException("elevation must be auto, elevated or normal");
 
@@ -89,6 +88,8 @@ public sealed partial class IdeTools
             }
         }
 
+        // looked up after the arguments are checked, so a mistake is named as such even where VB6 isn't installed (CI)
+        var exe = Vb6Install.FindExe() ?? throw new ToolException("VB6.EXE not found (registry ProductDir, .vbp association, default folder); set VB6MCP_VB6_EXE");
         var before = _env.Scan().Live.Select(i => i.Pid).ToHashSet();
         var vb6Before = Process.GetProcessesByName("VB6").Select(x => x.Id).ToHashSet();
         string via = "shell";

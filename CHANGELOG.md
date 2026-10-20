@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.2 (2026-10-20)
+
+A fix for the shell guard. Only `vb6mcp.exe` changed: the add-in is the same build as in 1.1.0 and still reports 1.1.0.
+
+**Upgrading:** run `install.ps1` from the new package. Restart a running `--stay` watchdog to get the fix. Claude Code runs the hook binary afresh on every call, so the new rules apply as soon as it is installed — but hook *configuration* is read when a session starts, so a session that opened before the hook was registered stays unguarded until it is restarted.
+
+- Shell guard: two shapes an agent reaches for naturally got past `ShellPolicy`, both found by replaying a real session's commands through `vb6mcp.exe hook`.
+  - A build whose executable sits in a variable and whose switch is an array element, as PowerShell usually writes it (`Start-Process -FilePath $exe -ArgumentList '/make','App.vbp'`, or `& $exe /make App.vbp`): the old rule wanted `vb6` and `/make` next to each other. A standalone `/make` now counts when the command also names a project file or VB6, so a `Start-Process` that merely mentions a `.vbp`, and a path that happens to contain "make", stay allowed.
+  - `unix2dos` / `dos2unix` / `todos` / `fromdos` / `flip` on a VB6 source, which rewrite the file in place. A `.vbp` rewritten with LF leaves VB6 unable to parse it: the project loses its references and the build fails with a misleading "User-defined type not defined" in an unrelated `.bas`. Only at a command position, because "flip" is an ordinary word.
+
 ## 1.1.1 (2026-10-19)
 
 A fix for the watchdog tray. Only `vb6mcp.exe` changed: the add-in is the same build as in 1.1.0 and still reports 1.1.0.

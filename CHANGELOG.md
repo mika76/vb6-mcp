@@ -1,8 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.2.0 (2026-10-20)
 
-Only `vb6mcp.exe` changes; the add-in is the same build.
+Two additions to the running-program tools. Only `vb6mcp.exe` changed: the add-in is the same build as in 1.1.0 and still reports 1.1.0.
+
+**Upgrading:** run `install.ps1` from the new package. Restart a running `--stay` watchdog so it runs the new build too.
 
 - `app_tree` lists the items of list and combo boxes: `itemCount`, the first 20 `items`, and `selected`. For a program in the IDE they're read through the add-in, because Windows blocks list messages from the non-elevated server. An event log kept in a ListBox used to show as `text: ""`.
 - `app_screenshot` takes `region` (client coordinates) or `control` (a handle from `app_tree`) and returns only that part, at full resolution, with `crop` for mapping image positions back to `app_mouse` coordinates. Checking a few pixels no longer means reading the whole form.

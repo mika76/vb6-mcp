@@ -394,6 +394,13 @@ public sealed class AddinClient(InstanceInfo instance, TimeSpan? timeout = null)
         if (r.Status == ResponseStatus.Error) throw new AddinErrorException(r.ErrorCode, r.ErrorMessage);
     }
 
+    /// <summary>
+    /// A check box's or option button's value, read by the add-in (UIPI blocks BM_GETCHECK from the server): 0 unchecked,
+    /// 1 checked, 2 grayed. Add-ins before 1.3 don't have the verb and answer 400 "unknown verb".
+    /// </summary>
+    public async Task<int> CheckStateAsync(long hwnd) =>
+        int.Parse(await SendAsync("CHECKSTATE", hwnd.ToString("X", CultureInfo.InvariantCulture)).ConfigureAwait(false), CultureInfo.InvariantCulture);
+
     /// <summary>Range and position of a scroll bar control (read by the add-in: UIPI blocks SBM_* messages from the server).</summary>
     public async Task<(int Min, int Max, int Pos)> ScrollPosAsync(long hwnd)
     {

@@ -459,6 +459,12 @@ Private Function AddKey(ins() As MOUSEIN, ByVal n As Long, ByVal vk As Long, ByV
     AddKey = n + 1
 End Function
 
+' Check box or option button of this process: BM_GETCHECK, 0 unchecked, 1 checked, 2 grayed.
+' Read in-process: UIPI blocks BM_* from the server, like LB_* (app_tree, app_click's change check).
+Public Function ButtonCheck(ByVal hWnd As Long) As Long
+    ButtonCheck = SendMessage(hWnd, &HF0, 0, 0)
+End Function
+
 ' List box or combo box of this process: kind US count US selected index (-1 none) US items (RS).
 ' Read in-process: UIPI blocks LB_*/CB_* from the server (spike 18).
 Public Function ListState(ByVal hWnd As Long, ByVal isCombo As Boolean) As String

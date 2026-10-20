@@ -41,6 +41,7 @@ Public Function Dispatch(ByVal verb As String, args() As String) As String
     Case "CALLSTACK":  NeedArgs args, 0, 0: Dispatch = QueueCallStack(): Exit Function
     Case "LISTITEMS":  NeedArgs args, 1, 1: payload = ListItems(args(0))
     Case "LISTSTATE":  NeedArgs args, 1, 1: payload = AppListState(args(0))
+    Case "CHECKSTATE": NeedArgs args, 1, 1: payload = AppCheckState(args(0))
     Case "MAKE":       NeedArgs args, 1, 2: payload = MakeProject(args(0), IIf(UBound(args) >= 1, args(UBound(args)), ""))
     Case "MAKESTATUS": NeedArgs args, 0, 0: payload = MakeStatus()
     Case "WRITES":     NeedArgs args, 1, 1: payload = WritesSince(CLng(Val(args(0))))
@@ -517,6 +518,17 @@ Private Function AppListState(ByVal hexHwnd As String) As String
     If cls = "" Then Err.Raise E_BADREQUEST, , "window " & hexHwnd & " doesn't belong to this IDE process"
     If InStr(1, cls, "ListBox", vbTextCompare) = 0 And InStr(1, cls, "ComboBox", vbTextCompare) = 0 Then Err.Raise E_BADREQUEST, , "window " & hexHwnd & " is a " & cls & ", not a list box or combo box"
     AppListState = ListState(h, InStr(1, cls, "ComboBox", vbTextCompare) > 0)
+End Function
+
+' args: hwnd of a check box or option button of this process -> 0 unchecked, 1 checked, 2 grayed.
+' Only reads (not deferred). UIPI blocks BM_GETCHECK from the server.
+Private Function AppCheckState(ByVal hexHwnd As String) As String
+    Dim h As Long, cls As String
+    h = HexToLong(hexHwnd)
+    cls = OwnWindowClass(h)
+    If cls = "" Then Err.Raise E_BADREQUEST, , "window " & hexHwnd & " doesn't belong to this IDE process"
+    If InStr(1, cls, "CheckBox", vbTextCompare) = 0 And InStr(1, cls, "OptionButton", vbTextCompare) = 0 Then Err.Raise E_BADREQUEST, , "window " & hexHwnd & " is a " & cls & ", not a check box or option button"
+    AppCheckState = CStr(ButtonCheck(h))
 End Function
 
 ' args: hwnd, index -> QUEUED. Deferred: the selection raises the control's Click (user code).

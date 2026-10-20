@@ -210,6 +210,10 @@ public sealed partial class IdeTools
             catch (Exception ex) when (ex is AddinErrorException or AddinBusyException or AddinUnreachableException or InvalidOperationException) { }
         }
         var (names, namesFrom) = await ControlNamesAsync(t, form.Hwnd, controls);
+        // check box / option button values: VB's Value, 0 unchecked, 1 checked, 2 grayed (a three-state check box)
+        var checks = new Dictionary<long, int>();
+        foreach (var c in controls.Where(c => c.Kind is "CheckBox" or "OptionButton"))
+            if ((t.Ide is { } ci ? await CheckValueAsync(ci, c.Hwnd) : AppWindows.CheckState(c.Hwnd) is var v and >= 0 ? v : null) is int value) checks[c.Hwnd] = value;
         return ToolResult.Ok(new
         {
             window = new { hwnd = Hex(form.Hwnd), form.Kind, form.Caption },
@@ -230,6 +234,7 @@ public sealed partial class IdeTools
                 if (!c.Visible) o["hidden"] = true;
                 if (c.Clipped is { } clip) o["clipped"] = clip;   // "partly" or "hidden": outside a container's visible area
                 if (!c.Enabled) o["disabled"] = true;
+                if (checks.TryGetValue(c.Hwnd, out var chk)) o["value"] = chk;
                 if (lists.TryGetValue(c.Hwnd, out var l))
                 {
                     o["itemCount"] = l.Items.Count;
@@ -282,7 +287,8 @@ public sealed partial class IdeTools
         // changed (windows, captions, texts, enabled/visible states, dialogs); a click can still have effects not seen here.
         return before.Length > 0 && await UiFingerprintAsync(t) == before
             ? result.With("changed", System.Text.Json.Nodes.JsonValue.Create(false))
-                    .With("verify", System.Text.Json.Nodes.JsonValue.Create("no change seen after the click: no window, text, enabled or visible state or list changed and no dialog appeared" + (t.IsIde ? " (check box states aren't compared for a program in the IDE). " : ". ") +
+                    .With("verify", System.Text.Json.Nodes.JsonValue.Create("no change seen after the click: no window, text, enabled or visible state, list or check box value changed and no dialog appeared" +
+                          (t.Ide is { } old && _noCheckState.Contains(old.Pid) ? " (this add-in can't read check box values: update it). " : ". ") +
                           "The click may have done nothing (form busy or wedged, handler empty) or something not shown in windows (a file, the database, Debug.Print): check app_screenshot or debug_immediate"))
             : result;
     }
@@ -784,13 +790,30 @@ public sealed partial class IdeTools
                     // read only for compiled programs, which run at the server's integrity.
                     if (c.Kind is "ListBox" or "ComboBox")
                         sb.Append('|').Append(t.Ide is { } inst ? await ListFingerprintAsync(inst, c.Hwnd) : AppWindows.ItemCount(c.Hwnd, c.Kind).ToString(CultureInfo.InvariantCulture));
-                    else if (c.Kind is "CheckBox" or "OptionButton" && !t.IsIde) sb.Append('|').Append(AppWindows.CheckState(c.Hwnd));
+                    else if (c.Kind is "CheckBox" or "OptionButton")
+                        sb.Append('|').Append(t.Ide is { } ide ? await CheckValueAsync(ide, c.Hwnd) : AppWindows.CheckState(c.Hwnd));
                     sb.Append('\n');
                 }
             }
             return sb.ToString();
         }
         catch (Exception ex) when (ex is ToolException or InvalidOperationException) { return ""; }
+    }
+
+    /// <summary>IDEs whose add-in has no CHECKSTATE verb (before 1.3): asked once, then skipped.</summary>
+    private readonly HashSet<int> _noCheckState = [];
+
+    /// <summary>A check box's value (0, 1, 2 grayed) in a program running in the IDE, or null when the add-in can't say.</summary>
+    private async Task<int?> CheckValueAsync(InstanceInfo inst, long hwnd)
+    {
+        lock (_noCheckState) if (_noCheckState.Contains(inst.Pid)) return null;
+        try { return await _env.Client(inst).CheckStateAsync(hwnd); }
+        catch (AddinErrorException ex) when (ex.AddinMessage.Contains("unknown verb", StringComparison.OrdinalIgnoreCase))
+        {
+            lock (_noCheckState) _noCheckState.Add(inst.Pid);
+            return null;
+        }
+        catch (Exception ex) when (ex is AddinErrorException or AddinBusyException or AddinUnreachableException or FormatException) { return null; }
     }
 
     private async Task<string> ListFingerprintAsync(InstanceInfo inst, long hwnd)

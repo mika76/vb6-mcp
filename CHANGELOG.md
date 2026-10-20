@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+The add-in changes too (1.3.0): it has a new read-only verb, `CHECKSTATE`. A new server works with an older add-in (check box values of a program in the IDE are then left out, and `app_click` says why); an older server doesn't use the verb.
+
+- `app_tree` shows `value` for check boxes and option buttons: 0 unchecked, 1 checked, 2 grayed. `app_click`'s change check compares it, so ticking a box counts as a change. For a program in the IDE the add-in reads it (`CHECKSTATE`), because Windows blocks the message from the non-elevated server.
 - `app_tree` names the controls of a form running in the IDE: `name` (with the index of a control-array element) and, for UserControls and other ActiveX controls, `type`. Every UserControl used to show only as `ThunderRT6UserControlDC`, so agents matched them by position. VBIDE can't read designers while the program runs, so the names come from the form's `.frm` on disk, matched by size and position (spike 44); `namesFrom` says which file. Controls that code moved at run time, and windows inside a UserControl, stay unnamed.
 - `code_replace_lines` says up front that VB may re-case names project-wide, so agents don't take it for a failed edit.
 - CI: GitHub Actions builds and runs the unit tests on every push to `main` and every pull request.

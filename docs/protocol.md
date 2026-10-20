@@ -276,6 +276,10 @@ Real mouse input with `SendInput`, for windowless controls (spike 17). Actions: 
 
 `MOUSERESTORE` puts the cursor and the saved foreground window back. Payload: `restored US outcome`. The outcome is that of the last deferred `MOUSEREAL`/`KEYSREAL`: `sent`, the reason it refused (front window, covered point, short `SendInput` count), or `not run`. The server always calls it about 500 ms after `MOUSEREAL`/`KEYSREAL`: VB processes the input only after the request returns, and the add-in never waits (hard rule 5).
 
+### `CHECKSTATE <hwnd>` (add-in 1.3)
+
+Reads a check box or option button of the IDE process in-process (UIPI blocks `BM_GETCHECK` from the server, as it does `LB_*`). Payload: `0` unchecked, `1` checked, `2` grayed (VB's `Value`). 400 for a window of another process or another class. Not deferred: it only reads. An add-in without the verb answers 400 "unknown verb"; the server then stops asking that IDE and says so in `app_click`'s change check.
+
 ### `LISTSTATE <hwnd>`, `SELECT <hwnd> <index>` (deferred)
 
 `LISTSTATE` reads a list box or combo box of the IDE process in-process (UIPI blocks `LB_*`/`CB_*` from the server). Payload: `kind US count US selected US items`, where `kind` is `list` or `combo`, `selected` is -1 for none, and the items are separated by RS.

@@ -88,7 +88,7 @@ dotnet run --project tests/Vb6Mcp.Tests -- --cat IDE   # needs a running IDE wit
 dotnet run --project tests/Vb6Mcp.Tests -- --all       # everything
 ```
 
-The test runner's exit code is the number of failed tests.
+The test runner's exit code is the number of failed tests. GitHub Actions builds and runs the unit tests on every push to `main` and every pull request ([ci.yml](.github/workflows/ci.yml)); the categories that need VB6 run only on a developer's machine.
 
 ## Install (users)
 

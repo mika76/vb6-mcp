@@ -1,0 +1,41 @@
+# Build and unit tests on every push to main and every pull request. The unit tests need neither VB6 nor elevation
+# (AGENTS.md "Test categories"); the Build, IDE and Launch categories need VB6 and run only on the owner's machine.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      DOTNET_NOLOGO: 1
+      # Everything is built for x86 (VB6 is 32-bit), so the test runner needs the 32-bit runtimes; the x64 SDK builds.
+      DOTNET_ROOT_X86: ${{ github.workspace }}\.dotnet-x86
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install the 32-bit .NET and Windows Desktop runtimes
+        shell: pwsh
+        run: |
+          $script = Join-Path $env:RUNNER_TEMP 'dotnet-install.ps1'
+          Invoke-WebRequest https://dot.net/v1/dotnet-install.ps1 -OutFile $script
+          & $script -Channel 10.0 -Runtime dotnet -Architecture x86 -InstallDir $env:DOTNET_ROOT_X86 -NoPath
+          & $script -Channel 10.0 -Runtime windowsdesktop -Architecture x86 -InstallDir $env:DOTNET_ROOT_X86 -NoPath
+
+      - name: Build
+        run: dotnet build vb6-mcp.slnx -c Debug
+
+      - name: Unit tests
+        run: dotnet run --project tests/Vb6Mcp.Tests

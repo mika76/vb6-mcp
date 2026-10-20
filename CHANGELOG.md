@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `app_tree` names the controls of a form running in the IDE: `name` (with the index of a control-array element) and, for UserControls and other ActiveX controls, `type`. Every UserControl used to show only as `ThunderRT6UserControlDC`, so agents matched them by position. VBIDE can't read designers while the program runs, so the names come from the form's `.frm` on disk, matched by size and position (spike 44); `namesFrom` says which file. Controls that code moved at run time, and windows inside a UserControl, stay unnamed.
+- `code_replace_lines` says up front that VB may re-case names project-wide, so agents don't take it for a failed edit.
+- CI: GitHub Actions builds and runs the unit tests on every push to `main` and every pull request.
+
 ## 1.2.0 (2026-10-20)
 
 Two additions to the running-program tools. Only `vb6mcp.exe` changed: the add-in is the same build as in 1.1.0 and still reports 1.1.0.

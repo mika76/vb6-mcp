@@ -20,9 +20,7 @@ Version 1.0.0 (2026-10-19): 94 tools, everything in [PLAN.md](../PLAN.md) phases
 
 ### Agent abilities
 
-- UserControls by their VB name and type in `app_tree`, instead of `ThunderRT6UserControlDC`.
 - Designer vs running: the same form side by side, or a diff image, to find properties lost on load.
-- A warning before an edit about identifiers VB would re-case project-wide (VB keeps one spelling per name).
 - In-IDE compiles with other conditional constants (decided against for now; `project_settings` with `reopen` and `build_make defines` cover it).
 - Replayable UI scripts (PLAN.md E6): a named, saved list of `app_*` steps with expected results, replayed in one call, so the same clicks can be re-run after every change and serve as regression tests for forms.
 

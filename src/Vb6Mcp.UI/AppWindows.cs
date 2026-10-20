@@ -83,6 +83,9 @@ public static class AppWindows
         return (c.L - w.L, c.T - w.T, c.R - c.L, c.B - c.T);
     }
 
+    /// <summary>Twips per pixel at the system DPI (15 at 96 DPI): how VB converts designer positions to pixels.</summary>
+    public static double TwipsPerPixel() => GetDpiForSystem() is var dpi and > 0 ? 1440.0 / dpi : 15;
+
     /// <summary>Where a window's client area starts, relative to the window's top-left corner (title bar and border).</summary>
     public static (int X, int Y) ClientOffset(long hwnd)
     {
@@ -233,6 +236,7 @@ public static class AppWindows
     [DllImport("user32.dll")] private static extern bool IsWindowEnabled(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
     [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr hwnd, out RECT r);
+    [DllImport("user32.dll")] private static extern uint GetDpiForSystem();
     [DllImport("user32.dll")] private static extern bool ClientToScreen(IntPtr hwnd, ref POINT p);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr hwnd, StringBuilder s, int n);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr hwnd, StringBuilder s, int n);

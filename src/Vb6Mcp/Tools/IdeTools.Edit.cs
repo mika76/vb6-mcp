@@ -31,7 +31,8 @@ public sealed partial class IdeTools
         new("code_replace_lines",
             "Replace lines of a component's code in the IDE (unsaved, undoable in VB6). count 0 inserts before start_line; " +
             "empty new_text deletes. Several ranges in one call: edits (all numbered against the text you read). Needs expected_hash " +
-            "from code_read/proc_get; design mode only. Returns the new hash. Mechanical renames: find/replace (preview first, then apply=true).",
+            "from code_read/proc_get; design mode only. Returns the new hash. Mechanical renames: find/replace (preview first, then apply=true). " +
+            "VB keeps one spelling per name project-wide, so it may re-case names in your text and in other modules: expected, not a failed edit.",
             FindReplace.WithSchema(EditList.WithSchema(Schema.Object(("component", "string", ComponentDesc, true), ("start_line", "integer", "First line to replace (1-based).", false),
                           ("count", "integer", "Number of lines to replace (0 = insert).", false), ("new_text", "string", "Replacement lines." + EditList.CodeRule, false),
                           ("edits", "array", EditList.Description, false),

@@ -128,6 +128,64 @@ public sealed partial class IdeTools
         });
     }
 
+    /// <summary>
+    /// The VB names of a running form's windows (improvement notes 42: every UserControl was "ThunderRT6UserControlDC",
+    /// matched by position by hand). VBIDE can't read designers in run mode (error 393), so the .frm files of the IDE's
+    /// projects are read from disk and matched by size and position (FrmDesign.Match); the form is the .frm that names the
+    /// most windows. A component with unsaved designer changes may not match; controls moved by code at run time don't.
+    /// Compiled programs (exe) aren't named: the server doesn't know their sources.
+    /// </summary>
+    private async Task<(Dictionary<long, Core.Files.FrmControl> Names, object? From)> ControlNamesAsync(Target t, long formHwnd, IReadOnlyList<AppControl> controls)
+    {
+        var none = (new Dictionary<long, Core.Files.FrmControl>(), (object?)null);
+        if (t.Ide is not { } inst || controls.Count == 0) return none;
+        var files = new List<(string Path, bool Dirty)>();
+        try
+        {
+            var client = _env.Client(inst);
+            foreach (var p in await client.ProjectsAsync())
+                foreach (var c in await client.ComponentsAsync(p.Name))
+                    if (c.FileName.EndsWith(".frm", StringComparison.OrdinalIgnoreCase)) files.Add((c.FileName, c.IsDirty));
+        }
+        catch (Exception ex) when (ex is AddinErrorException or AddinBusyException or AddinUnreachableException) { return none; }
+        // positions relative to the parent window, as the designer has them
+        var byHwnd = controls.ToDictionary(c => c.Hwnd);
+        var windows = controls.Select(c =>
+        {
+            var (px, py) = byHwnd.TryGetValue(c.Parent, out var p) ? (p.Left, p.Top) : (0, 0);
+            return new Core.Files.FrmDesign.Window(c.Hwnd, c.Parent, c.Left - px, c.Top - py, c.Width, c.Height);
+        }).ToList();
+        double tpp = AppWindows.TwipsPerPixel();
+        (Dictionary<long, Core.Files.FrmControl> Map, string Path, bool Dirty)? best = null;
+        foreach (var (path, dirty) in files)
+        {
+            if (FrmTree(path) is not { } tree) continue;
+            var map = Core.Files.FrmDesign.Match(tree, formHwnd, windows, tpp);
+            if (map.Count > (best?.Map.Count ?? 0)) best = (map, path, dirty);
+        }
+        if (best is not { } b) return none;
+        return (b.Map, new { file = b.Path, named = b.Map.Count, note = "names from the .frm on disk, matched by size and position" +
+            (b.Dirty ? "; the form has unsaved changes, which the file doesn't have yet" : "") });
+    }
+
+    private readonly Dictionary<string, (DateTime Stamp, Core.Files.FrmControl? Tree)> _frmCache = new(StringComparer.OrdinalIgnoreCase);
+
+    private Core.Files.FrmControl? FrmTree(string path)
+    {
+        try
+        {
+            var stamp = File.GetLastWriteTimeUtc(path);
+            lock (_frmCache)
+            {
+                if (_frmCache.TryGetValue(path, out var c) && c.Stamp == stamp) return c.Tree;
+                var tree = Core.Files.FrmDesign.Parse(Vb1252.Encoding.GetString(File.ReadAllBytes(path)));
+                _frmCache[path] = (stamp, tree);
+                return tree;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
+    }
+
     /// <summary>Items app_tree shows per list or combo box; app_select reads all of them.</summary>
     private const int TreeListItems = 20;
 
@@ -151,14 +209,22 @@ public sealed partial class IdeTools
             }
             catch (Exception ex) when (ex is AddinErrorException or AddinBusyException or AddinUnreachableException or InvalidOperationException) { }
         }
+        var (names, namesFrom) = await ControlNamesAsync(t, form.Hwnd, controls);
         return ToolResult.Ok(new
         {
             window = new { hwnd = Hex(form.Hwnd), form.Kind, form.Caption },
+            namesFrom,
             // Compact on purpose (token breakdown, docs/benchmarks): no window class (Kind comes from it), and hidden/disabled
             // only when true. app_tree was up to 8% of a run's re-read tokens.
             controls = controls.Select(c =>
             {
-                var o = new System.Text.Json.Nodes.JsonObject { ["hwnd"] = Hex(c.Hwnd), ["kind"] = c.Kind, ["text"] = c.Text, ["left"] = c.Left, ["top"] = c.Top, ["width"] = c.Width, ["height"] = c.Height };
+                var o = new System.Text.Json.Nodes.JsonObject { ["hwnd"] = Hex(c.Hwnd) };
+                if (names.TryGetValue(c.Hwnd, out var named))
+                {
+                    o["name"] = named.Name;
+                    if (named.IsActiveX) o["type"] = named.Class;   // VB.* is what kind already says
+                }
+                o["kind"] = c.Kind; o["text"] = c.Text; o["left"] = c.Left; o["top"] = c.Top; o["width"] = c.Width; o["height"] = c.Height;
                 if (textIndex.TryGetValue(c.Hwnd, out var ti)) { o["index"] = ti; if (AppWindows.IsReadOnly(c.Hwnd)) o["readOnly"] = true; }
                 if (c.Depth > 0) o["depth"] = c.Depth;
                 if (!c.Visible) o["hidden"] = true;

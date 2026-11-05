@@ -143,7 +143,7 @@ public sealed partial class IdeTools
     {
         var path = PathKey.Normalize(arg);
         if (!path.EndsWith(".vbp", StringComparison.OrdinalIgnoreCase)) throw new ToolException("path must be a .vbp file");
-        if (Roots.Count == 0 || !ProjectMap.IsUnderRoots(path, Roots)) throw new ToolException($"{path} is outside the workspace roots");
+        if (Roots.Count == 0 || !ProjectMap.IsUnderRoots(path, Roots)) throw OutsideRoots.Error(path, Roots);
         if (File.Exists(path)) throw new ToolException($"{path} already exists; open it with project_open");
         return path;
     }
@@ -311,7 +311,7 @@ public sealed partial class IdeTools
         {
             if (kind is not null || name is not null) throw new ToolException("pass either file, or kind and name");
             var path = PathKey.Normalize(file);
-            if (Roots.Count == 0 || !ProjectMap.IsUnderRoots(path, Roots)) throw new ToolException($"{path} is outside the workspace roots");
+            if (Roots.Count == 0 || !ProjectMap.IsUnderRoots(path, Roots)) throw OutsideRoots.Error(path, Roots);
             if (!File.Exists(path)) throw new ToolException("file not found: " + path);
             if (VbSourceFile.KindOf(path) is VbFileKind.Other) throw new ToolException("not a VB6 source file (.bas/.cls/.frm/.ctl/.pag/.dsr)");
             expected = VbSourceFile.Load(path).VbName ?? Path.GetFileNameWithoutExtension(path);
@@ -457,7 +457,7 @@ public sealed partial class IdeTools
     private async Task<ToolResult> ClosedProjectSettingsAsync(string vbp, IReadOnlyList<(string Key, string Value)> set)
     {
         if (!vbp.EndsWith(".vbp", StringComparison.OrdinalIgnoreCase)) throw new ToolException("path must be a .vbp file");
-        if (Roots.Count == 0 || !ProjectMap.IsUnderRoots(vbp, Roots)) throw new ToolException($"{vbp} is outside the workspace roots");
+        if (Roots.Count == 0 || !ProjectMap.IsUnderRoots(vbp, Roots)) throw OutsideRoots.Error(vbp, Roots);
         if (!File.Exists(vbp)) throw new ToolException("file not found: " + vbp);
         // hard rule 4: never write a file an IDE has loaded
         foreach (var inst in _env.Scan().Live)

@@ -1,4 +1,5 @@
 using System.Globalization;
+using Vb6Mcp.Core;
 using System.Text.Json.Nodes;
 using Vb6Mcp.Core.Bridge;
 using Vb6Mcp.Core.Protocol;
@@ -47,6 +48,11 @@ public sealed partial class IdeTools
             if (a.Bool("force") != true)
                 throw new ToolException($"VB6 {inst.Pid} isn't this session's (it didn't start or claim it): closing it could end the user's work. Pass force=true only if the user asked");
         var wd = Watchdog() ?? throw new ToolException(NoWatchdog + "; close VB6 yourself (File > Exit)");
+        // A watchdog that isn't elevated can't close an elevated VB6: Windows drops its WM_CLOSE without an error (spike 10),
+        // and the tool used to wait 15 s and say "still-running" (live test 2026-11-05). Say so before discarding anything.
+        if (Vb6Install.IsElevated(inst.Pid) == true && _env.FindWatchdog() is { } wdInfo && Vb6Install.IsElevated(wdInfo.Pid) == false)
+            throw new ToolException($"VB6 {inst.Pid} runs elevated but the watchdog (pid {wdInfo.Pid}) doesn't, and Windows drops its close message; " +
+                                    "close VB6 yourself (File > Exit), or restart the watchdog elevated (its tray menu: Restart as administrator)");
         var client = _env.Client(inst);
         var unsaved = new List<string>();
         var projects = await client.ProjectsAsync();

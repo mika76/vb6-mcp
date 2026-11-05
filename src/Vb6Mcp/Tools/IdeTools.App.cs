@@ -761,7 +761,7 @@ public sealed partial class IdeTools
         var windows = AppWindows.List(t.Pid);
         if (windows.Count == 0)
             throw new ToolException(t.IsIde
-                ? $"the program has no visible windows (IDE mode: {Mode(_env.ReadWindows(t.Pid).Mode)}; start it with run_start)"
+                ? $"the program has no visible windows (IDE mode: {Mode(_env.ReadWindows(t.Pid).Mode)}; start it with run_start). For the IDE itself: window='ide'"
                 : $"{Path.GetFileName(t.Exe)} has no visible windows (yet)");
         if (which is { Length: > 0 })
         {
@@ -852,7 +852,10 @@ public sealed partial class IdeTools
         {
             var w = _env.ReadWindows(t.Pid);
             if (w.Mode != IdeMode.Run)
-                throw new ToolException($"the IDE is in {Mode(w.Mode)} mode; the program must be running (run_start, or run_continue from break)");
+                // say what does work in this mode: an agent read this as "the IDE can't be inspected" and spent a session on
+                // screen coordinates testing an add-in (notes from real use, 2026-11-05)
+                throw new ToolException($"the IDE is in {Mode(w.Mode)} mode; this tool acts on the running program, so start it (run_start, or run_continue from break). " +
+                    "To see the IDE itself in any mode (menus, tool windows, an add-in's UI): app_screenshot window='ide'; its dialogs: ide_status, ide_dialog_respond");
             if (!allowDialogTarget && w.Dialogs.Count > 0)
                 throw new ToolException($"a dialog is open ('{w.Dialogs[0].Caption}'); answer it first (ide_dialog_respond)");
         }

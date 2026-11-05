@@ -123,7 +123,7 @@ public sealed partial class IdeTools
         // Closed project: /make through an add-in (elevated child), roots checked here and in the add-in
         if (Roots.Count == 0) throw new ToolException("no workspace roots are configured (VB6MCP_ROOTS); build_make only builds projects under them");
         if (!Roots.Any(r => PathKey.Key(path!).StartsWith(PathKey.Key(r).TrimEnd('\\') + "\\", StringComparison.Ordinal)))
-            throw new ToolException($"{path} isn't under the workspace roots ({string.Join("; ", Roots)})");
+            throw OutsideRoots.Error(path!, Roots);
         if (!File.Exists(path)) throw new ToolException("file not found: " + path);
         // The elevated build is started by an IDE's add-in, or, with no IDE running, by the elevated watchdog (PLAN.md D1).
         // Starting VB6.EXE from here would show a UAC prompt (spike 2), so without either there is no build.

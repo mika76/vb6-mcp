@@ -165,7 +165,7 @@ public sealed partial class IdeTools
         if (!value.StartsWith("@picture:", StringComparison.Ordinal) || value.Length <= 9) return value;
         // the picture file is read by the elevated IDE: same roots rule as every other path (hard rule 8); the add-in checks again
         var pic = PathKey.Normalize(value[9..]);
-        if (Roots.Count == 0 || !ProjectMap.IsUnderRoots(pic, Roots)) throw new ToolException($"{pic} is outside the workspace roots");
+        if (Roots.Count == 0 || !ProjectMap.IsUnderRoots(pic, Roots)) throw OutsideRoots.Error(pic, Roots);
         if (!File.Exists(pic)) throw new ToolException("picture not found: " + pic);
         return "@picture:" + pic;
     }

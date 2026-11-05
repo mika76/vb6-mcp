@@ -8,6 +8,11 @@ The add-in changes too (1.3.0): it has a new read-only verb, `CHECKSTATE`. A new
 - `app_tree` names the controls of a form running in the IDE: `name` (with the index of a control-array element) and, for UserControls and other ActiveX controls, `type`. Every UserControl used to show only as `ThunderRT6UserControlDC`, so agents matched them by position. VBIDE can't read designers while the program runs, so the names come from the form's `.frm` on disk, matched by size and position (spike 44); `namesFrom` says which file. Controls that code moved at run time, and windows inside a UserControl, stay unnamed.
 - `code_replace_lines` says up front that VB may re-case names project-wide, so agents don't take it for a failed edit.
 - CI: GitHub Actions builds and runs the unit tests on every push to `main` and every pull request.
+- `ide_launch elevation=elevated` no longer goes through a watchdog that isn't elevated. That watchdog started VB6 at its own level, so the result said `elevated: false` and nothing prompted. Now it shows the UAC prompt (or uses an elevated watchdog), and a result whose IDE still isn't elevated has a `warning`.
+- `ide_quit` on an elevated VB6 with a watchdog that isn't elevated says so at once and how to close it. Windows drops that watchdog's close message, so it used to wait 15 s and report `still-running`.
+- The `app_*` refusal in design mode names what works in that mode: `app_screenshot window='ide'` shows the whole IDE, add-in UI included, and `ide_status` its dialogs. An agent testing an add-in took the old message to mean the IDE can't be inspected at all.
+- A path outside the workspace roots is refused with the way to add the folder (`install.ps1 -Roots`, or `install-server.ps1 -Roots` in development), the same text from every tool.
+- docs/tools.md: the sync engine makes an IDE follow outside file changes (unlike stock VB6); `markedChangedByRun` happens on some runs, not every one; which tools check the workspace roots; `app_screenshot window='ide'` for add-in development. README: building VB6 from PowerShell and Git Bash.
 
 ## 1.2.0 (2026-10-20)
 

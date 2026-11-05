@@ -195,7 +195,7 @@ public static class DebugToolsTests
         Assert.True(r.IsError && r.Text.Contains("no workspace roots"), r.Text);
         var rooted = new IdeTools(new FakeDebugIde.Env(ide)) { Roots = [@"D:\nowhere"] }.All();
         r = await Call(rooted, "exe_run", new JsonObject { ["path"] = @"C:\Windows\notepad.exe" });
-        Assert.True(r.IsError && r.Text.Contains("isn't under the workspace roots"), r.Text);
+        Assert.True(r.IsError && r.Text.Contains("is outside the workspace roots") && r.Text.Contains("-Roots"), r.Text);
         r = await Call(rooted, "app_click", new JsonObject { ["exe"] = Environment.ProcessId, ["text"] = "OK" });
         Assert.True(r.IsError && r.Text.Contains("wasn't started with exe_run"), r.Text);
     }

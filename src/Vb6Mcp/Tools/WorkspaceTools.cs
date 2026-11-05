@@ -385,6 +385,6 @@ public sealed partial class WorkspaceTools(IIdeEnvironment env, IReadOnlyList<st
         if (roots.Count == 0)
             throw new ToolException("no workspace roots configured: set VB6MCP_ROOTS (semicolon-separated folders)");
         if (!ProjectMap.IsUnderRoots(path, roots))
-            throw new ToolException($"{path} is outside the workspace roots ({string.Join("; ", roots)})");
+            throw OutsideRoots.Error(path, roots);
     }
 }

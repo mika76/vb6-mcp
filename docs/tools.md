@@ -188,8 +188,8 @@ Start a new VB6 IDE.
 
 | `elevation` | How | Notes |
 |---|---|---|
-| `auto` | ShellExecute: Windows applies the machine's configuration | UAC prompt if VB6 is configured to elevate |
-| `elevated` | ShellExecute with verb `runas` | always a UAC prompt (until the watchdog can start it without one, Phase 2b) |
+| `auto` | the watchdog when one runs (VB6 gets the watchdog's level), else ShellExecute: Windows applies the machine's configuration | UAC prompt if VB6 is configured to elevate |
+| `elevated` | an **elevated** watchdog (no prompt), else ShellExecute with verb `runas` | a UAC prompt unless an elevated watchdog runs. A watchdog that isn't elevated starts VB6 at its own level, so it isn't used for `elevated` (it was until 2026-11-05: the result said `elevated: false` under `elevation: "elevated"`). If the IDE still isn't elevated, the result has a `warning` |
 | `normal` | CreateProcess with `__COMPAT_LAYER=RunAsInvoker` | fails with an explanation where the machine forces elevation |
 
 **Behaviour:**
@@ -269,7 +269,7 @@ When an IDE this server saw running has crashed (its discovery file is left behi
 
 **Served by:** add-in `COMPONENTS`.
 
-**`markedChangedByRun`** (spike 32): running the program in the IDE marks the forms it loaded as changed, though nothing changed (saving writes identical bytes). When a run was started through this server (`run_start`, a step or run-to-cursor from design mode, `syntax_check`) and the IDE is back in design mode, `project_components`, `run_end` and `syntax_check` list the components that became dirty only during that run and whose code equals the file: `{components: ["P.frmMain", ...], note}` with the `project_save components=[...]` call that clears them (only those files, not the `.vbp`). Never saved automatically (hard rule 4). `build_make`'s "unsaved changes" refusal names them too. Both T12 rerun agents saved, tested the running program and left exactly such forms behind, so the build from disk refused.
+**`markedChangedByRun`** (spike 32): running the program in the IDE **can** mark the forms it loaded as changed, though nothing changed (saving writes identical bytes). It doesn't happen on every run: on one small fixture, four runs left the form clean, and another run of the same kind marked it with no designer window open (notes from real use, 2026-11-05). What triggers it hasn't been narrowed down, so after a run check `dirty` instead of assuming either way. The server only lists components that were clean before the run and dirty after it; don't filter the flag yourself by comparing `code_read` to the file: for a `.frm` that compares the code only, so a form with unsaved layout changes would look unchanged. When a run was started through this server (`run_start`, a step or run-to-cursor from design mode, `syntax_check`) and the IDE is back in design mode, `project_components`, `run_end` and `syntax_check` list the components that became dirty only during that run and whose code equals the file: `{components: ["P.frmMain", ...], note}` with the `project_save components=[...]` call that clears them (only those files, not the `.vbp`). Never saved automatically (hard rule 4). `build_make`'s "unsaved changes" refusal names them too. Both T12 rerun agents saved, tested the running program and left exactly such forms behind, so the build from disk refused.
 - **`designerOpen`** (improvement notes 46): the listed components whose designer window is open, found by its caption: `frmSlide (Form)` when maximized (spike 28), `Ui - frmSlide (Form)` when not (live re-test 2026-10-19). A form the run didn't load was once listed, and its designer was open: VB probably re-initialises the UserControls of open designers when the mode changes. That cause isn't confirmed live yet, so the result only names them and the note says why they may be there.
 
 **Result:**
@@ -826,9 +826,12 @@ By default the keys are posted, and modifiers are set in the program's key state
 - When VB6 is elevated, the add-in captures it in-process (protocol `SNAP`), and the server waits up to 5 s for the file.
 - Covered windows are captured too.
 - The result adds `clientOrigin {x, y}`, the offset of the window's client area inside the image, and `imageScale` when the image was downscaled (`max_width`). `app_mouse` takes client coordinates: `(image x - clientOrigin.x) / imageScale` (improvement notes 35).
-- With `window: "ide"` it captures the whole IDE main window. Crop from that for IDE panes: `PrintWindow` on child panes is misaligned (spike 15).
+- With `window: "ide"` it captures the whole IDE main window, **in any mode** (design, run, break). Crop from that for IDE panes: `PrintWindow` on child panes is misaligned (spike 15).
+  - It shows everything in the frame: menus and toolbars, docked tool windows, and an add-in's own UI (its menu, docked windows). This is the way to check an add-in you are developing: `PrintWindow` works on a covered window, raises nothing and doesn't take the focus, unlike desktop screenshots. Dialogs (an add-in's MsgBox too) come with their text from `ide_status` and `ide_dialog_respond`.
+  - Without `window`, the tool captures the running program's form, so in design mode it is refused. Pass `window: "ide"` explicitly.
+  - The `app_*` input tools act on the running program only; there is no tool to click IDE menus or toolbars (notes from real use, 2026-11-05).
 
-Errors: `the IDE is in design mode; the program must be running` (input tools), `no window 'X'. Open: ...`, `no button ... captioned 'X'`, `N controls are captioned 'X'; pass control`, `'X' is disabled`, `control 1A2B is a CommandButton, not a text box`, and the add-in's 400 when the handle isn't a window of the IDE process.
+Errors: `the IDE is in design mode; this tool acts on the running program, so start it ...` (input tools; it also names `app_screenshot window='ide'` and `ide_status` for looking at the IDE itself), `no window 'X'. Open: ...`, `no button ... captioned 'X'`, `N controls are captioned 'X'; pass control`, `'X' is disabled`, `control 1A2B is a CommandButton, not a text box`, and the add-in's 400 when the handle isn't a window of the IDE process.
 
 ---
 
@@ -1261,6 +1264,8 @@ The watchdog's sync engine checks the files of every loaded project every 2 seco
 - **Component with unsaved IDE changes:** a **conflict**. Nothing is touched; it is resolved with the tools below.
 - **`.vbp` changed, file deleted:** reported only. Reloading a project is disruptive and left to the user.
 
+**An IDE with vb6-mcp doesn't behave like stock VB6 here.** Stock VB6 reads a source file when the project opens and never looks again, so after a `git checkout` it keeps the old text. With the watchdog running, a clean component follows the file within seconds (`sync_status` shows `kind: "reloaded"`). So vb6-mcp can't be used to show or test VB6's own staleness: a test that expects the IDE to keep the old text after an outside change gets the wrong answer while the watchdog runs (notes from real use, 2026-11-05: a session building a feature that works around that staleness couldn't reproduce it). The sync engine runs in the watchdog, which the add-in starts, so it is normally running whenever the add-in is loaded.
+
 | Tool | Arguments | What it does |
 |------|-----------|--------------|
 | `sync_status` | `pid?` | conflicts (`pid`, `project`, `component`, `file`, `detected`) and the last 30 events (`reloaded`, `pending`, `conflict`, `resolved`, `not-reloaded`, `project-changed`, `deleted`) |
@@ -1282,6 +1287,8 @@ A conflict ends by itself when the component has no unsaved changes any more: af
 ## Workspace (disk)
 
 Disk is the secondary channel (principle 4). These tools work on the **workspace roots** configured in `VB6MCP_ROOTS` (semicolon-separated folders; set by `scripts\install-server.ps1 -Roots`). Paths outside the roots are refused (hard rule 8); without roots the tools explain how to configure them.
+
+**Which tools check the roots.** The roots guard what touches disk, builds or registers: the disk tools here (`file_read`, `file_replace_lines`, `ws_*`, `symbol_refs`, `form_resources`, `res_read`), `build_make` for closed projects, `exe_run`, `project_new`, `project_add_component file=`, `project_settings` on a closed project, `project_rollback`, `@picture:` paths, `refs_add file=` and `com_register`/`com_unregister`. Tools that act on what an IDE already has loaded don't check them: `ide_launch`, `project_open`, `code_*`, `proc_*`, `project_components`, debugging and `app_*`. So a project outside the roots can be opened, edited in the IDE, debugged and photographed, but its files can't be read from disk or built with `/make`. The refusal names the way to add a folder to the roots (`install.ps1 -Roots` or, in development, `install-server.ps1 -Roots`); copying VB6 files in through the shell gets around the hook and isn't a supported way.
 
 **Served by:** `vb6mcp.exe` itself (`Vb6Mcp.Core.Files`), no add-in needed, except `file_read`'s "is it open in an IDE?" check.
 
@@ -1452,7 +1459,7 @@ The elevated watchdog (`vb6mcp watchdog`, started by the add-in; PLAN.md §3.1) 
 | Tool | Arguments | What it does |
 |------|-----------|--------------|
 | `ide_kill` | `force` (required true), `pid?` | ends a hung VB6 through the watchdog. The result lists the recovery copies of that IDE with their age. Killed in run or break mode, it also lists `comLeftovers`: `.vbp` files whose classes stay registered to the VB6 debugger until VB6 next starts (spike 25; repair with `com_orphans`) |
-| `ide_quit` | `discard?`, `force?`, `pid?` | closes VB6 normally (PLAN.md C7): `WM_CLOSE` through the watchdog (`QUIT`; a non-elevated post is refused, spike 10). Only an IDE this session owns (`ide_launch` / `ide_claim`), otherwise `force: true`. Design mode. Refused while anything is unsaved, listing it, unless `discard: true`: each project with unsaved changes is first closed through `project_close discard` (files snapshotted and restored, spike 31). Waits up to 15 s for the process to exit, then drops the owner file. `status`: `quit`, `dialog` (another add-in or a prompt; not answered), `still-running`, `not-quit` (a discard didn't finish) |
+| `ide_quit` | `discard?`, `force?`, `pid?` | closes VB6 normally (PLAN.md C7): `WM_CLOSE` through the watchdog (`QUIT`; a non-elevated post is refused, spike 10). Refused up front when VB6 is elevated and the watchdog isn't: Windows drops that watchdog's close message without an error, so it used to wait out the 15 s (live test 2026-11-05). Only an IDE this session owns (`ide_launch` / `ide_claim`), otherwise `force: true`. Design mode. Refused while anything is unsaved, listing it, unless `discard: true`: each project with unsaved changes is first closed through `project_close discard` (files snapshotted and restored, spike 31). Waits up to 15 s for the process to exit, then drops the owner file. `status`: `quit`, `dialog` (another add-in or a prompt; not answered), `still-running`, `not-quit` (a discard didn't finish) |
 | `recovery_list` | `from_pid?` | recovery sessions: pid, `running`, `crashed`, projects, and per component when it was copied |
 | `recovery_read` | `from_pid`, `component`, `project?` | the copied text, and whether it differs from the file on disk |
 | `recovery_restore` | `from_pid`, `component`, `project?`, `pid?` (target) | replaces the code of the component **with the same file** in an open project of a running IDE (design mode). The component is left unsaved |

@@ -94,8 +94,11 @@ public sealed partial class IdeTools
         var vb6Before = Process.GetProcessesByName("VB6").Select(x => x.Id).ToHashSet();
         string via = "shell";
         Audit.Write("ide_launch", 0, $"{exe} elevation={elevation} project={project ?? "(none)"}");
-        // An elevated watchdog starts VB6 elevated without a UAC prompt (spike 12b)
-        if (elevation != "normal" && _env.FindWatchdog() is { } wdInfo)
+        // An elevated watchdog starts VB6 elevated without a UAC prompt (spike 12b). The watchdog starts VB6 at its own
+        // level, so for 'elevated' only an elevated one will do: a non-elevated watchdog started VB6 non-elevated and the
+        // result said elevated:false under elevation:'elevated' (notes from real use, 2026-11-05). Then the shell's
+        // "runas" prompts instead.
+        if (elevation != "normal" && _env.FindWatchdog() is { } wdInfo && (elevation == "auto" || Vb6Install.IsElevated(wdInfo.Pid) == true))
         {
             var r = await _env.Client(wdInfo).SendRawAsync("LAUNCH", [project ?? ""], ct);
             if (r.Status == Core.Protocol.ResponseStatus.Ok) via = "watchdog (no UAC prompt)";
@@ -171,9 +174,14 @@ public sealed partial class IdeTools
             await Task.Delay(500, ct);
         }
         if (w.Dialogs.Count == 0) w = await SettleAsync(inst2.Pid, ct);   // the New Project chooser came after the result (notes 31)
+        var elevated = Vb6Install.IsElevated(inst2.Pid);
         return ToolResult.Ok(new
         {
-            status = "started", pid = inst2.Pid, owner = "you", elevated = Vb6Install.IsElevated(inst2.Pid), elevation, exe, via,
+            status = "started", pid = inst2.Pid, owner = "you", elevated, elevation, exe, via,
+            // never let a downgrade pass as success: a non-elevated IDE can't register what it builds
+            warning = elevation == "elevated" && elevated == false
+                ? "elevation 'elevated' was asked for, but this IDE is NOT elevated; builds from it can't register DLLs/OCXs. Quit it (ide_quit) and check why"
+                : null,
             // the shell start includes the time the UAC prompt was up; seconds is until the add-in answered
             startSeconds, seconds = Math.Round(clock.Elapsed.TotalSeconds, 1),
             mode = w.Mode.ToString().ToLowerInvariant(), title = w.Title,

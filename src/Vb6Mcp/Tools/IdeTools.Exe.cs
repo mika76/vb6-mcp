@@ -44,7 +44,7 @@ public sealed partial class IdeTools
         if (!path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) throw new ToolException("path must be an .exe");
         if (Roots.Count == 0) throw new ToolException("no workspace roots are configured (VB6MCP_ROOTS); exe_run only starts programs under them");
         if (!Roots.Any(r => PathKey.Key(path).StartsWith(PathKey.Key(r).TrimEnd('\\') + "\\", StringComparison.Ordinal)))
-            throw new ToolException($"{path} isn't under the workspace roots ({string.Join("; ", Roots)})");
+            throw OutsideRoots.Error(path!, Roots);
         if (!File.Exists(path)) throw new ToolException("file not found: " + path);
 
         var psi = new ProcessStartInfo(path) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(path)! };

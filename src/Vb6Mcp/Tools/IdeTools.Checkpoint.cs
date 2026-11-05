@@ -124,7 +124,7 @@ public sealed partial class IdeTools
         // every file it writes must be under the roots (hard rule 8)
         if (Roots.Count == 0) throw new ToolException($"{vbp} is outside the workspace roots (none are configured)");
         if (cp.Files.FirstOrDefault(f => !ProjectMap.IsUnderRoots(f.Path, Roots)) is { } outside)
-            throw new ToolException($"{outside.Path} is outside the workspace roots");
+            throw OutsideRoots.Error(outside.Path, Roots);
 
         var (inst, open, elsewhere) = await WhereLoadedAsync(vbp, cp.Files.Select(f => f.Path).ToList());
         // hard rule 4: never write under a file another IDE (or another project) has loaded

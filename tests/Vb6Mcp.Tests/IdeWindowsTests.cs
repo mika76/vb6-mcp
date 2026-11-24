@@ -17,6 +17,15 @@ public static class IdeWindowsTests
         Assert.Equal(IdeMode.Unknown, IdeWindows.ParseMode(""));
     }
 
+    [Test]
+    public static void ParsesGermanModeFromRealTitles()
+    {
+        Assert.Equal(IdeMode.Design, IdeWindows.ParseMode("Project1 - Microsoft Visual Basic [Entwerfen]"));
+        Assert.Equal(IdeMode.Run, IdeWindows.ParseMode("Project1 - Microsoft Visual Basic [Ausführen] - [Form1 (Code)]"));
+        Assert.Equal(IdeMode.Break, IdeWindows.ParseMode("Project1 - Microsoft Visual Basic [Unterbrechen] - [Form1 (Code)]"));
+        Assert.Equal(IdeMode.Unknown, IdeWindows.ParseMode("Project1 - Microsoft Visual Basic [unrecognized] - [Form1 [Entwerfen]]"));
+    }
+
     [Test, Category("IDE")]
     public static void ReadsAtLeastOneRunningIde()
     {

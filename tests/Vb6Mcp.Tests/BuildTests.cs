@@ -24,6 +24,22 @@ public static class BuildTests
         Assert.True(!open.Succeeded && open.Errors.Count == 1 && open.Errors[0].Kind == "other", "repeated line kept once");
     }
 
+    [Test]
+    public static void ParsesGermanBuildStatusesAndCompileErrorLocation()
+    {
+        var ok = BuildLog.Parse("'Basic.exe' wurde erfolgreich erstellt.");
+        Assert.True(ok.Succeeded && ok.Errors.Count == 0, "success");
+
+        var bad = BuildLog.Parse("Kompilierungsfehler in Datei 'D:\\s\\frmMain.frm', Zeile 6 : Variable nicht definiert\r\n" +
+                                 "Das Erstellen von 'Basic.exe' wurde mit einem Fehler abgebrochen.");
+        Assert.True(!bad.Succeeded, "failed");
+        var error = bad.Errors.Single();
+        Assert.Equal("compile", error.Kind);
+        Assert.Equal(@"D:\s\frmMain.frm", error.File);
+        Assert.Equal(7, error.Line ?? 0);
+        Assert.Equal("Variable nicht definiert", error.Message);
+    }
+
     /// <summary>build_in_ide when the code compiles but the make fails (improvement notes 20): what can be seen from here.</summary>
     [Test]
     public static void MakeFailureCausesNameTheOutputInUseOrMissingFolder()

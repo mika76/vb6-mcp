@@ -38,7 +38,7 @@ public static partial class BuildLog
             var line = raw.Trim();
             if (line.Length == 0) continue;
             var status = Status().Match(line);
-            if (status.Success) { ok |= status.Groups[1].Value.Equals("succeeded", StringComparison.OrdinalIgnoreCase); continue; }
+            if (status.Success) { ok |= status.Groups["success"].Success; continue; }
             var m = ErrorAt().Match(line);
             if (m.Success)
             {
@@ -57,10 +57,10 @@ public static partial class BuildLog
         return new BuildLogResult(ok && errors.Count == 0, errors);
     }
 
-    [GeneratedRegex(@"^Build of '.*' (succeeded|failed)\.?$", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"^(?:Build of '.*' (?:(?<success>succeeded)|failed)|'.*' wurde (?<success>erfolgreich erstellt)|Das Erstellen von '.*' wurde mit einem Fehler abgebrochen)\.?$", RegexOptions.IgnoreCase)]
     private static partial Regex Status();
 
-    [GeneratedRegex(@"in File '(?<file>[^']+)', Line (?<line>\d+)\s*:\s*(?<msg>.*)$", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"in (?:File|Datei) '(?<file>[^']+)', (?:Line|Zeile) (?<line>\d+)\s*:\s*(?<msg>.*)$", RegexOptions.IgnoreCase)]
     private static partial Regex ErrorAt();
 
     [GeneratedRegex(@"Refer to '(?<file>[^']+\.log)'", RegexOptions.IgnoreCase)]

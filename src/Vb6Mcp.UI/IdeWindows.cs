@@ -34,20 +34,22 @@ public static partial class IdeWindows
         var m = ModeTag().Match(title);
         return !m.Success ? IdeMode.Unknown : m.Groups[1].Value switch
         {
-            "design" => IdeMode.Design,
-            "run" => IdeMode.Run,
-            "break" => IdeMode.Break,
+            "design" or "Entwerfen" => IdeMode.Design,
+            "run" or "Ausführen" => IdeMode.Run,
+            "break" or "Unterbrechen" => IdeMode.Break,
             _ => IdeMode.Unknown,
         };
     }
 
-    [GeneratedRegex(@"\[(design|run|break)\]")]
+    [GeneratedRegex(@"(?:^| - )Microsoft Visual Basic \[(design|run|break|Entwerfen|Ausführen|Unterbrechen)\](?=$| - \[)")]
     private static partial Regex ModeTag();
 
     /// <summary>Reads title, mode, responsiveness and dialogs. <paramref name="probeMs"/> bounds the WM_NULL probe.</summary>
     public static IdeWindowState Read(int pid, uint probeMs = 1000)
     {
         var main = FindTopLevel((uint)pid, MainWindowClass);
+        // VB6 can hide the main frame while its visible owner still reports the IDE mode.
+        if (main == IntPtr.Zero) main = FindTopLevel((uint)pid, "IDEOwner");
         if (main == IntPtr.Zero)
             return new IdeWindowState(pid, false, "", IdeMode.Unknown, false, false, Dialogs(pid));
         // GetWindowText on another process's top-level window returns the cached caption without
